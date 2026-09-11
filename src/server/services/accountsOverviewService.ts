@@ -38,9 +38,11 @@ export type AccountsSnapshotPayload = {
   sites: Array<typeof schema.sites.$inferSelect>;
 };
 
+type CachedAccountsSnapshotPayload = Pick<AccountsSnapshotPayload, "accounts">;
+
 const ACCOUNTS_SNAPSHOT_TTL_MS = 15_000;
 const accountsSnapshotPersistence =
-  createAdminSnapshotPersistence<AccountsSnapshotPayload>({
+  createAdminSnapshotPersistence<CachedAccountsSnapshotPayload>({
     namespace: "accounts-snapshot",
     key: "all",
   });
@@ -99,15 +101,12 @@ function buildCapabilitiesForAccount(
   );
 }
 
-async function loadAccountsSnapshotPayload(): Promise<AccountsSnapshotPayload> {
-  const [rows, sites] = await Promise.all([
-    db
-      .select()
-      .from(schema.accounts)
-      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-      .all(),
-    db.select().from(schema.sites).all(),
-  ]);
+async function loadAccountsSnapshotPayload(): Promise<CachedAccountsSnapshotPayload> {
+  const rows = await db
+    .select()
+    .from(schema.accounts)
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .all();
 
   const { localDay, startUtc, endUtc } = getLocalDayRangeUtc();
 
@@ -212,19 +211,27 @@ async function loadAccountsSnapshotPayload(): Promise<AccountsSnapshotPayload> {
         }),
       };
     }),
-    sites,
   };
 }
 
 export async function getAccountsSnapshot(options?: {
   forceRefresh?: boolean;
 }): Promise<SnapshotEnvelope<AccountsSnapshotPayload>> {
-  return readSnapshotCache({
-    namespace: "accounts-snapshot",
-    key: "all",
-    ttlMs: ACCOUNTS_SNAPSHOT_TTL_MS,
-    forceRefresh: options?.forceRefresh,
-    persistence: accountsSnapshotPersistence,
-    loader: loadAccountsSnapshotPayload,
-  });
+  // Site choices must reflect mutations immediately, including when the account
+  // overview is served from an in-memory or persisted statistics snapshot.
+  const [snapshot, sites] = await Promise.all([
+    readSnapshotCache({
+      namespace: "accounts-snapshot",
+      key: "all",
+      ttlMs: ACCOUNTS_SNAPSHOT_TTL_MS,
+      forceRefresh: options?.forceRefresh,
+      persistence: accountsSnapshotPersistence,
+      loader: loadAccountsSnapshotPayload,
+    }),
+    db.select().from(schema.sites).all(),
+  ]);
+  return {
+    ...snapshot,
+    payload: { accounts: snapshot.payload.accounts, sites },
+  };
 }

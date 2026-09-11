@@ -1,0 +1,11 @@
+# Build from the preserved, clean upstream checkout.
+services:
+  metapi:
+    pull_policy: never
+    build:
+      context: ./docs/plans/metapi-upgrade-20260910-171321/source
+      dockerfile: docker/Dockerfile
+      labels:
+        org.opencontainers.image.source: https://github.com/ppBruce/metapi
+        org.opencontainers.image.revision: 06bbc6ecec64b017abc46488c8190a37c7735b6a
+        org.opencontainers.image.version: 1.7.2

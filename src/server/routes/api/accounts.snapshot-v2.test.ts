@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import {
   formatLocalDate,
   formatUtcSqlDateTime,
 } from "../../services/localTimeService.js";
+import { clearSnapshotCache } from "../../services/snapshotCacheService.js";
 
 type DbModule = typeof import("../../db/index.js");
 
@@ -25,14 +26,17 @@ describe("accounts snapshot v2", () => {
     await import("../../db/migrate.js");
     const dbModule = await import("../../db/index.js");
     const routesModule = await import("./accounts.js");
+    const sitesModule = await import("./sites.js");
     db = dbModule.db;
     schema = dbModule.schema;
 
     app = Fastify();
     await app.register(routesModule.accountsRoutes);
+    await app.register(sitesModule.sitesRoutes);
   });
 
   beforeEach(async () => {
+    clearSnapshotCache();
     await db.delete(schema.adminSnapshots).run();
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.checkinLogs).run();
@@ -43,6 +47,11 @@ describe("accounts snapshot v2", () => {
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
+  });
+
+  afterEach(() => {
+    clearSnapshotCache();
+    vi.unstubAllEnvs();
   });
 
   afterAll(async () => {
@@ -139,4 +148,53 @@ describe("accounts snapshot v2", () => {
       }),
     ]);
   });
+
+  it.each(["memory", "persisted"])(
+    "returns current site choices while reusing the %s accounts snapshot",
+    async (cacheSource) => {
+      vi.stubEnv("VITEST", "");
+
+      const initial = await app.inject({ method: "GET", url: "/api/accounts" });
+      expect(initial.statusCode).toBe(200);
+      expect(initial.json().sites).toEqual([]);
+
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sites",
+        payload: {
+          name: "new-site",
+          url: "https://new-site.example.com",
+          platform: "new-api",
+        },
+      });
+      expect(created.statusCode).toBe(200);
+      const siteId = created.json().id;
+
+      if (cacheSource === "persisted") clearSnapshotCache();
+
+      const afterCreate = await app.inject({ method: "GET", url: "/api/accounts" });
+      expect(afterCreate.headers["x-accounts-snapshot-cache"]).toBe("hit");
+      expect(afterCreate.json().generatedAt).toBe(initial.json().generatedAt);
+      expect(afterCreate.json().sites).toEqual([
+        expect.objectContaining({ id: siteId, name: "new-site" }),
+      ]);
+
+      const updated = await app.inject({
+        method: "PUT",
+        url: `/api/sites/${siteId}`,
+        payload: { name: "renamed-site", status: "disabled" },
+      });
+      expect(updated.statusCode).toBe(200);
+      const afterUpdate = await app.inject({ method: "GET", url: "/api/accounts" });
+      expect(afterUpdate.json().sites).toEqual([
+        expect.objectContaining({ id: siteId, name: "renamed-site", status: "disabled" }),
+      ]);
+
+      const deleted = await app.inject({ method: "DELETE", url: `/api/sites/${siteId}` });
+      expect(deleted.statusCode).toBe(200);
+      const afterDelete = await app.inject({ method: "GET", url: "/api/accounts" });
+      expect(afterDelete.headers["x-accounts-snapshot-cache"]).toBe("hit");
+      expect(afterDelete.json().sites).toEqual([]);
+    },
+  );
 });
