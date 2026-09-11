@@ -7,6 +7,9 @@ export type RouteListVisibilityItem = {
   routeMode?: string | null;
   sourceRouteIds?: number[];
   enabled: boolean;
+  kind?: string;
+  readOnly?: boolean;
+  isVirtual?: boolean;
 };
 
 function normalizeRouteMode(routeMode: string | null | undefined): 'pattern' | 'explicit_group' {
@@ -17,12 +20,6 @@ function isExplicitGroupRoute(route: Pick<RouteListVisibilityItem, 'routeMode'>)
   return normalizeRouteMode(route.routeMode) === 'explicit_group';
 }
 
-function hasCustomDisplayName(route: Pick<RouteListVisibilityItem, 'modelPattern' | 'displayName'>): boolean {
-  const displayName = (route.displayName || '').trim();
-  const modelPattern = (route.modelPattern || '').trim();
-  return !!displayName && displayName !== modelPattern;
-}
-
 export function buildVisibleRouteList<T extends RouteListVisibilityItem>(
   routes: T[],
   isExactModelPattern: (pattern: string) => boolean,
@@ -31,25 +28,26 @@ export function buildVisibleRouteList<T extends RouteListVisibilityItem>(
   const coveringGroups = routes.filter((route) => (
     route.enabled
     && (
-      (isExplicitGroupRoute(route) && ((route.displayName || '').trim().length > 0) && (route.sourceRouteIds || []).length > 0)
-      || (!isExplicitGroupRoute(route) && !isExactModelPattern(route.modelPattern) && hasCustomDisplayName(route))
+      (route.sourceRouteIds || []).length > 0
+      || (!isExplicitGroupRoute(route) && !isExactModelPattern(route.modelPattern))
     )
   ));
 
   if (coveringGroups.length === 0) return routes;
 
   return routes.filter((route) => {
-    if (isExplicitGroupRoute(route)) return true;
+    if (isExplicitGroupRoute(route) || (route.sourceRouteIds || []).length > 0) return true;
     if (!isExactModelPattern(route.modelPattern)) return true;
-    if (hasCustomDisplayName(route)) return true;
+    if (!route.enabled && route.kind !== 'zero_channel' && route.readOnly !== true && route.isVirtual !== true) return true;
 
     const exactModel = (route.modelPattern || '').trim();
     if (!exactModel) return true;
 
     return !coveringGroups.some((groupRoute) => {
       if (groupRoute.id === route.id) return false;
-      if (!((groupRoute.displayName || '').trim())) return false;
-      if (isExplicitGroupRoute(groupRoute)) {
+      // Management grouping follows membership, regardless of alias collisions
+      // or whether a source model has its own display name.
+      if (isExplicitGroupRoute(groupRoute) || (groupRoute.sourceRouteIds || []).length > 0) {
         return (groupRoute.sourceRouteIds || []).includes(route.id);
       }
       return matchesModelPattern(exactModel, groupRoute.modelPattern);

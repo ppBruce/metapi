@@ -40,6 +40,7 @@ import {
   isExplicitGroupRoute,
   isExactModelPattern,
   isRouteExactModel,
+  isRouteGroup,
   matchesModelPattern,
   normalizeRouteMode,
   resolveRouteTitle,
@@ -802,7 +803,7 @@ export default function TokenRoutes() {
 
   const groupRouteList = useMemo<GroupRouteItem[]>(() => (
     listVisibleRoutes
-      .filter((route) => !isRouteExactModel(route))
+      .filter((route) => isRouteGroup(route))
       .map((route) => ({
         id: route.id,
         title: resolveRouteTitle(route),
@@ -821,6 +822,9 @@ export default function TokenRoutes() {
 
   const sortedRoutes = useMemo(() => (
     [...listVisibleRoutes].sort((a, b) => {
+      const groupCmp = Number(isRouteGroup(b)) - Number(isRouteGroup(a));
+      if (groupCmp !== 0) return groupCmp;
+
       if (sortBy === 'channelCount') {
         const countCmp = a.channelCount - b.channelCount;
         if (countCmp !== 0) return sortDir === 'asc' ? countCmp : -countCmp;
@@ -836,7 +840,7 @@ export default function TokenRoutes() {
     let list = sortedRoutes;
 
     if (activeGroupFilter === '__all__') {
-      list = list.filter((route) => !isRouteExactModel(route));
+      list = list.filter((route) => isRouteGroup(route));
     } else if (typeof activeGroupFilter === 'number') {
       list = list.filter((route) => route.id === activeGroupFilter);
     }

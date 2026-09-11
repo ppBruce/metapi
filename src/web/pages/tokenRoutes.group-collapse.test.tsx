@@ -3,6 +3,7 @@ import { act, create, type ReactTestInstance } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
 import TokenRoutes from './TokenRoutes.js';
+import RouteCard from './token-routes/RouteCard.js';
 import { ROUTE_ICON_NONE_VALUE } from './token-routes/utils.js';
 
 const { apiMock, getBrandMock } = vi.hoisted(() => ({
@@ -1063,7 +1064,7 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
-  it('keeps exact routes visible when a group display name collides with a real exact model', async () => {
+  it('hides grouped exact routes even when the group name matches a source model', async () => {
     apiMock.getRoutesSummary.mockResolvedValue([
       {
         id: 1, modelPattern: 'gpt-4o-mini', displayName: 'gpt-4o-mini',
@@ -1101,6 +1102,47 @@ describe('TokenRoutes grouped source models', () => {
       const normalizedText = collectText(root.root).replace(/\s+/g, '');
       expect(normalizedText).toContain('共1条路由');
       expect(normalizedText).not.toContain('共3条路由');
+      expect(root.root.findAllByType(RouteCard).map((card) => card.props.route.id)).toEqual([3]);
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('pins manual groups before standalone models and sorts each section by channel count', async () => {
+    const defaults = {
+      displayIcon: null, modelMapping: null, enabled: true,
+      enabledChannelCount: 1, siteNames: [], decisionSnapshot: null, decisionRefreshedAt: null,
+    };
+    apiMock.getRoutesSummary.mockResolvedValue([
+      { ...defaults, id: 2, modelPattern: 'standalone-small', channelCount: 10 },
+      { ...defaults, id: 5, modelPattern: 'shared-name', displayName: 'shared-name', channelCount: 4 },
+      { ...defaults, id: 3, modelPattern: 'cloud-*', displayName: 'Cloud group', channelCount: 2 },
+      { ...defaults, id: 1, modelPattern: 'standalone-big', channelCount: 50 },
+      {
+        ...defaults, id: 4, modelPattern: 'shared-name', displayName: 'shared-name',
+        routeMode: 'explicit_group', sourceRouteIds: [5, 6], channelCount: 6,
+      },
+      { ...defaults, id: 6, modelPattern: 'vendor-model', displayName: 'source-alias', channelCount: 2 },
+    ]);
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider><TokenRoutes /></ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const routeIds = () => root.root.findAllByType(RouteCard).map((card) => card.props.route.id);
+      expect(routeIds()).toEqual([4, 3, 1, 2]);
+
+      await act(async () => {
+        findButtonByText(root.root, '降序').props.onClick();
+      });
+      expect(routeIds()).toEqual([3, 4, 2, 1]);
     } finally {
       root?.unmount();
     }

@@ -29,6 +29,18 @@ export function isRouteExactModel(route: Pick<RouteRow | RouteSummaryRow, 'model
   return !isExplicitGroupRoute(route) && isExactModelPattern(route.modelPattern);
 }
 
+/** Treat explicit, pattern, and source-member routes as groups. */
+export function isRouteGroup(route: Pick<RouteRow | RouteSummaryRow, 'modelPattern' | 'routeMode' | 'sourceRouteIds' | 'displayName'>): boolean {
+  const displayName = (route.displayName || '').trim().toLowerCase();
+  return isExplicitGroupRoute(route)
+    || !isExactModelPattern(route.modelPattern)
+    || (Array.isArray(route.sourceRouteIds) && route.sourceRouteIds.length > 0)
+    // Legacy group rows may have lost route_mode/sourceRouteIds but retain
+    // their public group title. A titled route is presented as a group in the
+    // management UI, so keep it in the group section regardless of its pattern.
+    || !!displayName;
+}
+
 export function parseRegexModelPattern(modelPattern: string): { regex: { test(value: string): boolean } | null; error: string | null } {
   return parseTokenRouteRegexPattern(modelPattern);
 }

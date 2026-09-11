@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +8,7 @@ import {
   formatLocalDate,
   formatUtcSqlDateTime,
 } from '../../services/localTimeService.js';
+import { clearSnapshotCache } from '../../services/snapshotCacheService.js';
 
 type DbModule = typeof import('../../db/index.js');
 
@@ -33,6 +35,7 @@ describe('accounts snapshot v2', () => {
   });
 
   beforeEach(async () => {
+    clearSnapshotCache();
     await db.delete(schema.adminSnapshots).run();
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.checkinLogs).run();
@@ -43,6 +46,11 @@ describe('accounts snapshot v2', () => {
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
+  });
+
+  afterEach(() => {
+    clearSnapshotCache();
+    vi.unstubAllEnvs();
   });
 
   afterAll(async () => {
@@ -139,4 +147,46 @@ describe('accounts snapshot v2', () => {
       }),
     ]);
   });
+
+  it.each(['memory', 'persisted'])(
+    'returns current site choices while reusing the %s accounts snapshot',
+    async (cacheSource) => {
+      vi.stubEnv('VITEST', '');
+
+      const initial = await app.inject({ method: 'GET', url: '/api/accounts' });
+      expect(initial.statusCode).toBe(200);
+      expect(initial.json().sites).toEqual([]);
+
+      // Mutate storage without the site routes' explicit cache invalidation to
+      // exercise the fallback when another writer changes the available sites.
+      const created = await db.insert(schema.sites).values({
+        name: 'new-site',
+        url: 'https://new-site.example.com',
+        platform: 'new-api',
+      }).returning().get();
+      const siteId = created.id;
+
+      if (cacheSource === 'persisted') clearSnapshotCache();
+
+      const afterCreate = await app.inject({ method: 'GET', url: '/api/accounts' });
+      expect(afterCreate.headers['x-accounts-snapshot-cache']).toBe('hit');
+      expect(afterCreate.json().generatedAt).toBe(initial.json().generatedAt);
+      expect(afterCreate.json().sites).toEqual([
+        expect.objectContaining({ id: siteId, name: 'new-site' }),
+      ]);
+
+      await db.update(schema.sites)
+        .set({ name: 'renamed-site', status: 'disabled' })
+        .where(eq(schema.sites.id, siteId)).run();
+      const afterUpdate = await app.inject({ method: 'GET', url: '/api/accounts' });
+      expect(afterUpdate.json().sites).toEqual([
+        expect.objectContaining({ id: siteId, name: 'renamed-site', status: 'disabled' }),
+      ]);
+
+      await db.delete(schema.sites).where(eq(schema.sites.id, siteId)).run();
+      const afterDelete = await app.inject({ method: 'GET', url: '/api/accounts' });
+      expect(afterDelete.headers['x-accounts-snapshot-cache']).toBe('hit');
+      expect(afterDelete.json().sites).toEqual([]);
+    },
+  );
 });
