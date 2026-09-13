@@ -14,7 +14,7 @@ Metapi 当前有三类主要配置入口：
 
 1. **管理后台「设置」** — 适合日常系统设置与运行时调整
 2. **管理后台「通知设置」与「下游密钥」** — 适合通知渠道和项目级下游 Key 管理
-3. **环境变量** — 适合首次启动、部署级参数、OAuth client 覆盖、Deploy Helper token 等当前没有 UI 的项
+3. **环境变量** — 适合首次启动、部署级参数、OAuth client 覆盖等当前没有 UI 的项
 
 下表可用于快速判断：
 
@@ -25,7 +25,6 @@ Metapi 当前有三类主要配置入口：
 | 下游项目级 Key | 管理后台「下游密钥」 | 不要再回到环境变量里硬塞 |
 | 首次启动令牌、端口、数据目录 | `.env` / 容器环境变量 | 这类属于部署级初始化 |
 | OAuth 客户端 ID / Secret | `.env` / 容器环境变量 | 当前没有 UI |
-| Deploy Helper token / helper 进程参数 | `.env` / helper manifest | 当前没有 UI，且属于集群侧部署参数 |
 | 少数高级部署级参数 | `.env` / 容器环境变量 | 例如日志保留、部分探测细粒度参数 |
 
 ---
@@ -50,7 +49,7 @@ Metapi 当前有三类主要配置入口：
 | 全局品牌屏蔽 | 全局品牌屏蔽 | 保存后即时生效，并触发路由重建 |
 | 全局模型白名单 | 全局模型白名单 | 保存后即时生效，并触发路由重建 |
 | 数据库迁移 / 运行数据库 | `DB_TYPE`、`DB_URL`、`DB_SSL` | 保存后下次后端重启生效 |
-| 更新中心 | K3s / Helm 更新中心配置 | 保存后即时生效 |
+| 更新中心 | 版本检查与提醒（只读） | 点击「检查更新」后即时刷新 |
 | 会话与安全 | `ADMIN_IP_ALLOWLIST` | 保存后即时生效 |
 
 > [!TIP]
@@ -170,46 +169,7 @@ Metapi 当前有三类主要配置入口：
 - 如果你的部署环境访问 provider 受限，优先先在 UI 里配置**系统代理**。
 - 如果 OAuth 页面运行在远程服务器上，还要考虑 SSH 隧道或手动回填 callback，详见 [OAuth 管理](./oauth.md)。
 
-### 3. K3s 更新中心与 Deploy Helper
-
-这里要分清楚两层：
-
-- **主 Metapi 后台里的日常更新中心配置**：优先在 UI 里填
-- **主服务访问 helper 的 token / helper 自己的监听参数**：仍然是环境变量
-
-#### 主 Metapi 服务
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `DEPLOY_HELPER_TOKEN` | 主服务访问 Deploy Helper 的 Bearer Token | 空 |
-| `UPDATE_CENTER_HELPER_TOKEN` | `DEPLOY_HELPER_TOKEN` 的兼容别名，二选一即可 | 空 |
-
-#### Deploy Helper 服务
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `DEPLOY_HELPER_HOST` | helper 监听地址 | `0.0.0.0` |
-| `DEPLOY_HELPER_PORT` | helper 监听端口 | `9850` |
-| `DEPLOY_HELPER_TOKEN` | helper Bearer Token，必须和主服务一致 | 空 |
-
-#### 更新中心里真正建议在 UI 配的字段
-
-这些字段不建议再教用户去改 env，而是直接去：
-
-**设置 → 更新中心**
-
-- `helperBaseUrl`
-- `namespace`
-- `releaseName`
-- `chartRef`
-- `imageRepository`
-- `githubReleasesEnabled`
-- `dockerHubTagsEnabled`
-- `defaultDeploySource`
-
-完整接入步骤见 [K3s 更新中心（高级）](./k3s-update-center.md)。
-
-### 4. 当前没有 UI 的高级部署级参数
+### 3. 当前没有 UI 的高级部署级参数
 
 下面这些参数目前更偏部署级，仍然建议通过环境变量维护：
 
@@ -360,8 +320,6 @@ Metapi 当前有三类主要配置入口：
 - 时区
 - 账号凭证加密密钥
 - OAuth client 覆盖
-- Deploy Helper token
-- helper 进程自身监听参数
 - 少数高级部署级性能 / 清理参数
 
 ---
@@ -465,12 +423,10 @@ Metapi 当前的配置关系可以概括为：
 - 首次发现新的版本候选或新的 Docker digest 时，会写入站内通知，并按现有通知渠道外发一次
 - 相同候选后续重复检查只更新本地运行时状态，不会重复外发同一条提醒
 - 这类提醒不会自动触发部署，只是把用户带到「设置 → 更新中心」继续手动确认和执行
-- K3s 用户可以在收到提醒后直接去更新中心部署；Compose 用户也可以收到提醒，但仍按自己的升级方式处理
 
 ## 下一步
 
 - [部署指南](./deployment.md) — Docker Compose 与反向代理
-- [K3s 更新中心（高级）](./k3s-update-center.md) — K3s / Helm 用户的后台升级入口
 - [客户端接入](./client-integration.md) — 对接下游应用
 - [上游接入](./upstream-integration.md) — 添加和管理上游平台
 - [OAuth 管理](./oauth.md) — 授权 Codex / Claude / Gemini CLI / Antigravity

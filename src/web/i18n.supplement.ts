@@ -1626,7 +1626,6 @@ export const zhToEnSupplemental: Record<string, string> = {
   '以当前容器内运行版本为准。': 'Based on the currently running container version.',
   '优先使用仓库稳定版 release，适合保留语义化版本节奏。': 'Prefer stable releases. Suitable for semantic versioning.',
   '保存配置后，手动部署默认优先使用这里的来源。': 'After saving config, manual deploy defaults to this source.',
-  '允许通过本页触发 K3s 部署。后台版本提醒会按已启用来源持续检查。': 'Allow triggering K3s deploy from this page. Background version checks run continuously.',
   '可以先新增一条密钥，或调整筛选条件查看已有数据。': 'Create a new key first, or adjust filters to view existing data.',
   '可先同步站点令牌，或直接在站点创建新令牌。': 'Sync site tokens first, or create new tokens directly at the site.',
   '可跟随全局策略，也可为当前密钥强制开启或关闭。': 'Can follow global policy, or force on/off for this key.',
