@@ -38,6 +38,16 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Build OTA app bundle
+        run: npm run release:ota-bundle
+
+      - name: Upload OTA app bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: metapi-ota-bundle-${{ github.sha }}
+          path: release-assets/*
+          if-no-files-found: error
+
       - name: Upload built dist
         uses: actions/upload-artifact@v7
         with:

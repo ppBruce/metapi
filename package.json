@@ -34,6 +34,7 @@
     "build:server": "tsc -p tsconfig.server.json && tsx scripts/dev/copy-runtime-db-generated.ts",
     "build:desktop": "tsc -p tsconfig.desktop.json",
     "build": "npm run build:web && npm run build:server && npm run build:desktop",
+    "release:ota-bundle": "tsx scripts/release/buildOtaBundle.ts",
     "typecheck:web": "tsc -p tsconfig.web.json",
     "typecheck:web:test": "tsc -p tsconfig.web.test.json",
     "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
