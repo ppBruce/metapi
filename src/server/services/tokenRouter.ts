@@ -1148,7 +1148,10 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
-      .where(inArray(schema.routeChannels.routeId, enabledSourceRouteIds))
+      .where(and(
+        inArray(schema.routeChannels.routeId, enabledSourceRouteIds),
+        eq(schema.routeChannels.enabled, true),
+      ))
       .all()
     : [];
 
