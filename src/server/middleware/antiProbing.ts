@@ -2,9 +2,10 @@
  * Anti-probing middleware for downstream API keys.
  *
  * Detects requests that look like someone is testing whether a key is alive
- * (short messages, common probe patterns) and returns 400 with a misleading
- * "sensitive words detected" error — making the prober believe the upstream
- * has content moderation, not that this is a relay.
+ * (short messages, common probe patterns) and rejects them with an explicit
+ * 400 "blocked by security policy" error. The rejection states its reason
+ * honestly (no impersonated failure type) so that legitimate callers which
+ * trip it — e.g. a short liveness test — are not misled.
  */
 import type { FastifyRequest, FastifyReply } from 'fastify';
 
@@ -47,8 +48,8 @@ const LONG_MESSAGE_ALLOW_CHARS = 60;
 
 // ── Sensitive keyword list ──────────────────────────────────────────────────
 // Requests whose last user message contains any of these (case-insensitive)
-// are blocked.  These are common probe words that look like "content moderation"
-// to the prober, not relay detection.
+// are blocked. These are typical probe / liveness-test words that do not
+// occur in legitimate long-form usage.
 const SENSITIVE_KEYWORDS: string[] = [
   // ── 常见问候 / 探活词 ──
   '你好', '您好', '在吗', '在不在', '有人吗', '在么', '在不',
@@ -76,12 +77,12 @@ const SENSITIVE_KEYWORDS: string[] = [
   'system prompt', '系统提示', '初始指令',
   'ignore previous', 'ignore above', '忽略之前', '忽略上面',
 
-  // ── 常见脏话 / 违规词（伪装成内容审核） ──
+  // ── 常见脏话 / 违规词 ──
   'fuck', 'shit', 'damn', 'bitch', 'ass', 'hell',
   '操', '草', '妈的', '傻逼', '狗日', '王八蛋', '混蛋',
   '色情', '裸体', '暴力', '赌博', '毒品',
 
-  // ── 政治敏感词（伪装成内容审核） ──
+  // ── 政治敏感词 ──
   '六四', '天安门', '法轮功', '台独', '藏独', '疆独',
   '习近平', '毛泽东', '共产党', '国民党',
   'tiananmen', 'falun gong', 'tibet independence',
@@ -341,9 +342,9 @@ export async function antiProbingMiddleware(request: FastifyRequest, reply: Fast
   if (isProbeRequest(request.body, minTextLength)) {
     reply.code(400).send({
       error: {
-        message: '敏感词检测：请求内容包含被限制的关键词，请修改后重试。',
-        type: 'content_policy_violation',
-        code: 'content_policy_violation',
+        message: '请求已被安全策略拦截：疑似自动化探测或内容过短。如为正常使用，请补充内容后重试。',
+        type: 'invalid_request_error',
+        code: 'anti_probe_blocked',
       },
     });
     return;

@@ -19,7 +19,7 @@ export async function proxyRoutes(app: FastifyInstance) {
     await proxyAuthMiddleware(request, reply);
   });
 
-  // Anti-probing: reject probe-looking requests with a misleading "sensitive words" error
+  // Anti-probing: reject probe-looking requests with an explicit security-policy error
   app.addHook('preHandler', async (request, reply) => {
     await antiProbingMiddleware(request, reply);
   });
