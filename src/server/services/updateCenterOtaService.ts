@@ -7,22 +7,31 @@
  * 容器启动命令本来就会先跑迁移（`node dist/server/db/migrate.js`）。
  *
  * 设计边界（评估见仓库根目录的 OTA 评估文档）：
- * - 仅 Docker 部署开放（`/.dockerenv` 探测；演练/开发用 METAPI_OTA_ALLOW_NON_DOCKER=1）。
+ * - Docker 部署默认开放（`/.dockerenv` 探测）；宿主机直跑用 METAPI_OTA_HOST_MODE=1 启用。
  * - 依赖发生变更的版本由 depsSignature 拦下，引导走镜像更新（见 updateCenterOtaManifest）。
  * - 容器被重建时写入层丢失，会回到镜像基线版本——更新中心如实展示（applied.json 随层消失）。
  * - 备份保留在 <appRoot>/.ota/backup-*，支持一键回滚。
  *
+ * 宿主机模式（METAPI_OTA_HOST_MODE=1）的提权阶梯（"像桌面软件一样，需要提权时自己弹窗"）：
+ * 1. 应用目录对运行用户可写 → 直接替换（零提权）；重启依赖 systemd 等守护（退出后自动拉起）；
+ * 2. 不可写、但有图形会话（DISPLAY/WAYLAND_DISPLAY）且 pkexec 可用 → 应用自己调用 pkexec，
+ *    由系统弹出 polkit 图形授权窗，随后以 root 执行生成的 ota-apply.sh（备份/替换/修复属主/写记录）；
+ * 3. 不可写且无图形会话（真 headless）→ 物理上无窗可弹；生成 `sudo sh <脚本>` 命令交由管理员在终端执行。
+ * 备注：宿主机 + root 属主场景的"自动回滚"暂不在支持范围（可用备份目录手动恢复，后续 P2）。
+ *
  * 测试/演练环境变量（仅内部使用）：
  * - METAPI_OTA_APP_ROOT            指定应用根（默认 process.cwd()）
- * - METAPI_OTA_ALLOW_NON_DOCKER=1  允许非 Docker 环境应用（演练用）
- * - METAPI_OTA_SKIP_RESTART=1      应用后不退出进程（演练用）
- * - METAPI_OTA_BUNDLE_DIR          从本地目录取包，跳过 GitHub（演练用）
+ * - METAPI_OTA_HOST_MODE=1         启用宿主机直跑模式
+ * - METAPI_OTA_ALLOW_NON_DOCKER=1  演练用：让非 Docker 环境按 Docker 语义运行
+ * - METAPI_OTA_SKIP_RESTART=1      演练用：应用后不退出进程
+ * - METAPI_OTA_BUNDLE_DIR          演练用：从本地目录取包，跳过 GitHub
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   createWriteStream,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -30,6 +39,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { fetch } from 'undici';
@@ -51,8 +61,9 @@ const DOWNLOAD_TIMEOUT_MS = 300_000;
 const JSON_TIMEOUT_MS = 15_000;
 const MAX_BUNDLE_BYTES = 200 * 1024 * 1024;
 const SWAP_ENTRIES = ['dist', 'drizzle', 'package.json'] as const;
+const PKEXEC_TIMEOUT_MS = 5 * 60 * 1000;
 
-export type OtaPhase = 'idle' | 'downloading' | 'verifying' | 'applying' | 'restarting' | 'failed';
+export type OtaPhase = 'idle' | 'downloading' | 'verifying' | 'applying' | 'restarting' | 'manual-required' | 'failed';
 
 export type OtaState = {
   phase: OtaPhase;
@@ -60,6 +71,8 @@ export type OtaState = {
   version?: string;
   progressPct?: number;
   error?: string;
+  /** manual-required 阶段：供管理员复制的终端命令 */
+  command?: string;
   startedAt?: string;
   finishedAt?: string;
 };
@@ -105,15 +118,93 @@ function isDockerRuntime(): boolean {
   return String(process.env.METAPI_OTA_ALLOW_NON_DOCKER || '') === '1';
 }
 
+export type OtaMode = 'docker' | 'host' | 'disabled';
+export type OtaHostTier = 'direct' | 'pkexec' | 'manual';
+
+export type OtaHostInfo = {
+  writableAppRoot: boolean;
+  graphicalSession: boolean;
+  pkexecAvailable: boolean;
+  supervised: boolean;
+  tier: OtaHostTier;
+};
+
+export function resolveOtaMode(): OtaMode {
+  if (isDockerRuntime()) return 'docker';
+  if (String(process.env.METAPI_OTA_HOST_MODE || '') === '1') return 'host';
+  return 'disabled';
+}
+
 export function getOtaSupport(): { supported: boolean; reason?: string } {
-  if (!isDockerRuntime()) {
-    return { supported: false, reason: '在线更新仅在 Docker / Compose 部署下开放' };
+  const mode = resolveOtaMode();
+  if (mode === 'disabled') {
+    return { supported: false, reason: '在线更新仅支持 Docker 部署，或经 METAPI_OTA_HOST_MODE=1 启用的宿主机部署' };
   }
   const root = resolveAppRoot();
   if (!existsSync(join(root, 'package.json')) || !existsSync(join(root, 'dist/server/index.js'))) {
     return { supported: false, reason: '应用目录结构不符合预期，无法在线更新' };
   }
   return { supported: true };
+}
+
+/** 探测应用根目录对当前进程是否可写（宿主机模式下决定提权路径）。 */
+export function probeAppRootWritable(root = resolveAppRoot()): boolean {
+  try {
+    const probe = join(root, `.ota-write-probe-${process.pid}-${Date.now()}`);
+    writeFileSync(probe, '');
+    rmSync(probe, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function hasGraphicalSession(): boolean {
+  return Boolean(
+    String(process.env.DISPLAY || '').trim() || String(process.env.WAYLAND_DISPLAY || '').trim(),
+  );
+}
+
+export function isPkexecAvailable(): boolean {
+  return existsSync('/usr/bin/pkexec') || existsSync('/bin/pkexec') || existsSync('/usr/local/bin/pkexec');
+}
+
+/** systemd 服务（INVOCATION_ID）或直接被 PID 1 托管时，退出后可自动拉起。 */
+export function isSupervisedRuntime(): boolean {
+  if (String(process.env.INVOCATION_ID || '').trim()) return true;
+  return typeof process.ppid === 'number' && process.ppid === 1;
+}
+
+export function decideHostApplyTier(input: {
+  writableAppRoot: boolean;
+  graphicalSession: boolean;
+  pkexecAvailable: boolean;
+}): OtaHostTier {
+  if (input.writableAppRoot) return 'direct';
+  if (input.graphicalSession && input.pkexecAvailable) return 'pkexec';
+  return 'manual';
+}
+
+const HOST_INFO_TTL_MS = 15_000;
+let hostInfoCache: { at: number; root: string; value: OtaHostInfo } | null = null;
+
+export function collectOtaHostInfo(root = resolveAppRoot()): OtaHostInfo {
+  const now = Date.now();
+  if (hostInfoCache && hostInfoCache.root === root && now - hostInfoCache.at < HOST_INFO_TTL_MS) {
+    return hostInfoCache.value;
+  }
+  const writableAppRoot = probeAppRootWritable(root);
+  const graphicalSession = hasGraphicalSession();
+  const pkexecAvailable = isPkexecAvailable();
+  const value: OtaHostInfo = {
+    writableAppRoot,
+    graphicalSession,
+    pkexecAvailable,
+    supervised: isSupervisedRuntime(),
+    tier: decideHostApplyTier({ writableAppRoot, graphicalSession, pkexecAvailable }),
+  };
+  hostInfoCache = { at: now, root, value };
+  return value;
 }
 
 function otaDir(root: string): string {
@@ -265,8 +356,10 @@ export function extractAndValidateBundle(input: {
   root: string;
   tarballPath: string;
   targetVersion: string;
+  /** 暂存根目录（宿主机且应用目录不可写时用 /tmp 下的临时目录） */
+  stagingRoot?: string;
 }): { stagingDir: string; manifest: OtaManifest } {
-  const dir = otaDir(input.root);
+  const dir = input.stagingRoot || otaDir(input.root);
   mkdirSync(dir, { recursive: true });
   const stagingDir = join(dir, `staging-${input.targetVersion}-${Date.now()}`);
   rmSync(stagingDir, { recursive: true, force: true });
@@ -381,6 +474,90 @@ export function rollbackAppliedBundle(input: { root: string }): { toVersion: str
   return { toVersion: info.fromVersion };
 }
 
+function shSingleQuote(value: string): string {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * 生成提权执行脚本（pkexec / sudo 运行）。脚本职责：备份 → 替换 → 修复属主 → 写 applied.json。
+ * 脚本位于暂存目录内，内容只由本服务生成（路径全部 shell 转义）。
+ */
+export function generateHostApplyScript(input: {
+  root: string;
+  stagingDir: string;
+  backupDir: string;
+  targetVersion: string;
+  previousVersion: string;
+  gitSha: string;
+  runUid: number;
+  runGid: number;
+}): string {
+  const q = shSingleQuote;
+  const appliedRecord = `${JSON.stringify({
+    status: 'pending',
+    version: input.targetVersion,
+    fromVersion: input.previousVersion,
+    gitSha: input.gitSha,
+    appliedAt: new Date().toISOString(),
+    backupDir: input.backupDir,
+  }, null, 2)}\n`;
+  return `#!/bin/sh
+# metapi 在线更新（宿主机模式）—— 由更新中心生成，需以 root 执行（pkexec 弹窗 / sudo）。
+set -e
+
+APP_ROOT=${q(input.root)}
+STAGING=${q(input.stagingDir)}
+BACKUP=${q(input.backupDir)}
+RUN_UID=${input.runUid}
+RUN_GID=${input.runGid}
+OTA_DIR="$APP_ROOT/.ota"
+
+if [ "$(id -u)" != "0" ]; then
+  echo "需要 root 权限执行：sudo sh $0" >&2
+  exit 1
+fi
+
+mkdir -p "$OTA_DIR" "$BACKUP"
+
+owner_of() {
+  if [ -e "$1" ]; then
+    stat -c '%u:%g' "$1" 2>/dev/null || echo "$RUN_UID:$RUN_GID"
+  else
+    echo "$RUN_UID:$RUN_GID"
+  fi
+}
+
+DIST_OWNER=$(owner_of "$APP_ROOT/dist")
+DRIZZLE_OWNER=$(owner_of "$APP_ROOT/drizzle")
+PKG_OWNER=$(owner_of "$APP_ROOT/package.json")
+
+for entry in dist drizzle package.json; do
+  if [ -e "$APP_ROOT/$entry" ]; then
+    rm -rf "$BACKUP/$entry"
+    mv "$APP_ROOT/$entry" "$BACKUP/$entry"
+  fi
+  mv "$STAGING/$entry" "$APP_ROOT/$entry"
+done
+
+chown -R "$DIST_OWNER" "$APP_ROOT/dist"
+chown -R "$DRIZZLE_OWNER" "$APP_ROOT/drizzle"
+chown "$PKG_OWNER" "$APP_ROOT/package.json"
+
+# .ota 交给应用用户，后续状态读写不再需要 root
+chown -R "$RUN_UID:$RUN_GID" "$OTA_DIR" 2>/dev/null || true
+
+printf '%s' ${q(appliedRecord)} > "$OTA_DIR/applied.json"
+
+# 只保留最新一份备份
+for d in "$OTA_DIR"/backup-*; do
+  [ -d "$d" ] || continue
+  [ "$d" = "$BACKUP" ] || rm -rf "$d"
+done
+
+echo "metapi OTA applied: v${input.previousVersion} -> v${input.targetVersion}"
+`;
+}
+
 /**
  * 清理 OTA 暂存物。
  *
@@ -418,10 +595,30 @@ function scheduleProcessExit(): void {
   timer.unref?.();
 }
 
+function finishHostApply(version: string, hostInfo: OtaHostInfo): void {
+  if (hostInfo.supervised) {
+    setOtaState({
+      phase: 'restarting',
+      message: `v${version} 已就位，进程即将重启加载新版本（检测到进程守护，将自动拉起）；重启后请刷新页面`,
+      progressPct: 100,
+      finishedAt: new Date().toISOString(),
+    });
+    scheduleProcessExit();
+  } else {
+    setOtaState({
+      phase: 'restarting',
+      message: `v${version} 已替换完成，但未检测到进程守护（systemd 等）；请手动重启 metapi 以加载新版本`,
+      progressPct: 100,
+      finishedAt: new Date().toISOString(),
+    });
+  }
+}
+
 export async function startOtaApply(version: string): Promise<void> {
   if (otaRunning) throw new Error('已有在线更新任务进行中');
   otaRunning = true;
   const root = resolveAppRoot();
+  const mode = resolveOtaMode();
   const startedAt = new Date().toISOString();
   setOtaState({
     phase: 'downloading',
@@ -429,20 +626,30 @@ export async function startOtaApply(version: string): Promise<void> {
     version,
     progressPct: 0,
     error: undefined,
+    command: undefined,
     startedAt,
     finishedAt: undefined,
   });
 
   try {
+    if (mode === 'disabled') {
+      throw new Error('在线更新未启用（非 Docker 部署且未设置 METAPI_OTA_HOST_MODE=1）');
+    }
     cleanupOtaScratch(root);
     const running = readRunningPackageJson(root);
     if (running.version === version) {
       throw new Error(`当前已经是 v${version}`);
     }
 
+    // 宿主机模式：先探测环境，决定暂存位置与提权路径
+    const hostInfo = mode === 'host' ? collectOtaHostInfo(root) : null;
+    const stagingBase = hostInfo && !hostInfo.writableAppRoot
+      ? mkdtempSync(join(tmpdir(), 'metapi-ota-'))
+      : otaDir(root);
+    mkdirSync(stagingBase, { recursive: true });
+
     const location = await resolveBundleLocation(version);
-    const downloadPath = join(otaDir(root), `download-${version}.tar.gz`);
-    mkdirSync(otaDir(root), { recursive: true });
+    const downloadPath = join(stagingBase, `download-${version}.tar.gz`);
     await downloadBundle(location, downloadPath);
 
     setOtaState({ phase: 'verifying', message: '正在校验更新包', progressPct: undefined });
@@ -453,26 +660,102 @@ export async function startOtaApply(version: string): Promise<void> {
       root,
       tarballPath: downloadPath,
       targetVersion: version,
+      stagingRoot: stagingBase,
     });
 
-    setOtaState({ phase: 'applying', message: '正在替换应用文件' });
-    applyStagedBundle({
+    const gitSha = manifest.gitSha || digest.slice(0, 12);
+
+    if (mode === 'docker') {
+      // Docker 容器路径：直接替换 + 退出由容器重启策略拉起
+      setOtaState({ phase: 'applying', message: '正在替换应用文件' });
+      applyStagedBundle({
+        root,
+        stagingDir,
+        targetVersion: version,
+        previousVersion: running.version,
+        gitSha,
+      });
+      rmSync(stagingDir, { recursive: true, force: true });
+      rmSync(downloadPath, { recursive: true, force: true });
+
+      setOtaState({
+        phase: 'restarting',
+        message: `v${version} 已就位，进程即将重启加载新版本；重启后请刷新页面（旧页面引用的资源哈希会失效）`,
+        progressPct: 100,
+        finishedAt: new Date().toISOString(),
+      });
+      scheduleProcessExit();
+      return;
+    }
+
+    // ── 宿主机模式：按提权阶梯执行 ──
+    const host = hostInfo as OtaHostInfo;
+
+    if (host.tier === 'direct') {
+      setOtaState({ phase: 'applying', message: '正在替换应用文件（目录可写，零提权）' });
+      applyStagedBundle({
+        root,
+        stagingDir,
+        targetVersion: version,
+        previousVersion: running.version,
+        gitSha,
+      });
+      rmSync(stagingDir, { recursive: true, force: true });
+      rmSync(downloadPath, { recursive: true, force: true });
+      finishHostApply(version, host);
+      return;
+    }
+
+    // 需要 root：生成提权脚本（pkexec 弹窗执行 / 交给管理员终端执行）
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupDir = join(root, OTA_DIR_NAME, `backup-${running.version}-${stamp}`);
+    const scriptPath = join(stagingDir, 'ota-apply.sh');
+    writeFileSync(scriptPath, generateHostApplyScript({
       root,
       stagingDir,
+      backupDir,
       targetVersion: version,
       previousVersion: running.version,
-      gitSha: manifest.gitSha || digest.slice(0, 12),
-    });
-    rmSync(stagingDir, { recursive: true, force: true });
-    rmSync(downloadPath, { recursive: true, force: true });
+      gitSha,
+      runUid: typeof process.getuid === 'function' ? process.getuid() : 0,
+      runGid: typeof process.getgid === 'function' ? process.getgid() : 0,
+    }), { mode: 0o755 });
 
+    const manualCommand = `sudo sh ${scriptPath}`;
+
+    if (host.tier === 'pkexec') {
+      setOtaState({ phase: 'applying', message: '正在请求系统授权（polkit 授权窗），请完成授权…' });
+      const result = spawnSync('pkexec', ['/bin/sh', scriptPath], {
+        encoding: 'utf8',
+        timeout: PKEXEC_TIMEOUT_MS,
+      });
+      if (result.status === 0) {
+        rmSync(stagingDir, { recursive: true, force: true });
+        rmSync(downloadPath, { recursive: true, force: true });
+        finishHostApply(version, host);
+        return;
+      }
+      const reason = result.error
+        ? summarizeError(result.error)
+        : result.status === 126
+          ? '授权被取消或未通过（polkit）'
+          : `提权脚本退出码 ${result.status ?? '未知'}`;
+      setOtaState({
+        phase: 'manual-required',
+        message: `自动提权未完成（${reason}）。可复制以下命令在终端执行：`,
+        command: manualCommand,
+        finishedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // 无图形会话（真 headless）：交给管理员终端执行
     setOtaState({
-      phase: 'restarting',
-      message: `v${version} 已就位，进程即将重启加载新版本；重启后请刷新页面（旧页面引用的资源哈希会失效）`,
-      progressPct: 100,
+      phase: 'manual-required',
+      message: '未检测到图形会话，无法弹出系统授权窗。请复制以下命令在终端执行（sudo 会提示密码）：',
+      command: manualCommand,
       finishedAt: new Date().toISOString(),
     });
-    scheduleProcessExit();
   } catch (error) {
     setOtaState({
       phase: 'failed',
@@ -491,14 +774,20 @@ export async function startOtaRollback(): Promise<{ toVersion: string }> {
   otaRunning = true;
   try {
     const root = resolveAppRoot();
+    if (resolveOtaMode() === 'host' && !probeAppRootWritable(root)) {
+      throw new Error('宿主机模式下应用目录不可写，暂不支持自动回滚；请用 .ota/backup-* 手动恢复');
+    }
     const result = rollbackAppliedBundle({ root });
+    const supervised = resolveOtaMode() !== 'host' || isSupervisedRuntime();
     setOtaState({
       phase: 'restarting',
-      message: `已回滚到 v${result.toVersion}，进程即将重启`,
+      message: supervised
+        ? `已回滚到 v${result.toVersion}，进程即将重启`
+        : `已回滚到 v${result.toVersion}；未检测到进程守护，请手动重启 metapi`,
       version: result.toVersion,
       finishedAt: new Date().toISOString(),
     });
-    scheduleProcessExit();
+    if (supervised) scheduleProcessExit();
     return result;
   } finally {
     otaRunning = false;
@@ -508,15 +797,20 @@ export async function startOtaRollback(): Promise<{ toVersion: string }> {
 export function getOtaStatusPayload(): {
   supported: boolean;
   supportedReason?: string;
+  mode: OtaMode;
+  host: OtaHostInfo | null;
   state: OtaState;
   applied: OtaAppliedInfo | null;
   rollbackAvailable: boolean;
 } {
+  const mode = resolveOtaMode();
   const support = getOtaSupport();
   const applied = readAppliedInfo();
   return {
     supported: support.supported,
     supportedReason: support.reason,
+    mode,
+    host: mode === 'host' && support.supported ? collectOtaHostInfo(resolveAppRoot()) : null,
     state: getOtaState(),
     applied,
     rollbackAvailable: Boolean(

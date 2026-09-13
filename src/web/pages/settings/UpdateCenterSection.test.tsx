@@ -139,6 +139,25 @@ describe('UpdateCenterSection', () => {
     });
   });
 
+  it('shows the terminal command when host elevation falls back to manual', async () => {
+    apiMock.getUpdateCenterOta.mockResolvedValue({
+      supported: true,
+      mode: 'host',
+      host: { tier: 'manual', writableAppRoot: false, graphicalSession: false, pkexecAvailable: false, supervised: false },
+      state: { phase: 'manual-required', message: '请复制以下命令在终端执行', command: 'sudo sh /tmp/metapi-ota-x/staging/ota-apply.sh' },
+      applied: null,
+      rollbackAvailable: false,
+    });
+
+    const renderer = renderSection();
+    await flushMicrotasks();
+
+    expect(collectText(renderer.root)).toContain('sudo sh /tmp/metapi-ota-x/staging/ota-apply.sh');
+    act(() => {
+      renderer.unmount();
+    });
+  });
+
   it('renders the last check error when present', async () => {
     apiMock.getUpdateCenterStatus.mockResolvedValue({
       currentVersion: '1.2.3',

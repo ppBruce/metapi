@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,7 +8,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   applyStagedBundle,
+  decideHostApplyTier,
   extractAndValidateBundle,
+  generateHostApplyScript,
+  probeAppRootWritable,
   readAppliedInfo,
   rollbackAppliedBundle,
   verifyBundleSha256,
@@ -132,6 +135,57 @@ describe('updateCenterOtaService', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(staging, { recursive: true, force: true });
+    }
+  });
+
+  it('picks the host apply tier: direct > pkexec > manual', () => {
+    expect(decideHostApplyTier({ writableAppRoot: true, graphicalSession: false, pkexecAvailable: false })).toBe('direct');
+    expect(decideHostApplyTier({ writableAppRoot: false, graphicalSession: true, pkexecAvailable: true })).toBe('pkexec');
+    expect(decideHostApplyTier({ writableAppRoot: false, graphicalSession: true, pkexecAvailable: false })).toBe('manual');
+    expect(decideHostApplyTier({ writableAppRoot: false, graphicalSession: false, pkexecAvailable: true })).toBe('manual');
+  });
+
+  it('detects app-root writability', () => {
+    const root = makeTempRoot();
+    const readonlyRoot = makeTempRoot();
+    try {
+      expect(probeAppRootWritable(root)).toBe(true);
+      chmodSync(readonlyRoot, 0o555);
+      expect(probeAppRootWritable(readonlyRoot)).toBe(false);
+    } finally {
+      chmodSync(readonlyRoot, 0o755);
+      rmSync(root, { recursive: true, force: true });
+      rmSync(readonlyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('generates a syntactically valid elevation script with escaped paths', () => {
+    const dir = makeTempDir();
+    try {
+      const script = generateHostApplyScript({
+        root: `/opt/metapi test's dir`,
+        stagingDir: join(dir, 'staging'),
+        backupDir: `/opt/metapi test's dir/.ota/backup-1.7.5-x`,
+        targetVersion: '1.7.6',
+        previousVersion: '1.7.5',
+        gitSha: 'abc123',
+        runUid: 1000,
+        runGid: 1000,
+      });
+      const scriptPath = join(dir, 'ota-apply.sh');
+      writeFileSync(scriptPath, script, { mode: 0o755 });
+
+      execFileSync('sh', ['-n', scriptPath], { stdio: 'pipe' });
+      expect(script).toContain("test'\\''s");
+      expect(script).toContain('"version": "1.7.6"');
+      expect(script).toContain('sudo sh $0');
+
+      const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
+      if (uid !== 0) {
+        expect(() => execFileSync('sh', [scriptPath], { stdio: 'pipe' })).toThrow();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

@@ -28,12 +28,21 @@ type UpdateCenterStatus = {
 type OtaStatusPayload = {
   supported?: boolean;
   supportedReason?: string;
+  mode?: string;
+  host?: {
+    writableAppRoot?: boolean;
+    graphicalSession?: boolean;
+    pkexecAvailable?: boolean;
+    supervised?: boolean;
+    tier?: string;
+  } | null;
   state?: {
     phase?: string;
     message?: string;
     version?: string;
     progressPct?: number;
     error?: string;
+    command?: string;
   } | null;
   applied?: {
     status?: string;
@@ -219,11 +228,25 @@ export default function UpdateCenterSection() {
           </span>
         </div>
       )}
+      {ota?.supported && ota.mode === 'host' && ota.host && (
+        <div style={{ fontSize: 12, marginTop: 8, color: 'var(--color-text-muted)' }}>
+          {ota.host.tier === 'direct'
+            ? '宿主机模式：应用目录可写，更新零提权'
+            : ota.host.tier === 'pkexec'
+              ? '宿主机模式：需要提权时将弹出系统授权窗（polkit）'
+              : '宿主机模式：无图形会话，需要提权时给出终端命令'}
+        </div>
+      )}
       {ota?.supported && ota.state && ota.state.phase && ota.state.phase !== 'idle' && (
         <div style={{ fontSize: 12, marginTop: 10, lineHeight: 1.6, color: ota.state.phase === 'failed' ? 'var(--color-danger)' : 'var(--color-text-secondary)' }}>
           {ota.state.message || ota.state.phase}
           {typeof ota.state.progressPct === 'number' && ota.state.progressPct > 0 ? `（${ota.state.progressPct}%）` : ''}
           {ota.state.error ? `：${ota.state.error}` : ''}
+          {ota.state.command && (
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, marginTop: 4, wordBreak: 'break-all', color: 'var(--color-text-primary)' }}>
+              {ota.state.command}
+            </div>
+          )}
         </div>
       )}
       {ota?.applied && (
