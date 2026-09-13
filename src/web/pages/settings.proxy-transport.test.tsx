@@ -55,6 +55,7 @@ describe('Settings proxy transport', () => {
       logCleanupProgramLogsEnabled: true,
       logCleanupRetentionDays: 14,
       codexUpstreamWebsocketEnabled: false,
+      streamIncludeUsageEnabled: true,
       responsesCompactFallbackToResponsesEnabled: false,
       proxySessionChannelConcurrencyLimit: 4,
       proxySessionChannelQueueWaitMs: 3200,
@@ -72,6 +73,7 @@ describe('Settings proxy transport', () => {
     apiMock.updateRuntimeSettings.mockResolvedValue({
       success: true,
       codexUpstreamWebsocketEnabled: true,
+      streamIncludeUsageEnabled: true,
       responsesCompactFallbackToResponsesEnabled: true,
       proxySessionChannelConcurrencyLimit: 6,
       proxySessionChannelQueueWaitMs: 4200,
@@ -151,6 +153,7 @@ describe('Settings proxy transport', () => {
 
       expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith({
         codexUpstreamWebsocketEnabled: true,
+        streamIncludeUsageEnabled: true,
         responsesCompactFallbackToResponsesEnabled: true,
         proxySessionChannelConcurrencyLimit: 6,
         proxySessionChannelQueueWaitMs: 4200,

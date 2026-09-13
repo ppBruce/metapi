@@ -67,6 +67,7 @@ type RuntimeSettings = {
   sensitiveWordDetectionEnabled: boolean;
   antiProbeMinTextLength: number;
   codexUpstreamWebsocketEnabled: boolean;
+  streamIncludeUsageEnabled: boolean;
   responsesCompactFallbackToResponsesEnabled: boolean;
   disableCrossProtocolFallback: boolean;
   proxySessionChannelConcurrencyLimit: number;
@@ -140,6 +141,7 @@ export default function Settings() {
     sensitiveWordDetectionEnabled: true,
     antiProbeMinTextLength: 8,
     codexUpstreamWebsocketEnabled: false,
+    streamIncludeUsageEnabled: true,
     responsesCompactFallbackToResponsesEnabled: false,
     disableCrossProtocolFallback: false,
     proxySessionChannelConcurrencyLimit: 2,
@@ -427,6 +429,7 @@ export default function Settings() {
           ? Math.trunc(Number(runtimeInfo.antiProbeMinTextLength))
           : 8,
         codexUpstreamWebsocketEnabled: !!runtimeInfo.codexUpstreamWebsocketEnabled,
+        streamIncludeUsageEnabled: runtimeInfo.streamIncludeUsageEnabled !== false,
         responsesCompactFallbackToResponsesEnabled: !!runtimeInfo.responsesCompactFallbackToResponsesEnabled,
         disableCrossProtocolFallback: !!runtimeInfo.disableCrossProtocolFallback,
         proxySessionChannelConcurrencyLimit: Number(runtimeInfo.proxySessionChannelConcurrencyLimit) >= 0
@@ -556,6 +559,7 @@ export default function Settings() {
     try {
       const res = await api.updateRuntimeSettings({
         codexUpstreamWebsocketEnabled: runtime.codexUpstreamWebsocketEnabled,
+        streamIncludeUsageEnabled: runtime.streamIncludeUsageEnabled,
         responsesCompactFallbackToResponsesEnabled: runtime.responsesCompactFallbackToResponsesEnabled,
         proxySessionChannelConcurrencyLimit: runtime.proxySessionChannelConcurrencyLimit,
         proxySessionChannelQueueWaitMs: runtime.proxySessionChannelQueueWaitMs,
@@ -565,6 +569,9 @@ export default function Settings() {
         codexUpstreamWebsocketEnabled: typeof res?.codexUpstreamWebsocketEnabled === 'boolean'
           ? res.codexUpstreamWebsocketEnabled
           : prev.codexUpstreamWebsocketEnabled,
+        streamIncludeUsageEnabled: typeof res?.streamIncludeUsageEnabled === 'boolean'
+          ? res.streamIncludeUsageEnabled
+          : prev.streamIncludeUsageEnabled,
         responsesCompactFallbackToResponsesEnabled: typeof res?.responsesCompactFallbackToResponsesEnabled === 'boolean'
           ? res.responsesCompactFallbackToResponsesEnabled
           : prev.responsesCompactFallbackToResponsesEnabled,
@@ -1464,6 +1471,20 @@ export default function Settings() {
               type="checkbox"
               checked={runtime.responsesCompactFallbackToResponsesEnabled}
               onChange={(e) => setRuntime((prev) => ({ ...prev, responsesCompactFallbackToResponsesEnabled: e.target.checked }))}
+              style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0 }}
+            />
+          </label>
+          <label style={settingsModernToggleStyle}>
+            <div style={settingsModernToggleCopyStyle}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>流式请求索引用量帧（stream_options.include_usage）</span>
+              <span style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-muted)' }}>
+                开启后，metapi 会在发往 OpenAI 兼容上游的流式请求中附带 include_usage，让上游在流式结束时返回用量，用于使用日志的 token 统计；关闭后部分站点的流式请求将记录不到 token。
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              checked={runtime.streamIncludeUsageEnabled}
+              onChange={(e) => setRuntime((prev) => ({ ...prev, streamIncludeUsageEnabled: e.target.checked }))}
               style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0 }}
             />
           </label>
