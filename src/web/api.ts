@@ -1282,6 +1282,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({}),
     }),
+  getUpdateCenterOta: () => request('/api/update-center/ota'),
+  applyUpdateCenterOta: (version: string) =>
+    request('/api/update-center/apply', {
+      method: 'POST',
+      body: JSON.stringify({ version }),
+    }),
+  rollbackUpdateCenterOta: () =>
+    request('/api/update-center/rollback', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
 
   getRuntimeDatabaseConfig: () => request('/api/settings/database/runtime'),
   updateRuntimeDatabaseConfig: (data: {

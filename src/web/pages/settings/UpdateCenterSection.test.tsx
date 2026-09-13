@@ -8,6 +8,9 @@ const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getUpdateCenterStatus: vi.fn(),
     checkUpdateCenter: vi.fn(),
+    getUpdateCenterOta: vi.fn(),
+    applyUpdateCenterOta: vi.fn(),
+    rollbackUpdateCenterOta: vi.fn(),
   },
 }));
 
@@ -67,6 +70,12 @@ describe('UpdateCenterSection', () => {
       },
     });
     apiMock.checkUpdateCenter.mockResolvedValue({});
+    apiMock.getUpdateCenterOta.mockResolvedValue({
+      supported: false,
+      state: { phase: 'idle', message: '' },
+      applied: null,
+      rollbackAvailable: false,
+    });
   });
 
   it('renders current version and both version channels', async () => {
@@ -101,6 +110,33 @@ describe('UpdateCenterSection', () => {
     });
 
     expect(apiMock.checkUpdateCenter).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers an online update when a supported OTA deployment sees a newer release', async () => {
+    apiMock.getUpdateCenterOta.mockResolvedValue({
+      supported: true,
+      state: { phase: 'idle', message: '' },
+      applied: null,
+      rollbackAvailable: false,
+    });
+    apiMock.applyUpdateCenterOta.mockResolvedValue({ success: true });
+
+    const renderer = renderSection();
+    await flushMicrotasks();
+
+    const buttons = renderer.root.findAllByType('button');
+    const updateButton = buttons.find((btn) => collectText(btn).includes('在线更新到 v1.6.0'));
+    expect(updateButton).toBeTruthy();
+
+    await act(async () => {
+      updateButton!.props.onClick();
+    });
+    await flushMicrotasks();
+
+    expect(apiMock.applyUpdateCenterOta).toHaveBeenCalledWith('1.6.0');
+    act(() => {
+      renderer.unmount();
+    });
   });
 
   it('renders the last check error when present', async () => {

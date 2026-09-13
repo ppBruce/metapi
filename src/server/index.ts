@@ -79,6 +79,7 @@ import {
   stopSub2ApiManagedRefreshScheduler,
 } from './services/sub2apiRefreshScheduler.js';
 import { startUpdateCenterPolling, stopUpdateCenterPolling } from './services/updateCenterPollingService.js';
+import { finalizeOtaOnBoot } from './services/updateCenterOtaService.js';
 import {
   startAdminSnapshotWarmScheduler,
   stopAdminSnapshotWarmScheduler,
@@ -390,6 +391,7 @@ startModelAvailabilityProbeScheduler();
 startChannelProbeScheduler();
 startSub2ApiManagedRefreshScheduler();
 startUpdateCenterPolling();
+void finalizeOtaOnBoot();
 startUsageAggregationProjectorScheduler();
 startAdminSnapshotWarmScheduler();
 startRouteDecisionRefreshScheduler();

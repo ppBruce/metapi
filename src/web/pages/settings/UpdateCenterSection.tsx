@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api } from '../../api.js';
 import { useToast } from '../../components/Toast.js';
@@ -25,6 +25,24 @@ type UpdateCenterStatus = {
   } | null;
 };
 
+type OtaStatusPayload = {
+  supported?: boolean;
+  supportedReason?: string;
+  state?: {
+    phase?: string;
+    message?: string;
+    version?: string;
+    progressPct?: number;
+    error?: string;
+  } | null;
+  applied?: {
+    status?: string;
+    version?: string;
+    fromVersion?: string;
+  } | null;
+  rollbackAvailable?: boolean;
+};
+
 function formatCheckedAt(value?: string | null): string {
   if (!value) return tr('从未检查');
   const parsed = new Date(value);
@@ -41,6 +59,9 @@ export default function UpdateCenterSection() {
   const toast = useToast();
   const [status, setStatus] = useState<UpdateCenterStatus | null>(null);
   const [checking, setChecking] = useState(false);
+  const [ota, setOta] = useState<OtaStatusPayload | null>(null);
+  const [otaBusy, setOtaBusy] = useState(false);
+  const otaPollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -49,6 +70,12 @@ export default function UpdateCenterSection() {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       toast.error(errorMessage || tr('获取更新中心状态失败'));
+    }
+    try {
+      const otaNext = await api.getUpdateCenterOta() as OtaStatusPayload;
+      setOta(otaNext);
+    } catch {
+      setOta(null);
     }
   }, [toast]);
 
@@ -68,6 +95,67 @@ export default function UpdateCenterSection() {
       setChecking(false);
     }
   }, [toast]);
+
+  useEffect(() => () => {
+    if (otaPollTimer.current) clearInterval(otaPollTimer.current);
+  }, []);
+
+  const refreshOta = useCallback(async () => {
+    try {
+      const otaNext = await api.getUpdateCenterOta() as OtaStatusPayload;
+      setOta(otaNext);
+      const phase = otaNext?.state?.phase;
+      if (phase !== 'downloading' && phase !== 'verifying' && phase !== 'applying' && phase !== 'restarting') {
+        if (otaPollTimer.current) {
+          clearInterval(otaPollTimer.current);
+          otaPollTimer.current = null;
+        }
+        setOtaBusy(false);
+      }
+      return otaNext;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const startOtaPolling = useCallback(() => {
+    if (otaPollTimer.current) return;
+    otaPollTimer.current = setInterval(() => {
+      void refreshOta();
+    }, 2000);
+  }, [refreshOta]);
+
+  const handleOtaApply = useCallback(async (version: string) => {
+    setOtaBusy(true);
+    try {
+      await api.applyUpdateCenterOta(version);
+      toast.success(`已开始在线更新到 v${version}`);
+      startOtaPolling();
+      await refreshOta();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      toast.error(errorMessage || tr('在线更新启动失败'));
+      setOtaBusy(false);
+    }
+  }, [refreshOta, startOtaPolling, toast]);
+
+  const handleOtaRollback = useCallback(async () => {
+    setOtaBusy(true);
+    try {
+      await api.rollbackUpdateCenterOta();
+      toast.success(tr('已发起回滚'));
+      startOtaPolling();
+      await refreshOta();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      toast.error(errorMessage || tr('回滚失败'));
+      setOtaBusy(false);
+    }
+  }, [refreshOta, startOtaPolling, toast]);
+
+  const otaTargetVersion = String(
+    status?.githubRelease?.normalizedVersion || status?.dockerHubTag?.normalizedVersion || '',
+  ).trim();
 
   const reminder = buildUpdateReminder({
     currentVersion: status?.currentVersion,
@@ -116,6 +204,40 @@ export default function UpdateCenterSection() {
           </div>
         ))}
       </div>
+
+      {ota?.supported && reminder.highlight && otaTargetVersion && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={otaBusy}
+            onClick={() => void handleOtaApply(otaTargetVersion)}
+          >
+            {otaBusy ? tr('在线更新中...') : `在线更新到 v${otaTargetVersion}`}
+          </button>
+          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            热替换方式更新（OTA），失败可回滚
+          </span>
+        </div>
+      )}
+      {ota?.supported && ota.state && ota.state.phase && ota.state.phase !== 'idle' && (
+        <div style={{ fontSize: 12, marginTop: 10, lineHeight: 1.6, color: ota.state.phase === 'failed' ? 'var(--color-danger)' : 'var(--color-text-secondary)' }}>
+          {ota.state.message || ota.state.phase}
+          {typeof ota.state.progressPct === 'number' && ota.state.progressPct > 0 ? `（${ota.state.progressPct}%）` : ''}
+          {ota.state.error ? `：${ota.state.error}` : ''}
+        </div>
+      )}
+      {ota?.applied && (
+        <div style={{ fontSize: 12, marginTop: 8, color: 'var(--color-text-muted)' }}>
+          {`在线更新记录：v${ota.applied.fromVersion} → v${ota.applied.version}（${ota.applied.status}）`}
+        </div>
+      )}
+      {ota?.rollbackAvailable && (
+        <div style={{ marginTop: 10 }}>
+          <button className="btn btn-ghost btn-sm" disabled={otaBusy} onClick={() => void handleOtaRollback()}>
+            {tr('回滚到更新前版本')}
+          </button>
+        </div>
+      )}
 
       {status?.runtime?.lastCheckError && (
         <div style={{ fontSize: 12, color: 'var(--color-danger)', marginTop: 10 }}>
