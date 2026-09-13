@@ -193,4 +193,25 @@ describe('openai chat stream bridge', () => {
     expect(toolCall.type).toBeUndefined();
     expect((toolCall.function as Record<string, unknown>).name).toBeUndefined();
   });
+
+  it('passes a usage-only frame through as an empty-choices chunk', () => {
+    const context = openAiChatStream.createContext('gpt-5');
+    const normalized = openAiChatStream.normalizeEvent({
+      id: 'chatcmpl-usage-only-1',
+      model: 'gpt-5',
+      choices: [],
+      usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 },
+    }, context, 'gpt-5');
+
+    const payloads = parseSsePayloads(
+      openAiChatStream.serializeEvent(normalized, context, createClaudeDownstreamContext()),
+    );
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      object: 'chat.completion.chunk',
+      choices: [],
+      usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 },
+    });
+  });
 });

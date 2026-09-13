@@ -27,6 +27,56 @@ describe('upstreamRequestBuilder', () => {
     expect(request.headers['Content-Type']).toBe('application/json');
   });
 
+  it('injects stream_options.include_usage for streaming chat requests and preserves explicit values', () => {
+    const injected = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://api.example.com',
+      openaiBody: {
+        model: 'gpt-5',
+        stream: true,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+    });
+    expect((injected.body as Record<string, unknown>).stream_options).toMatchObject({ include_usage: true });
+
+    const preserved = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://api.example.com',
+      openaiBody: {
+        model: 'gpt-5',
+        stream: true,
+        stream_options: { include_usage: false },
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+    });
+    expect((preserved.body as Record<string, unknown>).stream_options).toMatchObject({ include_usage: false });
+
+    const nonStreaming = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://api.example.com',
+      openaiBody: {
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+    });
+    expect((nonStreaming.body as Record<string, unknown>).stream_options).toBeUndefined();
+  });
+
   it('routes Gemini official chat tool history through native generateContent with signed functionCall parts', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',

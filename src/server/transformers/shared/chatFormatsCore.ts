@@ -1917,7 +1917,24 @@ function buildOpenAiStreamChunk(
 
   const finishReason = event.finishReason || null;
   const hasDelta = Object.keys(delta).length > 0;
-  if (!hasDelta && !finishReason) return null;
+  if (!hasDelta && !finishReason) {
+    // Usage-only frame: OpenAI-compatible upstreams end a stream with a chunk
+    // that has an empty choices array and carries usage (sent when
+    // stream_options.include_usage is requested). Pass the usage through as a
+    // standard chunk instead of dropping the frame.
+    const usage = mergeUsageForChunkPayload(event);
+    if (usage) {
+      return {
+        id: context.id,
+        object: 'chat.completion.chunk',
+        created: context.created,
+        model: context.model,
+        choices: [],
+        usage,
+      };
+    }
+    return null;
+  }
 
   return {
     id: context.id,
@@ -1930,6 +1947,28 @@ function buildOpenAiStreamChunk(
       finish_reason: finishReason,
     }],
   };
+}
+
+function mergeUsageForChunkPayload(event: NormalizedStreamEvent): Record<string, unknown> | null {
+  const eventWithUsage = event as NormalizedStreamEvent & {
+    usagePayload?: unknown;
+    usageDetails?: {
+      prompt_tokens_details?: unknown;
+      completion_tokens_details?: unknown;
+    } | null;
+  };
+  const usagePayload = isRecord(eventWithUsage.usagePayload) ? eventWithUsage.usagePayload : null;
+  const usageDetails = eventWithUsage.usageDetails ?? null;
+  const merged: Record<string, unknown> = { ...(usagePayload ?? {}) };
+  if (usageDetails) {
+    if (usageDetails.prompt_tokens_details !== undefined) {
+      merged.prompt_tokens_details = usageDetails.prompt_tokens_details;
+    }
+    if (usageDetails.completion_tokens_details !== undefined) {
+      merged.completion_tokens_details = usageDetails.completion_tokens_details;
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
 }
 
 function ensureClaudeStartEvents(

@@ -305,6 +305,7 @@ export type RuntimeSettingsPayload = {
   sensitiveWordDetectionEnabled?: boolean;
   antiProbeMinTextLength?: number;
   codexUpstreamWebsocketEnabled?: boolean;
+  streamIncludeUsageEnabled?: boolean;
   responsesCompactFallbackToResponsesEnabled?: boolean;
   disableCrossProtocolFallback?: boolean;
   proxySessionChannelConcurrencyLimit?: number;

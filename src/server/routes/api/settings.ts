@@ -58,6 +58,7 @@ interface RuntimeSettingsBody {
   sensitiveWordDetectionEnabled?: boolean;
   antiProbeMinTextLength?: number;
   codexUpstreamWebsocketEnabled?: boolean;
+  streamIncludeUsageEnabled?: boolean;
   responsesCompactFallbackToResponsesEnabled?: boolean;
   disableCrossProtocolFallback?: boolean;
   proxySessionChannelConcurrencyLimit?: number;
@@ -316,6 +317,11 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
     case 'codex_upstream_websocket_enabled': {
       if (typeof value !== 'boolean') return;
       config.codexUpstreamWebsocketEnabled = value;
+      return;
+    }
+    case 'stream_include_usage_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.streamIncludeUsageEnabled = value;
       return;
     }
     case 'responses_compact_fallback_to_responses_enabled': {
@@ -583,6 +589,7 @@ async function getRuntimeSettingsResponse(currentAdminIp = '') {
     sensitiveWordDetectionEnabled,
     antiProbeMinTextLength,
     codexUpstreamWebsocketEnabled: config.codexUpstreamWebsocketEnabled,
+    streamIncludeUsageEnabled: config.streamIncludeUsageEnabled,
     responsesCompactFallbackToResponsesEnabled: config.responsesCompactFallbackToResponsesEnabled,
     disableCrossProtocolFallback: config.disableCrossProtocolFallback,
     proxySessionChannelConcurrencyLimit: config.proxySessionChannelConcurrencyLimit,
@@ -1053,6 +1060,25 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.codexUpstreamWebsocketEnabled = nextValue;
       upsertSetting('codex_upstream_websocket_enabled', config.codexUpstreamWebsocketEnabled);
+    }
+
+    if (body.streamIncludeUsageEnabled !== undefined) {
+      let nextValue = true;
+      try {
+        nextValue = parseBooleanFlag(body.streamIncludeUsageEnabled, '流式用量注入（include_usage）开关');
+      } catch (err) {
+        const errMessage = err instanceof Error ? err.message : String(err);
+        return reply.code(400).send({
+          success: false,
+          message: errMessage || '流式用量注入（include_usage）开关格式无效',
+        });
+      }
+
+      if (nextValue !== config.streamIncludeUsageEnabled) {
+        changedLabels.push('流式用量注入（include_usage）策略');
+      }
+      config.streamIncludeUsageEnabled = nextValue;
+      upsertSetting('stream_include_usage_enabled', config.streamIncludeUsageEnabled);
     }
 
     if (body.responsesCompactFallbackToResponsesEnabled !== undefined) {

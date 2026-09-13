@@ -129,6 +129,27 @@ describe('settings and auth events', () => {
     expect(savedInterval?.value).toBe(JSON.stringify(8));
   });
 
+  it('persists the stream include_usage switch from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        streamIncludeUsageEnabled: false,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { streamIncludeUsageEnabled?: boolean };
+    expect(updated.streamIncludeUsageEnabled).toBe(false);
+    expect(config.streamIncludeUsageEnabled).toBe(false);
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'stream_include_usage_enabled')).get();
+    expect(saved?.value).toBe(JSON.stringify(false));
+
+    // restore the default for sibling tests in this file
+    config.streamIncludeUsageEnabled = true;
+  });
+
   it('persists codex upstream websocket and session lease settings from runtime settings', async () => {
     const updateResponse = await app.inject({
       method: 'PUT',

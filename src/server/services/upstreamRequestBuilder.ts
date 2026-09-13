@@ -843,11 +843,21 @@ export function buildUpstreamEndpointRequest(input: {
   }
 
   const headers = ensureStreamAcceptHeader(commonHeaders, input.stream);
-  const chatBody = {
+  const chatBody: Record<string, unknown> = {
     ...openaiBody,
     model: input.modelName,
     stream: input.stream,
   };
+  // Ask OpenAI-compatible upstreams for the final usage frame on streams
+  // (stream_options.include_usage — the de-facto gateway default, e.g. new-api's
+  // FORCE_STREAM_OPTION). An explicit downstream value is preserved; per-site
+  // payload rules still apply below.
+  if (input.stream === true && config.streamIncludeUsageEnabled) {
+    const existingStreamOptions = isRecord(chatBody.stream_options) ? chatBody.stream_options : null;
+    if (!existingStreamOptions || existingStreamOptions.include_usage === undefined) {
+      chatBody.stream_options = { ...(existingStreamOptions ?? {}), include_usage: true };
+    }
+  }
   const configuredChatBody = applyConfiguredPayloadRules(
     input.downstreamFormat === 'responses'
       ? sanitizeResponsesFallbackChatBody(chatBody)
