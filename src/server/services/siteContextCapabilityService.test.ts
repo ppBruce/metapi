@@ -5,6 +5,7 @@ import {
   ensureSiteContextCapabilityLoaded,
   listSiteContextEntriesForSite,
   lookupSiteContextLimitForNames,
+  lookupSiteContextObservedMaxPrompt,
   normalizeContextModelKey,
   observeContextOverflowFailure,
   observeSuccessfulPromptUsage,
@@ -105,6 +106,21 @@ describe('lookup / min selection', () => {
     await ensureSiteContextCapabilityLoaded();
     expect(lookupSiteContextLimitForNames(8, ['model-x'])).toBeNull();
     expect(lookupSiteContextLimitForNames(999, ['model-x'])).toBeNull();
+  });
+
+  it('reports the observed lower bound even when no cap is known', async () => {
+    seedRow({ siteId: 8, modelName: 'model-x', contextLimit: null, source: 'usage', observedMaxPrompt: 52_000 });
+    seedRow({ siteId: 8, modelName: 'model-y', contextLimit: 64_000, source: 'error', observedMaxPrompt: 30_000 });
+    await ensureSiteContextCapabilityLoaded();
+
+    // usage-only row still yields its proven lower bound
+    expect(lookupSiteContextObservedMaxPrompt(8, ['model-x'])).toBe(52_000);
+    // nothing observed for this name
+    expect(lookupSiteContextObservedMaxPrompt(8, ['unknown'])).toBeNull();
+    // largest observed across the candidate names wins
+    expect(lookupSiteContextObservedMaxPrompt(8, ['model-y', 'model-x'])).toBe(52_000);
+    // unknown site
+    expect(lookupSiteContextObservedMaxPrompt(999, ['model-x'])).toBeNull();
   });
 });
 

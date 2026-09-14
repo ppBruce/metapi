@@ -148,6 +148,30 @@ export function lookupSiteContextLimitForNames(
   return best;
 }
 
+/**
+ * Largest input (usage.prompt_tokens) this site×model has ever successfully
+ * served — a proven lower bound, not a cap. Shown in the marketplace while no
+ * overflow has pinned the real limit; never used by routing exclusion.
+ */
+export function lookupSiteContextObservedMaxPrompt(
+  siteId: number | null | undefined,
+  modelNames: Array<string | null | undefined>,
+): number | null {
+  let best: number | null = null;
+  const seen = new Set<string>();
+  for (const name of modelNames) {
+    const key = normalizeContextModelKey(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const entry = cache.get(entryKey(Number(siteId), key));
+    const observed = entry?.observedMaxPrompt ?? null;
+    if (observed != null && observed > 0 && (best == null || observed > best)) {
+      best = observed;
+    }
+  }
+  return best;
+}
+
 export function listSiteContextEntries(): SiteModelContextEntry[] {
   return [...cache.values()];
 }

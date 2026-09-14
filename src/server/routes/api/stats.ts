@@ -15,6 +15,7 @@ import { lookupModelsDevCapabilities } from '../../services/modelCapabilitiesSer
 import {
   ensureSiteContextCapabilityLoaded,
   lookupSiteContextLimitForNames,
+  lookupSiteContextObservedMaxPrompt,
 } from '../../services/siteContextCapabilityService.js';
 import {
   fetchModelPricingCatalog,
@@ -1668,10 +1669,14 @@ export async function statsRoutes(app: FastifyInstance) {
       await ensureSiteContextCapabilityLoaded();
       for (const entry of Object.values(modelMap)) {
         for (const account of entry.accountsById.values()) {
-          const contextHit = lookupSiteContextLimitForNames(account.siteId, [entry.name, ...account.sourceModels]);
+          const modelNames = [entry.name, ...account.sourceModels];
+          const contextHit = lookupSiteContextLimitForNames(account.siteId, modelNames);
           account.contextLimit = contextHit ? contextHit.limit : null;
           account.contextSource = contextHit ? contextHit.source : null;
-          account.contextObservedMaxPrompt = contextHit ? (contextHit.observedMaxPrompt ?? null) : null;
+          // Lower bound may exist without any cap (successes only, no overflow
+          // yet) — keep it visible instead of collapsing to null.
+          account.contextObservedMaxPrompt = lookupSiteContextObservedMaxPrompt(account.siteId, modelNames)
+            ?? (contextHit ? (contextHit.observedMaxPrompt ?? null) : null);
         }
       }
 
