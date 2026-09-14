@@ -11,6 +11,8 @@
  * - 依赖发生变更的版本由 depsSignature 拦下，引导走镜像更新（见 updateCenterOtaManifest）。
  * - 容器被重建时写入层丢失，会回到镜像基线版本——更新中心如实展示（applied.json 随层消失）。
  * - 备份保留在 <appRoot>/.ota/backup-*，支持一键回滚。
+ * - 交换动作容忍 overlayfs 的跨层限制：镜像层目录无法被 rename（EXDEV），
+ *   自动退化为复制 + 删除（见 movePath）。
  *
  * 宿主机模式（METAPI_OTA_HOST_MODE=1）的提权阶梯（"像桌面软件一样，需要提权时自己弹窗"）：
  * 1. 应用目录对运行用户可写 → 直接替换（零提权）；重启依赖 systemd 等守护（退出后自动拉起）；
@@ -29,6 +31,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  cpSync,
   createWriteStream,
   existsSync,
   mkdtempSync,
@@ -385,6 +388,29 @@ export function extractAndValidateBundle(input: {
   return { stagingDir, manifest };
 }
 
+/**
+ * 移动文件/目录：优先 rename；遇到 EXDEV（跨设备/跨 overlay 层）退化为复制 + 删除。
+ *
+ * Docker/containerd 默认的 overlayfs 挂载（redirect_dir=N）不会对目录做 copy-up：
+ * 把镜像层里的目录 rename 到运行层会直接失败并返回 EXDEV（"cross-device link not
+ * permitted"），这是官方镜像 + compose 部署下的必踩路径，不能假设 rename 一定成立。
+ */
+export function movePath(from: string, to: string): void {
+  try {
+    renameSync(from, to);
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'EXDEV') throw error;
+  }
+  try {
+    cpSync(from, to, { recursive: true, force: true, preserveTimestamps: true });
+  } catch (error) {
+    rmSync(to, { recursive: true, force: true });
+    throw error;
+  }
+  rmSync(from, { recursive: true, force: true });
+}
+
 export function applyStagedBundle(input: {
   root: string;
   stagingDir: string;
@@ -405,10 +431,10 @@ export function applyStagedBundle(input: {
       const staged = join(input.stagingDir, entry);
       if (!existsSync(staged)) throw new Error(`暂存目录缺少 ${entry}`);
       if (existsSync(current)) {
-        renameSync(current, join(backupDir, entry));
+        movePath(current, join(backupDir, entry));
         moved.push({ entry, toBackup: true });
       }
-      renameSync(staged, current);
+      movePath(staged, current);
       moved.push({ entry, toBackup: false });
     }
   } catch (error) {
@@ -416,9 +442,9 @@ export function applyStagedBundle(input: {
     for (const item of moved.reverse()) {
       try {
         if (item.toBackup) {
-          renameSync(join(backupDir, item.entry), join(input.root, item.entry));
+          movePath(join(backupDir, item.entry), join(input.root, item.entry));
         } else {
-          renameSync(join(input.root, item.entry), join(input.stagingDir, item.entry));
+          movePath(join(input.root, item.entry), join(input.stagingDir, item.entry));
         }
       } catch {
         // best effort
@@ -461,8 +487,8 @@ export function rollbackAppliedBundle(input: { root: string }): { toVersion: str
     const current = join(input.root, entry);
     const backed = join(info.backupDir, entry);
     if (!existsSync(backed)) throw new Error(`备份缺少 ${entry}，无法回滚`);
-    if (existsSync(current)) renameSync(current, join(currentDir, entry));
-    renameSync(backed, current);
+    if (existsSync(current)) movePath(current, join(currentDir, entry));
+    movePath(backed, current);
   }
 
   writeAppliedInfo(input.root, {

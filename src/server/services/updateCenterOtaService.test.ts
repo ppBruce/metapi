@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,6 +11,7 @@ import {
   decideHostApplyTier,
   extractAndValidateBundle,
   generateHostApplyScript,
+  movePath,
   probeAppRootWritable,
   readAppliedInfo,
   rollbackAppliedBundle,
@@ -32,6 +33,29 @@ function writeAppTree(root: string, version: string, marker: string): void {
   mkdirSync(join(root, 'drizzle'), { recursive: true });
   writeFileSync(join(root, 'drizzle/0000_init.sql'), `-- ${marker}\n`);
   writeFileSync(join(root, 'package.json'), `${JSON.stringify({ name: 'metapi', version, dependencies: { fastify: '^5.11.0' } }, null, 2)}\n`);
+}
+
+/** 找一个与 os.tmpdir() 不同设备的可写目录（用于制造真实 EXDEV）；不可用返回 null。 */
+function detectCrossDeviceDir(): string | null {
+  const candidate = '/dev/shm';
+  try {
+    if (!existsSync(candidate)) return null;
+    const probeDir = mkdtempSync(join(candidate, 'metapi-ota-xdev-probe-'));
+    const probeFile = join(probeDir, 'probe.txt');
+    writeFileSync(probeFile, 'probe');
+    const target = join(tmpdir(), `metapi-ota-xdev-${process.pid}.txt`);
+    try {
+      renameSync(probeFile, target);
+      rmSync(target, { force: true });
+      return null;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException)?.code === 'EXDEV' ? candidate : null;
+    } finally {
+      rmSync(probeDir, { recursive: true, force: true });
+    }
+  } catch {
+    return null;
+  }
 }
 
 describe('updateCenterOtaService', () => {
@@ -186,6 +210,64 @@ describe('updateCenterOtaService', () => {
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // overlayfs（Docker 镜像层）目录无法 rename——用另一挂载点制造真实的 EXDEV
+  // 复现，与容器内 "cross-device link not permitted" 同类（无可制造环境时跳过）。
+  const crossDeviceDir = detectCrossDeviceDir();
+
+  it.skipIf(!crossDeviceDir)('moves files and directories across devices when rename refuses with EXDEV', () => {
+    const sourceDir = mkdtempSync(join(crossDeviceDir as string, 'metapi-ota-move-'));
+    const destDir = makeTempDir();
+    try {
+      writeFileSync(join(sourceDir, 'package.json'), '{"name":"metapi"}\n');
+      mkdirSync(join(sourceDir, 'dist/server'), { recursive: true });
+      writeFileSync(join(sourceDir, 'dist/server/index.js'), 'console.log("moved");\n');
+
+      movePath(join(sourceDir, 'package.json'), join(destDir, 'package.json'));
+      movePath(join(sourceDir, 'dist'), join(destDir, 'dist'));
+
+      expect(readFileSync(join(destDir, 'package.json'), 'utf8')).toContain('metapi');
+      expect(readFileSync(join(destDir, 'dist/server/index.js'), 'utf8')).toContain('moved');
+      expect(existsSync(join(sourceDir, 'package.json'))).toBe(false);
+      expect(existsSync(join(sourceDir, 'dist'))).toBe(false);
+    } finally {
+      rmSync(sourceDir, { recursive: true, force: true });
+      rmSync(destDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!crossDeviceDir)('applies a staged bundle when the swap hits EXDEV', () => {
+    const root = makeTempRoot();
+    const staging = mkdtempSync(join(crossDeviceDir as string, 'metapi-ota-stage-'));
+    try {
+      writeAppTree(root, '1.7.3', 'old');
+      writeAppTree(staging, '1.7.4', 'new');
+
+      const { backupDir } = applyStagedBundle({
+        root,
+        stagingDir: staging,
+        targetVersion: '1.7.4',
+        previousVersion: '1.7.3',
+        gitSha: 'deadbeef',
+      });
+
+      expect(readFileSync(join(root, 'dist/server/index.js'), 'utf8')).toContain('"new"');
+      expect(readFileSync(join(backupDir, 'dist/server/index.js'), 'utf8')).toContain('"old"');
+      expect(readAppliedInfo(root)?.status).toBe('pending');
+      // 交换完成后 staging 不应再留有被交换的条目
+      expect(existsSync(join(staging, 'dist'))).toBe(false);
+      expect(existsSync(join(staging, 'drizzle'))).toBe(false);
+      expect(existsSync(join(staging, 'package.json'))).toBe(false);
+
+      // 回滚路径同样走 movePath
+      const rolled = rollbackAppliedBundle({ root });
+      expect(rolled.toVersion).toBe('1.7.3');
+      expect(readFileSync(join(root, 'dist/server/index.js'), 'utf8')).toContain('"old"');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(staging, { recursive: true, force: true });
     }
   });
 });
