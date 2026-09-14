@@ -192,6 +192,27 @@ describe('selectSurfaceChannelForAttempt', () => {
     expect(refreshModelsAndRebuildRoutesMock).toHaveBeenCalledTimes(1);
   });
 
+  it('passes the estimated context requirement through to channel selection', async () => {
+    const selected = { channel: { id: 22 } };
+    selectChannelMock.mockResolvedValueOnce(selected);
+
+    const { selectSurfaceChannelForAttempt } = await import('./sharedSurface.js');
+    const result = await selectSurfaceChannelForAttempt({
+      requestedModel: 'gpt-5.2',
+      downstreamPolicy: EMPTY_DOWNSTREAM_ROUTING_POLICY,
+      excludeChannelIds: [],
+      retryCount: 0,
+      requiredContextTokens: 150000,
+    });
+
+    expect(result).toBe(selected);
+    expect(selectChannelMock).toHaveBeenCalledWith(
+      'gpt-5.2',
+      EMPTY_DOWNSTREAM_ROUTING_POLICY,
+      { requiredContextTokens: 150000 },
+    );
+  });
+
   it('uses selectNextChannel on retry attempts without refreshing models', async () => {
     const selected = { channel: { id: 22 } };
     selectNextChannelMock.mockResolvedValueOnce(selected);

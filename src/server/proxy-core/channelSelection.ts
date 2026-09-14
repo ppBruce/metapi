@@ -128,6 +128,15 @@ export async function selectProxyChannelForAttempt(input: {
   requiredContextTokens?: number;
 }): Promise<SelectedChannel> {
   await ensureProxyChannelAffinityLoaded();
+  // Pass a context requirement through only when one exists: the common
+  // no-requirement path keeps its historical argument shapes (pinned by
+  // call-shape tests), and appending an empty options object would add noise
+  // without changing behavior.
+  const contextTokens = typeof input.requiredContextTokens === 'number'
+    && Number.isFinite(input.requiredContextTokens)
+    && input.requiredContextTokens > 0
+    ? Math.trunc(input.requiredContextTokens)
+    : undefined;
   const normalizedForcedChannelId = normalizeForcedChannelId(input.forcedChannelId);
   if (normalizedForcedChannelId !== null) {
     if (input.retryCount > 0) return null;
@@ -163,7 +172,9 @@ export async function selectProxyChannelForAttempt(input: {
     if (preferredChannelId <= 0 || input.excludeChannelIds.includes(preferredChannelId)) {
       return null;
     }
-    const selectionOptions = { yieldOnLowBalance: true, requiredContextTokens: input.requiredContextTokens };
+    const selectionOptions = contextTokens
+      ? { yieldOnLowBalance: true, requiredContextTokens: contextTokens }
+      : { yieldOnLowBalance: true };
     let preferred = await tokenRouter.selectPreferredChannel(
       input.requestedModel,
       preferredChannelId,
@@ -266,19 +277,31 @@ export async function selectProxyChannelForAttempt(input: {
   }
 
   if (!selected) {
-    selected = input.retryCount === 0
-      ? await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy, { requiredContextTokens: input.requiredContextTokens })
-      : await tokenRouter.selectNextChannel(
-        input.requestedModel,
-        input.excludeChannelIds,
-        input.downstreamPolicy,
-        { requiredContextTokens: input.requiredContextTokens },
-      );
+    if (input.retryCount === 0) {
+      selected = contextTokens
+        ? await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy, { requiredContextTokens: contextTokens })
+        : await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy);
+    } else {
+      selected = contextTokens
+        ? await tokenRouter.selectNextChannel(
+          input.requestedModel,
+          input.excludeChannelIds,
+          input.downstreamPolicy,
+          { requiredContextTokens: contextTokens },
+        )
+        : await tokenRouter.selectNextChannel(
+          input.requestedModel,
+          input.excludeChannelIds,
+          input.downstreamPolicy,
+        );
+    }
   }
 
   if (!selected && input.retryCount === 0 && !refreshedRoutes) {
     await refreshRoutesForFirstAttempt();
-    selected = await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy, { requiredContextTokens: input.requiredContextTokens });
+    selected = contextTokens
+      ? await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy, { requiredContextTokens: contextTokens })
+      : await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy);
   }
 
   const stickyHit = preferredSource === 'sticky' || !!(

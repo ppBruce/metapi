@@ -14,6 +14,7 @@ import {
   buildProxyFailureDisposition,
   isLowValueFailoverFailureClass,
 } from './siteFailureClassification.js';
+import { config } from '../config.js';
 
 describe('siteFailureClassification', () => {
   it('builds one disposition for retry and health mutation consumers', () => {
@@ -128,19 +129,39 @@ describe('siteFailureClassification', () => {
     expect(decision.cooldownScope).toBe('channel');
   });
 
-  it('classifies context overflow 400 as terminal request_validation', () => {
-    const decision = classifyProxyFailure({
-      status: 400,
-      errorText: "This endpoint's maximum context length is 256000 tokens. However, you requested about 256433 tokens.",
-    });
-    expect(decision.class).toBe('request_validation');
-    expect(decision.retryChannel).toBe(false);
+  it('classifies context overflow as a site-switchable signal when context-aware routing is on', () => {
+    const previousMode = config.contextAwareRouting;
+    try {
+      // Default mode (exclude_known): another site may serve a larger window,
+      // so overflow fails over to the next candidate instead of terminating
+      // the request. Never counted as a site failure either way.
+      config.contextAwareRouting = 'exclude_known';
+      const decision = classifyProxyFailure({
+        status: 400,
+        errorText: "This endpoint's maximum context length is 256000 tokens. However, you requested about 256433 tokens.",
+      });
+      expect(decision.class).toBe('request_validation');
+      expect(decision.retryChannel).toBe(true);
+      expect(decision.cooldownScope).toBe('none');
 
-    const chinese = classifyProxyFailure({
-      status: 400,
-      errorText: '上下文长度超出限制',
-    });
-    expect(chinese.retryChannel).toBe(false);
+      const chinese = classifyProxyFailure({
+        status: 400,
+        errorText: '上下文长度超出限制',
+      });
+      expect(chinese.retryChannel).toBe(true);
+
+      // Legacy fail-fast when the feature is off: without per-site capability
+      // data every failover would hit the same rejection.
+      config.contextAwareRouting = 'off';
+      const legacy = classifyProxyFailure({
+        status: 400,
+        errorText: '上下文长度超出限制',
+      });
+      expect(legacy.class).toBe('request_validation');
+      expect(legacy.retryChannel).toBe(false);
+    } finally {
+      config.contextAwareRouting = previousMode;
+    }
   });
 
   it('keeps model-scoped no-channel 503 from cascading protocols', () => {
