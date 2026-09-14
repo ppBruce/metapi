@@ -10,7 +10,8 @@
  * - Docker 部署默认开放（`/.dockerenv` 探测）；宿主机直跑用 METAPI_OTA_HOST_MODE=1 启用。
  * - 依赖发生变更的版本由 depsSignature 拦下，引导走镜像更新（见 updateCenterOtaManifest）。
  * - 容器被重建时写入层丢失，会回到镜像基线版本——更新中心如实展示（applied.json 随层消失）。
- * - 备份保留在 <appRoot>/.ota/backup-*，支持一键回滚。
+ * - 备份保留在 <appRoot>/.ota/backup-*，支持一键回滚；回滚窗口为一天，
+ *   过期未回滚的备份自动删除（expireStaleOtaBackup），页面不再显示回滚入口。
  * - 交换动作容忍 overlayfs 的跨层限制：镜像层目录无法被 rename（EXDEV），
  *   自动退化为复制 + 删除（见 movePath）。
  *
@@ -65,6 +66,8 @@ const JSON_TIMEOUT_MS = 15_000;
 const MAX_BUNDLE_BYTES = 200 * 1024 * 1024;
 const SWAP_ENTRIES = ['dist', 'drizzle', 'package.json'] as const;
 const PKEXEC_TIMEOUT_MS = 5 * 60 * 1000;
+/** 回滚备份保留时长：更新后一天内可回滚，过期自动清理（静默，不在页面展示）。 */
+const OTA_BACKUP_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 export type OtaPhase = 'idle' | 'downloading' | 'verifying' | 'applying' | 'restarting' | 'manual-required' | 'failed';
 
@@ -236,6 +239,22 @@ function writeAppliedInfo(root: string, info: OtaAppliedInfo): void {
   const tmp = `${target}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(info, null, 2)}\n`);
   renameSync(tmp, target);
+}
+
+/**
+ * 回滚窗口（一天）过后删除备份包；rollbackAvailable 随之变 false，页面上的回滚入口自动隐藏。
+ * 幂等：备份已不存在时直接返回；OTA 任务进行中不清理。策略本身不在页面展示。
+ */
+export function expireStaleOtaBackup(root = resolveAppRoot()): void {
+  if (otaRunning) return;
+  const info = readAppliedInfo(root);
+  if (!info || info.status !== 'applied') return;
+  if (!existsSync(info.backupDir)) return;
+  const stamp = Date.parse(info.verifiedAt || info.appliedAt);
+  if (!Number.isFinite(stamp)) return;
+  if (Date.now() - stamp < OTA_BACKUP_RETENTION_MS) return;
+  rmSync(info.backupDir, { recursive: true, force: true });
+  console.info(`[update-center] OTA backup expired (>1d without rollback), removed: ${info.backupDir}`);
 }
 
 function readJsonFile(path: string): Record<string, unknown> | null {
@@ -831,6 +850,7 @@ export function getOtaStatusPayload(): {
 } {
   const mode = resolveOtaMode();
   const support = getOtaSupport();
+  expireStaleOtaBackup();
   const applied = readAppliedInfo();
   return {
     supported: support.supported,
@@ -853,13 +873,14 @@ export async function finalizeOtaOnBoot(): Promise<void> {
     if (!info || info.status !== 'pending') return;
 
     writeAppliedInfo(root, { ...info, status: 'applied', verifiedAt: new Date().toISOString() });
+    expireStaleOtaBackup(root);
     cleanupOtaScratch(root);
 
     const checkedAt = formatUtcSqlDateTime(new Date());
     await db.insert(schema.events).values({
       type: 'status',
       title: '在线更新已应用',
-      message: `已从 v${info.fromVersion} 在线更新到 v${info.version}（OTA），可在更新中心查看或回滚。`,
+      message: `已从 v${info.fromVersion} 在线更新到 v${info.version}（OTA），如有问题可在当天内回滚`,
       level: 'info',
       relatedType: 'update_center',
       createdAt: checkedAt,

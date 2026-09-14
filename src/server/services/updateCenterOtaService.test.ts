@@ -9,8 +9,10 @@ import { describe, expect, it } from 'vitest';
 import {
   applyStagedBundle,
   decideHostApplyTier,
+  expireStaleOtaBackup,
   extractAndValidateBundle,
   generateHostApplyScript,
+  getOtaStatusPayload,
   movePath,
   probeAppRootWritable,
   readAppliedInfo,
@@ -268,6 +270,52 @@ describe('updateCenterOtaService', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(staging, { recursive: true, force: true });
+    }
+  });
+
+  it('drops the OTA rollback backup once the one-day window has passed', () => {
+    const root = makeTempRoot();
+    const prevRoot = process.env.METAPI_OTA_APP_ROOT;
+    try {
+      const backupDir = join(root, '.ota', 'backup-1.7.3-x');
+      const writeBackup = () => {
+        mkdirSync(join(backupDir, 'dist'), { recursive: true });
+        writeFileSync(join(backupDir, 'dist', 'marker.txt'), 'old');
+      };
+      const writeApplied = (appliedAt: string) => writeFileSync(
+        join(root, '.ota', 'applied.json'),
+        `${JSON.stringify({
+          status: 'applied',
+          version: '1.7.4',
+          fromVersion: '1.7.3',
+          gitSha: 'x',
+          appliedAt,
+          backupDir,
+        }, null, 2)}\n`,
+      );
+
+      writeBackup();
+      writeApplied(new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
+      expireStaleOtaBackup(root);
+      expect(existsSync(backupDir)).toBe(false);
+      expect(readAppliedInfo(root)?.status).toBe('applied');
+
+      // 状态查询同样顺手清理过期备份，并把回滚入口置为不可用
+      process.env.METAPI_OTA_APP_ROOT = root;
+      writeBackup();
+      writeApplied(new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
+      expect(getOtaStatusPayload().rollbackAvailable).toBe(false);
+      expect(existsSync(backupDir)).toBe(false);
+
+      // 窗口内的备份保持可用
+      writeBackup();
+      writeApplied(new Date().toISOString());
+      expect(getOtaStatusPayload().rollbackAvailable).toBe(true);
+      expect(existsSync(backupDir)).toBe(true);
+    } finally {
+      if (prevRoot === undefined) delete process.env.METAPI_OTA_APP_ROOT;
+      else process.env.METAPI_OTA_APP_ROOT = prevRoot;
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

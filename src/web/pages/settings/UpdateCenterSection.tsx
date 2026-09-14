@@ -149,6 +149,8 @@ export default function UpdateCenterSection() {
   }, [refreshOta, startOtaPolling, toast]);
 
   const handleOtaRollback = useCallback(async () => {
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function'
+      && !window.confirm('确认回滚到更新前版本？更新后一天内有效，回滚会重启服务。')) return;
     setOtaBusy(true);
     try {
       await api.rollbackUpdateCenterOta();
@@ -189,34 +191,46 @@ export default function UpdateCenterSection() {
     <div className="card" style={{ padding: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
         <div style={{ fontSize: 13, fontWeight: 600 }}>{tr('更新中心')}</div>
-        <button
-          className="btn btn-primary btn-sm"
-          disabled={checking || otaBusy}
-          onClick={() => {
-            if (otaBusy) return;
-            if (canApplyOnline) void handleOtaApply(otaTargetVersion);
-            else void handleCheck();
-          }}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
-        >
-          {canApplyOnline || otaBusy ? (
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, opacity: 0.92 }} aria-hidden="true">
-              <path d="M12 3v12" />
-              <path d="M8 11l4 4 4-4" />
-              <path d="M5 21h14" />
-            </svg>
-          ) : (
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
-              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-              <path d="M21 3v6h-6" />
-            </svg>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          {ota?.rollbackAvailable && (
+            <button
+              className="btn btn-sm"
+              disabled={otaBusy}
+              onClick={() => void handleOtaRollback()}
+              style={{ border: '1px solid color-mix(in srgb, var(--color-warning) 45%, transparent)', color: 'var(--color-warning)', background: 'color-mix(in srgb, var(--color-warning) 12%, var(--color-bg-card))' }}
+            >
+              {tr('回滚到更新前版本')}
+            </button>
           )}
-          {otaBusy
-            ? (otaProgressPct > 0 ? `${tr('在线更新中')} ${otaProgressPct}%` : tr('在线更新中...'))
-            : canApplyOnline
-              ? `更新到 v${otaTargetVersion}`
-              : checking ? tr('检查中...') : tr('检查更新')}
-        </button>
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={checking || otaBusy}
+            onClick={() => {
+              if (otaBusy) return;
+              if (canApplyOnline) void handleOtaApply(otaTargetVersion);
+              else void handleCheck();
+            }}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            {canApplyOnline || otaBusy ? (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, opacity: 0.92 }} aria-hidden="true">
+                <path d="M12 3v12" />
+                <path d="M8 11l4 4 4-4" />
+                <path d="M5 21h14" />
+              </svg>
+            ) : (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <path d="M21 3v6h-6" />
+              </svg>
+            )}
+            {otaBusy
+              ? (otaProgressPct > 0 ? `${tr('在线更新中')} ${otaProgressPct}%` : tr('在线更新中...'))
+              : canApplyOnline
+                ? `更新到 v${otaTargetVersion}`
+                : checking ? tr('检查中...') : tr('检查更新')}
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -264,13 +278,6 @@ export default function UpdateCenterSection() {
       {ota?.applied && (
         <div style={{ fontSize: 12, marginTop: 8, color: 'var(--color-text-muted)' }}>
           {`在线更新记录：v${ota.applied.fromVersion} → v${ota.applied.version}（${ota.applied.status}）`}
-        </div>
-      )}
-      {ota?.rollbackAvailable && (
-        <div style={{ marginTop: 10 }}>
-          <button className="btn btn-ghost btn-sm" disabled={otaBusy} onClick={() => void handleOtaRollback()}>
-            {tr('回滚到更新前版本')}
-          </button>
         </div>
       )}
 

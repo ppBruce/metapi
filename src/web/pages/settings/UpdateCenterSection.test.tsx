@@ -175,4 +175,52 @@ describe('UpdateCenterSection', () => {
 
     expect(collectText(renderer.root)).toContain('GitHub API timeout');
   });
+
+  it('places the warning-tinted rollback button left of the check-update control, with a confirm gate', async () => {
+    apiMock.getUpdateCenterOta.mockResolvedValue({
+      supported: true,
+      state: { phase: 'idle', message: '' },
+      applied: { status: 'applied', version: '1.6.0', fromVersion: '1.2.3' },
+      rollbackAvailable: true,
+    });
+    apiMock.rollbackUpdateCenterOta.mockResolvedValue({ success: true });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    const renderer = renderSection();
+    await flushMicrotasks();
+
+    const buttons = renderer.root.findAllByType('button');
+    const rollbackButton = buttons.find((btn) => collectText(btn).includes('回滚到更新前版本'));
+    // 有更新可用时主按钮变成「更新到 vX.Y.Z」——右侧主控件按 className 属性兜底匹配
+    const checkButton = buttons.find((btn) => String(btn.props.className || '').includes('btn-primary'));
+    expect(rollbackButton).toBeTruthy();
+    expect(checkButton).toBeTruthy();
+    const checkText = collectText(checkButton!);
+    expect(checkText.includes('检查更新') || checkText.includes('更新到 v')).toBe(true);
+
+    // 同一行、回滚在主按钮左侧
+    expect(rollbackButton!.parent!.instance).toBe(checkButton!.parent!.instance);
+    const rowChildren = rollbackButton!.parent!.children as Array<ReactTestInstance | string>;
+    const rollbackIndex = rowChildren.findIndex((child) => typeof child !== 'string' && child.type === 'button' && collectText(child).includes('回滚到更新前版本'));
+    const checkIndex = rowChildren.findIndex((child) => typeof child !== 'string' && child.type === 'button' && String(child.props.className || '').includes('btn-primary'));
+    expect(rollbackIndex).toBeGreaterThanOrEqual(0);
+    expect(rollbackIndex).toBeLessThan(checkIndex);
+
+    // 警示橙样式 + 文字含目标版本
+    const style = rollbackButton!.props.style as { color?: string; border?: string };
+    expect(style.color).toBe('var(--color-warning)');
+    expect(String(style.border)).toContain('--color-warning');
+
+    // 取消确认时不发起回滚
+    await act(async () => {
+      rollbackButton!.props.onClick();
+    });
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(apiMock.rollbackUpdateCenterOta).not.toHaveBeenCalled();
+
+    act(() => {
+      renderer.unmount();
+    });
+    confirmSpy.mockRestore();
+  });
 });
