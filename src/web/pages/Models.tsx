@@ -178,7 +178,6 @@ function formatContextTokens(tokens: number | null | undefined): string {
 
 function renderContextLimit(account: ModelAccountInfo) {
   if (account.contextLimit != null) {
-    const sourceLabel = account.contextSource === 'manual' ? tr('手动') : tr('实测');
     const title = account.contextSource === 'manual'
       ? tr('手动设置的值')
       : tr('基于真实流量学习') + (account.contextObservedMaxPrompt != null
@@ -187,7 +186,6 @@ function renderContextLimit(account: ModelAccountInfo) {
     return (
       <span title={title} style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
         {formatContextTokens(account.contextLimit)}
-        <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--color-text-muted)' }}>{sourceLabel}</span>
       </span>
     );
   }
@@ -200,7 +198,6 @@ function renderContextLimit(account: ModelAccountInfo) {
         style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}
       >
         {`≥${formatContextTokens(account.contextObservedMaxPrompt)}`}
-        <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--color-text-muted)' }}>{tr('实测')}</span>
       </span>
     );
   }
