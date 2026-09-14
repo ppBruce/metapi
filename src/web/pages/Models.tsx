@@ -177,21 +177,34 @@ function formatContextTokens(tokens: number | null | undefined): string {
 }
 
 function renderContextLimit(account: ModelAccountInfo) {
-  if (account.contextLimit == null) {
-    return <span style={{ color: 'var(--color-text-muted)', fontSize: 11 }}>{tr('未知')}</span>;
+  if (account.contextLimit != null) {
+    const sourceLabel = account.contextSource === 'manual' ? tr('手动') : tr('实测');
+    const title = account.contextSource === 'manual'
+      ? tr('手动设置的值')
+      : tr('基于真实流量学习') + (account.contextObservedMaxPrompt != null
+        ? ' · ' + tr('观测最大输入') + ' ' + formatContextTokens(account.contextObservedMaxPrompt)
+        : '');
+    return (
+      <span title={title} style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+        {formatContextTokens(account.contextLimit)}
+        <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--color-text-muted)' }}>{sourceLabel}</span>
+      </span>
+    );
   }
-  const sourceLabel = account.contextSource === 'manual' ? tr('手动') : tr('实测');
-  const title = account.contextSource === 'manual'
-    ? tr('手动设置的值')
-    : (account.contextObservedMaxPrompt != null
-      ? tr('基于真实流量学习') + ' · ' + tr('观测最大输入') + ' ' + formatContextTokens(account.contextObservedMaxPrompt)
-      : tr('基于真实流量学习'));
-  return (
-    <span title={title} style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
-      {formatContextTokens(account.contextLimit)}
-      <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--color-text-muted)' }}>{sourceLabel}</span>
-    </span>
-  );
+  if (account.contextObservedMaxPrompt != null && account.contextObservedMaxPrompt > 0) {
+    // No overflow has pinned the cap yet, but real traffic already proves the
+    // site accepted at least this much input — show the honest lower bound.
+    return (
+      <span
+        title={tr('基于真实流量学习') + ' · ' + tr('至少成功处理过') + ' ' + formatContextTokens(account.contextObservedMaxPrompt) + ' tokens ' + tr('输入')}
+        style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}
+      >
+        {`≥${formatContextTokens(account.contextObservedMaxPrompt)}`}
+        <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--color-text-muted)' }}>{tr('实测')}</span>
+      </span>
+    );
+  }
+  return <span style={{ color: 'var(--color-text-muted)', fontSize: 11 }}>{tr('未知')}</span>;
 }
 
 function formatThroughput(tps: number | null | undefined, sampleCount?: number | null): string {
