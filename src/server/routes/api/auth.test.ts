@@ -83,4 +83,20 @@ describe('auth routes', () => {
       message: '新 Token 至少 8 个字符',
     });
   });
+
+  it('exposes a guarded verify endpoint for the login gate', async () => {
+    const response = await app.inject({ method: 'GET', url: '/api/settings/auth/verify' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ success: true });
+  });
+
+  it('keeps the verify endpoint out of the public route allowlist', async () => {
+    const desktopModule = await import('../../desktop.js');
+
+    // Guarded by the /api onRequest hook: any mismatch now fails the login.
+    expect(desktopModule.isPublicApiRoute('/api/settings/auth/verify')).toBe(false);
+    // The bootstrap hint endpoint must stay public for desktop first-run.
+    expect(desktopModule.isPublicApiRoute('/api/settings/auth/info')).toBe(true);
+  });
 });

@@ -97,4 +97,11 @@ export async function authRoutes(app: FastifyInstance) {
 
     return { masked, bootstrapToken };
   });
+
+  // Guarded echo endpoint for the web login gate. It is intentionally NOT in
+  // the public route allowlist (isPublicApiRoute), so authMiddleware rejects a
+  // wrong token with 403 before this handler runs. The login screen validates
+  // against this route; validating against the public /auth/info above let any
+  // input "sign in" because that route never checks the Authorization header.
+  app.get('/api/settings/auth/verify', async () => ({ success: true }));
 }
