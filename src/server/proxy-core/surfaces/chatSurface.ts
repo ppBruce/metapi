@@ -1,6 +1,7 @@
 import { TextDecoder } from 'node:util';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { config } from '../../config.js';
+import { resolveRequestContextRequirement } from '../../shared/requestContextEstimate.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { reportProxyAllFailed } from '../../services/alertService.js';
 import { hasProxyUsagePayload, mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
@@ -160,10 +161,16 @@ export async function handleChatSurfaceRequest(
     proxyToken: getProxyAuthContext(request)?.token || null,
   });
   const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+  // Context-aware routing requirement for this request: estimated input +
+  // requested output budget + safety margin (walked from the downstream body).
+  const contextRequirement = resolveRequestContextRequirement(request.body, {
+    defaultOutputTokens: config.contextRoutingDefaultOutputTokens,
+    marginPct: config.contextRoutingMarginPct,
+  });
   let maxRetries = getProxyMaxChannelRetries();
   let failoverBudgetMs = 0;
   try {
-    const eligibleCount = await tokenRouter.countEligibleChannels(requestedModel, downstreamPolicy);
+    const eligibleCount = await tokenRouter.countEligibleChannels(requestedModel, downstreamPolicy, [], { requiredContextTokens: contextRequirement.requiredTokens });
     const limits = resolveProxyFailoverLimits(eligibleCount);
     maxRetries = limits.maxRetries;
     failoverBudgetMs = limits.budgetMs;
@@ -307,6 +314,7 @@ export async function handleChatSurfaceRequest(
       stickySessionKey,
       forcedChannelId,
       downstreamApiKeyId,
+      requiredContextTokens: contextRequirement.requiredTokens,
     });
     inPlaceRetryChannel = null;
 

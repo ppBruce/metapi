@@ -351,6 +351,31 @@ function ensureProbeLogsSchema() {
   `);
 }
 
+function ensureSiteModelContextSchema() {
+  execSqliteLegacyCompat(`
+    CREATE TABLE IF NOT EXISTS site_model_context (
+      id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      site_id integer NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+      model_name text NOT NULL,
+      model_name_raw text,
+      context_limit integer,
+      source text DEFAULT 'error' NOT NULL,
+      observed_max_prompt integer,
+      note text,
+      created_at text DEFAULT (datetime('now')),
+      updated_at text DEFAULT (datetime('now'))
+    );
+  `);
+  execSqliteLegacyCompat(`
+    CREATE UNIQUE INDEX IF NOT EXISTS site_model_context_site_model_unique
+    ON site_model_context(site_id, model_name);
+  `);
+  execSqliteLegacyCompat(`
+    CREATE INDEX IF NOT EXISTS site_model_context_site_id_idx
+    ON site_model_context(site_id);
+  `);
+}
+
 function ensureSiteStatusSchema() {
   if (!tableExists('sites')) {
     return;
@@ -1684,6 +1709,7 @@ function initSqliteDb() {
   ensureProxyVideoTaskSchema();
   ensureProxyFileSchema();
   ensureProbeLogsSchema();
+  ensureSiteModelContextSchema();
 
   const rawDb = drizzleSqliteProxy(
     (sqlText, params, method) => sqliteProxyQuery(sqlText, params, method as SqlMethod),

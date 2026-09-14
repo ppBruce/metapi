@@ -59,6 +59,9 @@ interface RuntimeSettingsBody {
   antiProbeMinTextLength?: number;
   codexUpstreamWebsocketEnabled?: boolean;
   streamIncludeUsageEnabled?: boolean;
+  contextAwareRouting?: 'off' | 'exclude_known' | 'strict';
+  contextRoutingMarginPct?: number;
+  contextRoutingDefaultOutputTokens?: number;
   responsesCompactFallbackToResponsesEnabled?: boolean;
   disableCrossProtocolFallback?: boolean;
   proxySessionChannelConcurrencyLimit?: number;
@@ -322,6 +325,23 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
     case 'stream_include_usage_enabled': {
       if (typeof value !== 'boolean') return;
       config.streamIncludeUsageEnabled = value;
+      return;
+    }
+    case 'context_aware_routing': {
+      if (value !== 'off' && value !== 'exclude_known' && value !== 'strict') return;
+      config.contextAwareRouting = value;
+      return;
+    }
+    case 'context_routing_margin_pct': {
+      const marginPct = Number(value);
+      if (!Number.isFinite(marginPct) || marginPct < 0) return;
+      config.contextRoutingMarginPct = Math.min(50, marginPct);
+      return;
+    }
+    case 'context_routing_default_output_tokens': {
+      const defaultOutputTokens = Number(value);
+      if (!Number.isFinite(defaultOutputTokens) || defaultOutputTokens < 0) return;
+      config.contextRoutingDefaultOutputTokens = Math.trunc(defaultOutputTokens);
       return;
     }
     case 'responses_compact_fallback_to_responses_enabled': {
@@ -590,6 +610,9 @@ async function getRuntimeSettingsResponse(currentAdminIp = '') {
     antiProbeMinTextLength,
     codexUpstreamWebsocketEnabled: config.codexUpstreamWebsocketEnabled,
     streamIncludeUsageEnabled: config.streamIncludeUsageEnabled,
+    contextAwareRouting: config.contextAwareRouting,
+    contextRoutingMarginPct: config.contextRoutingMarginPct,
+    contextRoutingDefaultOutputTokens: config.contextRoutingDefaultOutputTokens,
     responsesCompactFallbackToResponsesEnabled: config.responsesCompactFallbackToResponsesEnabled,
     disableCrossProtocolFallback: config.disableCrossProtocolFallback,
     proxySessionChannelConcurrencyLimit: config.proxySessionChannelConcurrencyLimit,
@@ -1079,6 +1102,51 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.streamIncludeUsageEnabled = nextValue;
       upsertSetting('stream_include_usage_enabled', config.streamIncludeUsageEnabled);
+    }
+
+    if (body.contextAwareRouting !== undefined) {
+      const nextMode = body.contextAwareRouting;
+      if (nextMode !== 'off' && nextMode !== 'exclude_known' && nextMode !== 'strict') {
+        return reply.code(400).send({
+          success: false,
+          message: '上下文感知路由模式无效（可选 off / exclude_known / strict）',
+        });
+      }
+      if (nextMode !== config.contextAwareRouting) {
+        changedLabels.push('上下文感知路由策略');
+      }
+      config.contextAwareRouting = nextMode;
+      upsertSetting('context_aware_routing', config.contextAwareRouting);
+    }
+
+    if (body.contextRoutingMarginPct !== undefined) {
+      const nextMargin = Number(body.contextRoutingMarginPct);
+      if (!Number.isFinite(nextMargin) || nextMargin < 0 || nextMargin > 50) {
+        return reply.code(400).send({
+          success: false,
+          message: '上下文路由安全余量无效（0-50 的百分比）',
+        });
+      }
+      if (nextMargin !== config.contextRoutingMarginPct) {
+        changedLabels.push('上下文路由安全余量');
+      }
+      config.contextRoutingMarginPct = nextMargin;
+      upsertSetting('context_routing_margin_pct', config.contextRoutingMarginPct);
+    }
+
+    if (body.contextRoutingDefaultOutputTokens !== undefined) {
+      const nextDefault = Number(body.contextRoutingDefaultOutputTokens);
+      if (!Number.isFinite(nextDefault) || nextDefault < 0) {
+        return reply.code(400).send({
+          success: false,
+          message: '上下文路由默认输出预算无效（需 >= 0）',
+        });
+      }
+      if (nextDefault !== config.contextRoutingDefaultOutputTokens) {
+        changedLabels.push('上下文路由默认输出预算');
+      }
+      config.contextRoutingDefaultOutputTokens = Math.trunc(nextDefault);
+      upsertSetting('context_routing_default_output_tokens', config.contextRoutingDefaultOutputTokens);
     }
 
     if (body.responsesCompactFallbackToResponsesEnabled !== undefined) {

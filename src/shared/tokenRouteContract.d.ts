@@ -17,7 +17,9 @@ export type RouteDecisionReasonCode =
     | 'round_robin_selected'
     | 'round_robin_waiting'
     | 'stable_first_scored'
-    | 'weighted_scored';
+    | 'weighted_scored'
+    | 'context_insufficient'
+    | 'context_unknown';
 export type RouteDecisionCandidate = {
     channelId: number;
     accountId: number;

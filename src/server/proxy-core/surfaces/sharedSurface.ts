@@ -30,6 +30,7 @@ import { recordOauthQuotaHeadersSnapshot, recordOauthQuotaResetHint } from '../.
 import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refreshSingleflight.js';
 import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.js';
 import { recordPerformanceShadowSample } from '../../services/performanceShadow.js';
+import { observeContextOverflowFailure, observeSuccessfulPromptUsage } from '../../services/siteContextCapabilityService.js';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { selectProxyChannelForAttempt } from '../channelSelection.js';
 
@@ -129,6 +130,8 @@ export async function selectSurfaceChannelForAttempt(input: {
   stickySessionKey?: string | null;
   forcedChannelId?: number | null;
   downstreamApiKeyId?: number | null;
+  /** Request's estimated context requirement (input + output budget + margin). */
+  requiredContextTokens?: number;
 }): Promise<SelectedChannel> {
   return await selectProxyChannelForAttempt(input);
 }
@@ -510,6 +513,17 @@ export async function recordSurfaceSuccess(input: {
     estimatedCost,
     input.modelName,
   );
+  // Context capability learning: a successful upstream call whose usage was
+  // reported proves the site handled at least this many input tokens.
+  if (resolvedUsage.usageSource === 'upstream' && input.selected.site?.id != null) {
+    void observeSuccessfulPromptUsage({
+      siteId: input.selected.site.id,
+      modelName: input.modelName,
+      promptTokens: resolvedUsage.promptTokens,
+    }).catch((error) => {
+      console.warn('[site-context] failed to record successful prompt usage', error);
+    });
+  }
   recordPerformanceShadowSample({
     key: {
       routeId: input.selected.channel.routeId,
@@ -765,6 +779,12 @@ export function createSurfaceFailureToolkit(input: {
         errorText: rawErrText,
         modelName: args.modelName,
       });
+      runBestEffort('observe context overflow', () => observeContextOverflowFailure({
+        siteId: args.selected.site.id,
+        modelName: args.modelName,
+        status: args.status,
+        errorText: rawErrText,
+      }));
       if (disposition.incrementFailure) {
         await tokenRouter.recordFailure(args.selected.channel.id, {
           status: args.status,
@@ -846,6 +866,12 @@ export function createSurfaceFailureToolkit(input: {
         errorText: args.failure.reason,
         modelName: args.modelName,
       });
+      runBestEffort('observe context overflow', () => observeContextOverflowFailure({
+        siteId: args.selected.site.id,
+        modelName: args.modelName,
+        status: args.failure.status,
+        errorText: args.failure.reason,
+      }));
       if (disposition.incrementFailure) {
         await tokenRouter.recordFailure(args.selected.channel.id, {
           status: args.failure.status,

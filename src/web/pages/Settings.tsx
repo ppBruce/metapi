@@ -68,6 +68,9 @@ type RuntimeSettings = {
   antiProbeMinTextLength: number;
   codexUpstreamWebsocketEnabled: boolean;
   streamIncludeUsageEnabled: boolean;
+  contextAwareRouting: 'off' | 'exclude_known' | 'strict';
+  contextRoutingMarginPct: number;
+  contextRoutingDefaultOutputTokens: number;
   responsesCompactFallbackToResponsesEnabled: boolean;
   disableCrossProtocolFallback: boolean;
   proxySessionChannelConcurrencyLimit: number;
@@ -142,6 +145,9 @@ export default function Settings() {
     antiProbeMinTextLength: 8,
     codexUpstreamWebsocketEnabled: false,
     streamIncludeUsageEnabled: true,
+    contextAwareRouting: 'exclude_known',
+    contextRoutingMarginPct: 5,
+    contextRoutingDefaultOutputTokens: 8192,
     responsesCompactFallbackToResponsesEnabled: false,
     disableCrossProtocolFallback: false,
     proxySessionChannelConcurrencyLimit: 2,
@@ -430,6 +436,15 @@ export default function Settings() {
           : 8,
         codexUpstreamWebsocketEnabled: !!runtimeInfo.codexUpstreamWebsocketEnabled,
         streamIncludeUsageEnabled: runtimeInfo.streamIncludeUsageEnabled !== false,
+        contextAwareRouting: runtimeInfo.contextAwareRouting === 'off' || runtimeInfo.contextAwareRouting === 'strict'
+          ? runtimeInfo.contextAwareRouting
+          : 'exclude_known',
+        contextRoutingMarginPct: Number(runtimeInfo.contextRoutingMarginPct) >= 0
+          ? Math.min(50, Number(runtimeInfo.contextRoutingMarginPct))
+          : 5,
+        contextRoutingDefaultOutputTokens: Number(runtimeInfo.contextRoutingDefaultOutputTokens) >= 0
+          ? Math.trunc(Number(runtimeInfo.contextRoutingDefaultOutputTokens))
+          : 8192,
         responsesCompactFallbackToResponsesEnabled: !!runtimeInfo.responsesCompactFallbackToResponsesEnabled,
         disableCrossProtocolFallback: !!runtimeInfo.disableCrossProtocolFallback,
         proxySessionChannelConcurrencyLimit: Number(runtimeInfo.proxySessionChannelConcurrencyLimit) >= 0
@@ -560,6 +575,9 @@ export default function Settings() {
       const res = await api.updateRuntimeSettings({
         codexUpstreamWebsocketEnabled: runtime.codexUpstreamWebsocketEnabled,
         streamIncludeUsageEnabled: runtime.streamIncludeUsageEnabled,
+        contextAwareRouting: runtime.contextAwareRouting,
+        contextRoutingMarginPct: runtime.contextRoutingMarginPct,
+        contextRoutingDefaultOutputTokens: runtime.contextRoutingDefaultOutputTokens,
         responsesCompactFallbackToResponsesEnabled: runtime.responsesCompactFallbackToResponsesEnabled,
         proxySessionChannelConcurrencyLimit: runtime.proxySessionChannelConcurrencyLimit,
         proxySessionChannelQueueWaitMs: runtime.proxySessionChannelQueueWaitMs,
@@ -572,6 +590,15 @@ export default function Settings() {
         streamIncludeUsageEnabled: typeof res?.streamIncludeUsageEnabled === 'boolean'
           ? res.streamIncludeUsageEnabled
           : prev.streamIncludeUsageEnabled,
+        contextAwareRouting: res?.contextAwareRouting === 'off' || res?.contextAwareRouting === 'strict'
+          ? res.contextAwareRouting
+          : (res?.contextAwareRouting === 'exclude_known' ? 'exclude_known' : prev.contextAwareRouting),
+        contextRoutingMarginPct: Number(res?.contextRoutingMarginPct) >= 0
+          ? Math.min(50, Number(res.contextRoutingMarginPct))
+          : prev.contextRoutingMarginPct,
+        contextRoutingDefaultOutputTokens: Number(res?.contextRoutingDefaultOutputTokens) >= 0
+          ? Math.trunc(Number(res.contextRoutingDefaultOutputTokens))
+          : prev.contextRoutingDefaultOutputTokens,
         responsesCompactFallbackToResponsesEnabled: typeof res?.responsesCompactFallbackToResponsesEnabled === 'boolean'
           ? res.responsesCompactFallbackToResponsesEnabled
           : prev.responsesCompactFallbackToResponsesEnabled,
@@ -1488,6 +1515,71 @@ export default function Settings() {
               style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0 }}
             />
           </label>
+          <div style={settingsModernFieldCardStyle}>
+            <div style={settingsModernFieldLabelStyle}>上下文感知路由</div>
+            <select
+              value={runtime.contextAwareRouting}
+              onChange={(e) => {
+                const nextValue = e.target.value;
+                if (nextValue !== 'off' && nextValue !== 'exclude_known' && nextValue !== 'strict') return;
+                setRuntime((prev) => ({ ...prev, contextAwareRouting: nextValue }));
+              }}
+              style={inputStyle}
+            >
+              <option value="exclude_known">仅排除已知不足（推荐）</option>
+              <option value="strict">严格：只用已知足够</option>
+              <option value="off">关闭</option>
+            </select>
+            <div style={settingsModernFieldHintStyle}>
+              按请求大小（输入估算 + 输出预算 + 余量）过滤候选站点：站点已知上下文不足时不再选中；未知站点保留，首次超限失败自动学习真实上限并在下次跳过。
+            </div>
+          </div>
+          <ResponsiveFormGrid columns={2}>
+            <div style={settingsModernFieldCardStyle}>
+              <div style={settingsModernFieldLabelStyle}>上下文安全余量（%）</div>
+              <input
+                type="number"
+                min={0}
+                max={50}
+                value={runtime.contextRoutingMarginPct}
+                onChange={(e) => {
+                  const nextValue = Number(e.target.value);
+                  setRuntime((prev) => ({
+                    ...prev,
+                    contextRoutingMarginPct: Number.isFinite(nextValue) && nextValue >= 0 && nextValue <= 50
+                      ? nextValue
+                      : prev.contextRoutingMarginPct,
+                  }));
+                }}
+                style={inputStyle}
+              />
+              <div style={settingsModernFieldHintStyle}>
+                在「输入 + 输出预算」上附加的安全系数，吸收估算误差。
+              </div>
+            </div>
+            <div style={settingsModernFieldCardStyle}>
+              <div style={settingsModernFieldLabelStyle}>默认输出预算（tokens）</div>
+              <input
+                type="number"
+                min={0}
+                step={1024}
+                value={runtime.contextRoutingDefaultOutputTokens}
+                onChange={(e) => {
+                  const nextValue = Number(e.target.value);
+                  setRuntime((prev) => ({
+                    ...prev,
+                    contextRoutingDefaultOutputTokens: Number.isFinite(nextValue) && nextValue >= 0
+                      ? Math.trunc(nextValue)
+                      : prev.contextRoutingDefaultOutputTokens,
+                  }));
+                }}
+                style={inputStyle}
+              />
+              <div style={settingsModernFieldHintStyle}>
+                请求未携带 max_tokens 时，按此预算计入上下文需求。
+              </div>
+            </div>
+          </ResponsiveFormGrid>
           <ResponsiveFormGrid columns={2}>
             <div style={settingsModernFieldCardStyle}>
               <div style={settingsModernFieldLabelStyle}>会话通道并发上限</div>

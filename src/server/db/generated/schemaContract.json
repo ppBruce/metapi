@@ -2164,6 +2164,70 @@
         }
       }
     },
+    "site_model_context": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_name_raw": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "context_limit": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "source": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'error'",
+          "primaryKey": false
+        },
+        "observed_max_prompt": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "note": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "sites": {
       "columns": {
         "id": {
@@ -3115,6 +3179,23 @@
       "unique": false
     },
     {
+      "name": "site_model_context_site_id_idx",
+      "table": "site_model_context",
+      "columns": [
+        "site_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "site_model_context_site_model_unique",
+      "table": "site_model_context",
+      "columns": [
+        "site_id",
+        "model_name"
+      ],
+      "unique": true
+    },
+    {
       "name": "sites_platform_url_unique",
       "table": "sites",
       "columns": [
@@ -3298,6 +3379,14 @@
       "columns": [
         "bucket_start_utc",
         "site_id"
+      ]
+    },
+    {
+      "name": "site_model_context_site_model_unique",
+      "table": "site_model_context",
+      "columns": [
+        "site_id",
+        "model_name"
       ]
     },
     {
@@ -3540,6 +3629,17 @@
     },
     {
       "table": "site_hour_usage",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "site_model_context",
       "columns": [
         "site_id"
       ],

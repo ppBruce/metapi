@@ -57,6 +57,9 @@ interface ModelAccountInfo {
   checkedAt?: string | null;
   balance: number;
   sourceModels?: string[];
+  contextLimit?: number | null;
+  contextSource?: 'error' | 'usage' | 'manual' | null;
+  contextObservedMaxPrompt?: number | null;
   tokens: ModelTokenInfo[];
 }
 
@@ -159,6 +162,36 @@ function renderSourceModels(account: ModelAccountInfo, canonicalName: string): s
   if (names.length === 0) return canonicalName;
   // Prefer showing original upstream names for auditability.
   return names.join(' / ');
+}
+
+function formatContextTokens(tokens: number | null | undefined): string {
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return '—';
+  if (tokens >= 1_000_000) {
+    const millions = Math.round((tokens / 1_000_000) * 10) / 10;
+    return `${millions}M`;
+  }
+  if (tokens >= 1_000) {
+    return `${Math.round(tokens / 1_000)}K`;
+  }
+  return String(tokens);
+}
+
+function renderContextLimit(account: ModelAccountInfo) {
+  if (account.contextLimit == null) {
+    return <span style={{ color: 'var(--color-text-muted)', fontSize: 11 }}>{tr('未知')}</span>;
+  }
+  const sourceLabel = account.contextSource === 'manual' ? tr('手动') : tr('实测');
+  const title = account.contextSource === 'manual'
+    ? tr('手动设置的值')
+    : (account.contextObservedMaxPrompt != null
+      ? tr('基于真实流量学习') + ' · ' + tr('观测最大输入') + ' ' + formatContextTokens(account.contextObservedMaxPrompt)
+      : tr('基于真实流量学习'));
+  return (
+    <span title={title} style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+      {formatContextTokens(account.contextLimit)}
+      <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--color-text-muted)' }}>{sourceLabel}</span>
+    </span>
+  );
 }
 
 function formatThroughput(tps: number | null | undefined, sampleCount?: number | null): string {
@@ -1343,6 +1376,10 @@ export default function Models() {
                                 <span style={{ color: 'var(--color-text-muted)' }}>{tr('上游模型')}</span>
                                 <code style={{ fontSize: 11, color: 'var(--color-text-secondary)', maxWidth: '70%', textAlign: 'right', wordBreak: 'break-all' }}>{renderSourceModels(a, m.name)}</code>
                               </div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12, alignItems: 'center' }}>
+                                <span style={{ color: 'var(--color-text-muted)' }}>{tr('上下文')}</span>
+                                {renderContextLimit(a)}
+                              </div>
                               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12 }}>
                                 <span style={{ color: 'var(--color-text-muted)' }}>{tr('延迟')}</span>
                                 <span style={{ color: getMetricColor(probeResults[m.name]?.byAccountId?.[a.id]?.latencyMs ?? a.latency), fontVariantNumeric: 'tabular-nums' }}>
@@ -1376,6 +1413,7 @@ export default function Models() {
                             <th style={{ fontWeight: 500 }}>{tr('站点')}</th>
                             <th style={{ fontWeight: 500 }}>{tr('账号')}</th>
                             <th style={{ fontWeight: 500 }}>{tr('上游模型')}</th>
+                            <th style={{ fontWeight: 500 }}>{tr('上下文')}</th>
                             <th style={{ fontWeight: 500 }}>{tr('令牌')}</th>
                             <th style={{ fontWeight: 500 }}>{tr('延迟')}</th>
                             <th style={{ fontWeight: 500 }}>{tr('连通性')}</th>
@@ -1388,6 +1426,7 @@ export default function Models() {
                               <td><SiteBadgeLink siteId={siteIdByName.get(a.site)} siteName={a.site} siteUrl={a.siteUrl} badgeStyle={{ fontSize: 11 }} /></td>
                               <td style={{ fontSize: 12 }}>{a.username || `ID:${a.id}`}</td>
                               <td style={{ fontSize: 11 }}><code style={{ wordBreak: 'break-all' }}>{renderSourceModels(a, m.name)}</code></td>
+                              <td>{renderContextLimit(a)}</td>
                               <td style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                                 {a.tokens.length > 0 ? a.tokens.map(t => (
                                   <span key={t.id} className="model-token-tag" style={{ fontSize: 11 }}>{t.name}</span>
@@ -1594,6 +1633,7 @@ export default function Models() {
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('站点')}</th>
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('账号')}</th>
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('上游模型')}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('上下文')}</th>
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('令牌')}</th>
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('延迟')}</th>
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('连通性')}</th>
@@ -1605,6 +1645,7 @@ export default function Models() {
                                     <td style={{ padding: 8 }}><SiteBadgeLink siteId={siteIdByName.get(a.site)} siteName={a.site} siteUrl={a.siteUrl} badgeStyle={{ fontSize: 11 }} /></td>
                                     <td style={{ padding: 8 }}>{a.username || `ID:${a.id}`}</td>
                                     <td style={{ padding: 8 }}><code style={{ fontSize: 11, wordBreak: 'break-all' }}>{renderSourceModels(a, m.name)}</code></td>
+                                    <td style={{ padding: 8 }}>{renderContextLimit(a)}</td>
                                     <td style={{ padding: 8, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                                       {a.tokens.length > 0 ? a.tokens.map(t => (
                                         <span key={t.id} className="model-token-tag" style={{ fontSize: 11 }}>{t.name}</span>

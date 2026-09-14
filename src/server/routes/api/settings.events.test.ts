@@ -150,6 +150,41 @@ describe('settings and auth events', () => {
     config.streamIncludeUsageEnabled = true;
   });
 
+  it('persists context-aware routing settings from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        contextAwareRouting: 'strict',
+        contextRoutingMarginPct: 8,
+        contextRoutingDefaultOutputTokens: 4096,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as {
+      contextAwareRouting?: string;
+      contextRoutingMarginPct?: number;
+      contextRoutingDefaultOutputTokens?: number;
+    };
+    expect(updated.contextAwareRouting).toBe('strict');
+    expect(updated.contextRoutingMarginPct).toBe(8);
+    expect(updated.contextRoutingDefaultOutputTokens).toBe(4096);
+    expect(config.contextAwareRouting).toBe('strict');
+
+    const savedMode = await db.select().from(schema.settings).where(eq(schema.settings.key, 'context_aware_routing')).get();
+    expect(savedMode?.value).toBe(JSON.stringify('strict'));
+    const savedMargin = await db.select().from(schema.settings).where(eq(schema.settings.key, 'context_routing_margin_pct')).get();
+    expect(savedMargin?.value).toBe(JSON.stringify(8));
+    const savedDefault = await db.select().from(schema.settings).where(eq(schema.settings.key, 'context_routing_default_output_tokens')).get();
+    expect(savedDefault?.value).toBe(JSON.stringify(4096));
+
+    // restore the defaults for sibling tests in this file
+    config.contextAwareRouting = 'exclude_known';
+    config.contextRoutingMarginPct = 5;
+    config.contextRoutingDefaultOutputTokens = 8192;
+  });
+
   it('persists codex upstream websocket and session lease settings from runtime settings', async () => {
     const updateResponse = await app.inject({
       method: 'PUT',

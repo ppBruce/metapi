@@ -1,6 +1,7 @@
 import { TextDecoder } from 'node:util';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { config } from '../../config.js';
+import { resolveRequestContextRequirement } from '../../shared/requestContextEstimate.js';
 import { reportProxyAllFailed } from '../../services/alertService.js';
 import { hasProxyUsagePayload, mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { openAiResponsesTransformer } from '../../transformers/openai/responses/index.js';
@@ -162,10 +163,15 @@ export async function handleOpenAiResponsesSurfaceRequest(
       clientIp: request.ip,
     });
     const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+    // Context-aware routing requirement (estimated input + output budget + margin).
+    const contextRequirement = resolveRequestContextRequirement(request.body, {
+      defaultOutputTokens: config.contextRoutingDefaultOutputTokens,
+      marginPct: config.contextRoutingMarginPct,
+    });
     let maxRetries = getProxyMaxChannelRetries();
   let failoverBudgetMs = 0;
   try {
-    const eligibleCount = await tokenRouter.countEligibleChannels(requestedModel, downstreamPolicy);
+    const eligibleCount = await tokenRouter.countEligibleChannels(requestedModel, downstreamPolicy, [], { requiredContextTokens: contextRequirement.requiredTokens });
     const limits = resolveProxyFailoverLimits(eligibleCount);
     maxRetries = limits.maxRetries;
     failoverBudgetMs = limits.budgetMs;
@@ -304,6 +310,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         stickySessionKey,
         forcedChannelId,
         downstreamApiKeyId,
+        requiredContextTokens: contextRequirement.requiredTokens,
       });
       inPlaceRetryChannel = null;
 

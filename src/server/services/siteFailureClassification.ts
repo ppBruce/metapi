@@ -10,6 +10,8 @@
  * Also owns the proxy failover taxonomy used by endpoint cascade and channel
  * retry so those policies do not diverge.
  */
+import { config } from '../config.js';
+import { isContextOverflowError } from '../shared/upstreamContextSignals.js';
 
 export type SiteRuntimeFailureContext = {
   status?: number | null;
@@ -440,6 +442,23 @@ export function classifyProxyFailure(context: SiteRuntimeFailureContext = {}): P
     };
   }
 
+  // Context-window overflow: the request is larger than this channel's model
+  // window. When context-aware routing is enabled, fail over to another
+  // candidate — with per-site capabilities, ANOTHER SITE may serve a larger
+  // window (the overflow that produced this error also teaches the real
+  // limit for this site×model). When disabled, keep the legacy fail-fast:
+  // without capability data every failover would hit the same rejection.
+  // Never counted as site failure (cooldownScope 'none').
+  if (isContextOverflowError(status, errorText)) {
+    return {
+      class: 'request_validation',
+      retryChannel: config.contextAwareRouting !== 'off',
+      cascadeEndpoint: false,
+      cooldownWeight: 0.1,
+      cooldownScope: 'none',
+    };
+  }
+
   if (isProtocolPolicyFailure(ctx)) {
     return {
       class: 'protocol_policy',
@@ -674,26 +693,8 @@ export function classifyProxyFailure(context: SiteRuntimeFailureContext = {}): P
         cooldownScope: 'none',
       };
     }
-    // Context overflow is a deterministic request-shape error: the prompt +
-    // tool + output budget exceeds the upstream window, so every channel
-    // serving the model rejects the same body. Fail fast instead of burning
-    // the multi-channel failover budget — the client must trim/compress.
-    if (matchesAnyPattern([
-      /maximum\s+context\s+length/i,
-      /reduce\s+the\s+length/i,
-      /context\s+length\s+exceeded/i,
-      /too\s+many\s+tokens/i,
-      /token\s+limit\s+(?:exceeded|reached)/i,
-      /上下文.*(?:超长|过长|超出)/i,
-    ], errorText)) {
-      return {
-        class: 'request_validation',
-        retryChannel: false,
-        cascadeEndpoint: false,
-        cooldownWeight: 0.1,
-        cooldownScope: 'none',
-      };
-    }
+    // Context overflow is classified at the TOP of classifyProxyFailure
+    // (failover-aware when context-aware routing is enabled).
     return {
       class: 'request_validation',
       retryChannel: true,

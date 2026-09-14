@@ -58,6 +58,21 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     config.streamIncludeUsageEnabled = streamIncludeUsageEnabled;
   }
 
+  const contextAwareRouting = parseSettingFromMap<string>(settingsMap, 'context_aware_routing');
+  if (contextAwareRouting === 'off' || contextAwareRouting === 'exclude_known' || contextAwareRouting === 'strict') {
+    config.contextAwareRouting = contextAwareRouting;
+  }
+
+  const contextRoutingMarginPct = parseSettingFromMap<number>(settingsMap, 'context_routing_margin_pct');
+  if (typeof contextRoutingMarginPct === 'number' && Number.isFinite(contextRoutingMarginPct) && contextRoutingMarginPct >= 0) {
+    config.contextRoutingMarginPct = Math.min(50, contextRoutingMarginPct);
+  }
+
+  const contextRoutingDefaultOutputTokens = parseSettingFromMap<number>(settingsMap, 'context_routing_default_output_tokens');
+  if (typeof contextRoutingDefaultOutputTokens === 'number' && Number.isFinite(contextRoutingDefaultOutputTokens) && contextRoutingDefaultOutputTokens >= 0) {
+    config.contextRoutingDefaultOutputTokens = Math.trunc(contextRoutingDefaultOutputTokens);
+  }
+
   const responsesCompactFallbackToResponsesEnabled = parseSettingFromMap<boolean>(settingsMap, 'responses_compact_fallback_to_responses_enabled');
   if (typeof responsesCompactFallbackToResponsesEnabled === 'boolean') {
     config.responsesCompactFallbackToResponsesEnabled = responsesCompactFallbackToResponsesEnabled;

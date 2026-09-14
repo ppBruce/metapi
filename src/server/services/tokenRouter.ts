@@ -46,6 +46,7 @@ import { resolveDownstreamPolicyModel } from './downstreamPolicyTypes.js';
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
 import { isUsableAccountToken } from './accountTokenService.js';
 import { getCredentialModeFromExtraConfig } from './accountExtraConfig.js';
+import { ensureSiteContextCapabilityLoaded, lookupSiteContextLimitForNames } from './siteContextCapabilityService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { parseCodexQuotaResetHint } from './oauth/quota.js';
 import {
@@ -476,6 +477,17 @@ function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
 }
 
+/** Compact token-count label for eligibility messages (131072 -> 131K). */
+function formatContextTokens(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens <= 0) return String(tokens);
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000;
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
+  return String(tokens);
+}
+
 export function isChannelRecentlyFailed(
   channel: FailureAwareChannel,
   nowMs = Date.now(),
@@ -547,6 +559,8 @@ type CandidateEligibilityOptions = {
   excludeChannelIds?: number[];
   nowIso?: string;
   downstreamPolicy?: DownstreamRoutingPolicy;
+  /** Request's estimated context requirement (input + output budget + margin). */
+  requiredContextTokens?: number;
 };
 
 
@@ -870,15 +884,16 @@ export class TokenRouter {
    * Find matching route and select a channel for the given model.
    * Returns null if no route/channel available.
    */
-  async selectChannel(requestedModel: string, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<SelectedChannel | null> {
+  async selectChannel(requestedModel: string, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY, options?: { requiredContextTokens?: number }): Promise<SelectedChannel | null> {
     const effectiveModel = resolveDownstreamPolicyModel(requestedModel, downstreamPolicy);
     if (!isModelAllowedByDownstreamPolicy(effectiveModel, downstreamPolicy)) return null;
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureSiteContextCapabilityLoaded();
     await ensureBoundedGapStatesLoaded();
 
     const match = await this.findRoute(effectiveModel, downstreamPolicy);
     if (!match) return null;
-    return await this.selectFromMatch(match, effectiveModel, downstreamPolicy);
+    return await this.selectFromMatch(match, effectiveModel, downstreamPolicy, [], true, options?.requiredContextTokens);
   }
 
   async previewSelectedChannel(
@@ -906,10 +921,12 @@ export class TokenRouter {
     requestedModel: string,
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
     excludeChannelIds: number[] = [],
+    options?: { requiredContextTokens?: number },
   ): Promise<number> {
     const effectiveModel = resolveDownstreamPolicyModel(requestedModel, downstreamPolicy);
     if (!isModelAllowedByDownstreamPolicy(effectiveModel, downstreamPolicy)) return 0;
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureSiteContextCapabilityLoaded();
     const match = await this.findRoute(effectiveModel, downstreamPolicy);
     if (!match) return 0;
     const nowIso = new Date().toISOString();
@@ -921,6 +938,7 @@ export class TokenRouter {
         excludeChannelIds,
         nowIso,
         downstreamPolicy,
+        requiredContextTokens: options?.requiredContextTokens,
       }).length === 0
     )).length;
   }
@@ -929,14 +947,16 @@ export class TokenRouter {
     requestedModel: string,
     excludeChannelIds: number[],
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+    options?: { requiredContextTokens?: number },
   ): Promise<SelectedChannel | null> {
     const effectiveModel = resolveDownstreamPolicyModel(requestedModel, downstreamPolicy);
     if (!isModelAllowedByDownstreamPolicy(effectiveModel, downstreamPolicy)) return null;
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureSiteContextCapabilityLoaded();
 
     const match = await this.findRoute(effectiveModel, downstreamPolicy);
     if (!match) return null;
-    return await this.selectFromMatch(match, effectiveModel, downstreamPolicy, excludeChannelIds);
+    return await this.selectFromMatch(match, effectiveModel, downstreamPolicy, excludeChannelIds, true, options?.requiredContextTokens);
   }
 
   /**
@@ -969,6 +989,7 @@ export class TokenRouter {
     const normalizedPreferredChannelId = Math.trunc(preferredChannelId || 0);
     if (normalizedPreferredChannelId <= 0) return null;
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureSiteContextCapabilityLoaded();
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
@@ -2397,6 +2418,7 @@ export class TokenRouter {
     downstreamPolicy: DownstreamRoutingPolicy,
     excludeChannelIds: number[] = [],
     recordSelection = true,
+    requiredContextTokens?: number,
   ): Promise<SelectedChannel | null> {
     const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
     const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
@@ -2415,6 +2437,7 @@ export class TokenRouter {
         excludeChannelIds,
         nowIso,
         downstreamPolicy,
+        requiredContextTokens,
       }).length === 0
     ));
 
@@ -2630,6 +2653,7 @@ export class TokenRouter {
         excludeChannelIds,
         nowIso,
         downstreamPolicy,
+        requiredContextTokens: options?.requiredContextTokens,
       }).length === 0
     ));
 
@@ -3036,6 +3060,28 @@ export class TokenRouter {
     const bypassSourceModelCheck = options.bypassSourceModelCheck ?? false;
     const excludeChannelIds = options.excludeChannelIds ?? [];
     const nowIso = options.nowIso ?? new Date().toISOString();
+
+    // Context-aware routing: a site whose KNOWN effective context window
+    // (learned per site×model from upstream errors / manual pins) cannot fit
+    // this request is excluded. Unknown limits never exclude (fail-open —
+    // the first overflow on such a site teaches the real value and the next
+    // attempt skips it). 'strict' additionally drops unknown-limit sites.
+    const requiredContextTokens = Math.trunc(Number(options.requiredContextTokens) || 0);
+    if (requiredContextTokens > 0 && config.contextAwareRouting !== 'off') {
+      const knownContext = lookupSiteContextLimitForNames(candidate.site.id, [
+        candidate.channel.sourceModel,
+        options.requestedModel,
+      ]);
+      if (knownContext && requiredContextTokens > knownContext.limit) {
+        addReason(
+          'context_insufficient',
+          `站点上下文 ${formatContextTokens(knownContext.limit)} < 本次需求 ${formatContextTokens(requiredContextTokens)}`,
+          { siteContextLimit: knownContext.limit, requiredContextTokens },
+        );
+      } else if (!knownContext && config.contextAwareRouting === 'strict') {
+        addReason('context_unknown', '站点上下文未知（严格模式）');
+      }
+    }
 
     if (!bypassSourceModelCheck && !channelSupportsRequestedModel(candidate.channel.sourceModel, options.requestedModel)) {
       addReason('source_model_mismatch', `来源模型不匹配=${candidate.channel.sourceModel || ''}`, {

@@ -1,6 +1,7 @@
 ﻿import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { fetch } from 'undici';
 import { config } from '../../config.js';
+import { resolveRequestContextRequirement } from '../../shared/requestContextEstimate.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
@@ -45,6 +46,11 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       clientIp: request.ip,
     });
     const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+    // Context-aware routing requirement (estimated input + output budget + margin).
+    const contextRequirement = resolveRequestContextRequirement(body, {
+      defaultOutputTokens: config.contextRoutingDefaultOutputTokens,
+      marginPct: config.contextRoutingMarginPct,
+    });
     const downstreamPath = '/v1/completions';
     const clientContext = detectDownstreamClientContext({
       downstreamPath,
@@ -58,7 +64,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
     let maxRetries = getProxyMaxChannelRetries();
     let failoverBudgetMs = 0;
     try {
-      const eligibleCount = await tokenRouter.countEligibleChannels(requestedModel, downstreamPolicy);
+      const eligibleCount = await tokenRouter.countEligibleChannels(requestedModel, downstreamPolicy, [], { requiredContextTokens: contextRequirement.requiredTokens });
       const limits = resolveProxyFailoverLimits(eligibleCount);
       maxRetries = limits.maxRetries;
       failoverBudgetMs = limits.budgetMs;
@@ -75,6 +81,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         excludeChannelIds,
         retryCount,
         forcedChannelId,
+        requiredContextTokens: contextRequirement.requiredTokens,
       });
 
       if (!selected) {

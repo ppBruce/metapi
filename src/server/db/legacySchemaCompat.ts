@@ -43,6 +43,7 @@ const BOOTSTRAP_OWNED_LEGACY_TABLES = [
   'proxy_video_tasks',
   'downstream_api_keys',
   'probe_logs',
+  'site_model_context',
 ];
 
 const BOOTSTRAP_OWNED_LEGACY_COLUMNS = [
@@ -85,6 +86,8 @@ const BOOTSTRAP_OWNED_LEGACY_INDEXES = [
   'probe_logs_account_created_at_idx',
   'probe_logs_model_created_at_idx',
   'probe_logs_status_created_at_idx',
+  'site_model_context_site_model_unique',
+  'site_model_context_site_id_idx',
 ];
 
 function normalizeSqlText(sqlText: string): string {

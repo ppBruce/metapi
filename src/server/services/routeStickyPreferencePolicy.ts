@@ -14,6 +14,8 @@ export const STICKY_PREFERRED_YIELD_LOW_COVERAGE = 5;
 export type PreferredChannelSelectionOptions = {
   /** Yield (return null) when the preferred channel's known balance coverage is low. */
   yieldOnLowBalance?: boolean;
+  /** Request's estimated context requirement (context-aware routing filter). */
+  requiredContextTokens?: number;
 };
 
 type CostSignal = {

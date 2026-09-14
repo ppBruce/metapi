@@ -154,6 +154,9 @@ describe('Settings proxy transport', () => {
       expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith({
         codexUpstreamWebsocketEnabled: true,
         streamIncludeUsageEnabled: true,
+        contextAwareRouting: 'exclude_known',
+        contextRoutingDefaultOutputTokens: 8192,
+        contextRoutingMarginPct: 5,
         responsesCompactFallbackToResponsesEnabled: true,
         proxySessionChannelConcurrencyLimit: 6,
         proxySessionChannelQueueWaitMs: 4200,

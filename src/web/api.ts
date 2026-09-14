@@ -306,6 +306,9 @@ export type RuntimeSettingsPayload = {
   antiProbeMinTextLength?: number;
   codexUpstreamWebsocketEnabled?: boolean;
   streamIncludeUsageEnabled?: boolean;
+  contextAwareRouting?: 'off' | 'exclude_known' | 'strict';
+  contextRoutingMarginPct?: number;
+  contextRoutingDefaultOutputTokens?: number;
   responsesCompactFallbackToResponsesEnabled?: boolean;
   disableCrossProtocolFallback?: boolean;
   proxySessionChannelConcurrencyLimit?: number;

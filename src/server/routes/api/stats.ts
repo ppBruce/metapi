@@ -13,6 +13,10 @@ import { refreshModelsForAccount } from '../../services/modelService.js';
 import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import { lookupModelsDevCapabilities } from '../../services/modelCapabilitiesService.js';
 import {
+  ensureSiteContextCapabilityLoaded,
+  lookupSiteContextLimitForNames,
+} from '../../services/siteContextCapabilityService.js';
+import {
   fetchModelPricingCatalog,
 } from '../../services/modelPricingService.js';
 import {
@@ -1519,6 +1523,9 @@ export async function statsRoutes(app: FastifyInstance) {
               balance: number;
               sourceModels: string[];
               tokens: Array<{ id: number; name: string; isDefault: boolean }>;
+              contextLimit?: number | null;
+              contextSource?: 'error' | 'usage' | 'manual' | null;
+              contextObservedMaxPrompt?: number | null;
             }
           >;
         }
@@ -1653,6 +1660,18 @@ export async function statsRoutes(app: FastifyInstance) {
       for (const [name, entry] of Object.entries(modelMap)) {
         if (entry.accountsById.size === 0) {
           delete modelMap[name];
+        }
+      }
+
+      // Context capability (per site×model): attach the learned effective
+      // window + evidence source so the marketplace can show it per site row.
+      await ensureSiteContextCapabilityLoaded();
+      for (const entry of Object.values(modelMap)) {
+        for (const account of entry.accountsById.values()) {
+          const contextHit = lookupSiteContextLimitForNames(account.siteId, [entry.name, ...account.sourceModels]);
+          account.contextLimit = contextHit ? contextHit.limit : null;
+          account.contextSource = contextHit ? contextHit.source : null;
+          account.contextObservedMaxPrompt = contextHit ? (contextHit.observedMaxPrompt ?? null) : null;
         }
       }
 

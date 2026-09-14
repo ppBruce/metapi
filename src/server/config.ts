@@ -64,6 +64,15 @@ function parseDbType(value: string | undefined): 'sqlite' | 'mysql' | 'postgres'
   return 'sqlite';
 }
 
+export type ContextAwareRoutingMode = 'off' | 'exclude_known' | 'strict';
+
+function parseContextAwareRoutingMode(value: string | undefined): ContextAwareRoutingMode {
+  const normalized = (value || 'exclude_known').trim().toLowerCase();
+  if (normalized === 'off' || normalized === 'false' || normalized === '0' || normalized === 'disabled') return 'off';
+  if (normalized === 'strict') return 'strict';
+  return 'exclude_known';
+}
+
 export function normalizeTokenRouterFailureCooldownMaxSec(value: unknown): number | null {
   const normalized = Number(value);
   if (!Number.isFinite(normalized) || normalized <= 0) return null;
@@ -210,6 +219,16 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     // Ask OpenAI-compatible upstreams to emit the final usage frame on streams
     // (stream_options.include_usage). On by default; runtime-toggleable via settings.
     streamIncludeUsageEnabled: parseBoolean(env.STREAM_INCLUDE_USAGE_ENABLED, true),
+    // Context-aware routing: exclude candidate sites whose KNOWN effective
+    // context window cannot fit the request (input estimate + output budget,
+    // learned per site×model from upstream errors/metadata/manual pins).
+    // 'off' disables filtering and failover-on-overflow; 'exclude_known' only
+    // filters sites with a confirmed limit below the requirement; 'strict'
+    // additionally requires every candidate to be known-sufficient.
+    // Runtime-toggleable via settings (context_aware_routing).
+    contextAwareRouting: parseContextAwareRoutingMode(env.CONTEXT_AWARE_ROUTING),
+    contextRoutingMarginPct: Math.max(0, Math.min(50, parseNumber(env.CONTEXT_ROUTING_MARGIN_PCT, 5))),
+    contextRoutingDefaultOutputTokens: Math.max(0, Math.trunc(parseNumber(env.CONTEXT_ROUTING_DEFAULT_OUTPUT_TOKENS, 8192))),
     responsesCompactFallbackToResponsesEnabled: parseBoolean(env.RESPONSES_COMPACT_FALLBACK_TO_RESPONSES_ENABLED, false),
     disableCrossProtocolFallback: parseBoolean(env.DISABLE_CROSS_PROTOCOL_FALLBACK, false),
     proxyDebugTraceEnabled: parseBoolean(env.PROXY_DEBUG_TRACE_ENABLED, false),

@@ -56,6 +56,27 @@ export const siteDisabledModels = sqliteTable('site_disabled_models', {
   siteIdIdx: index('site_disabled_models_site_id_idx').on(table.siteId),
 }));
 
+// Per-site effective context window, learned from live traffic / metadata /
+// manual entry. `model_name` is the canonical form used for matching;
+// `model_name_raw` keeps the last observed upstream spelling. `source`:
+// 'error' (parsed from an upstream context-overflow error), 'usage' (only a
+// lower bound observed), 'manual' (user-pinned, never auto-overwritten).
+export const siteModelContext = sqliteTable('site_model_context', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  modelName: text('model_name').notNull(),
+  modelNameRaw: text('model_name_raw'),
+  contextLimit: integer('context_limit'),
+  source: text('source').notNull().default('error'),
+  observedMaxPrompt: integer('observed_max_prompt'),
+  note: text('note'),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  siteModelUnique: uniqueIndex('site_model_context_site_model_unique').on(table.siteId, table.modelName),
+  siteIdIdx: index('site_model_context_site_id_idx').on(table.siteId),
+}));
+
 export const accounts = sqliteTable('accounts', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
