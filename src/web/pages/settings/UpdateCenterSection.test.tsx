@@ -125,7 +125,7 @@ describe('UpdateCenterSection', () => {
     await flushMicrotasks();
 
     const buttons = renderer.root.findAllByType('button');
-    const updateButton = buttons.find((btn) => collectText(btn).includes('在线更新到 v1.6.0'));
+    const updateButton = buttons.find((btn) => collectText(btn).includes('更新到 v1.6.0'));
     expect(updateButton).toBeTruthy();
 
     await act(async () => {

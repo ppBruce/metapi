@@ -173,6 +173,11 @@ export default function UpdateCenterSection() {
     dockerHubTag: status?.dockerHubTag,
   });
 
+  const canApplyOnline = Boolean(ota?.supported && reminder.highlight && otaTargetVersion);
+  const otaProgressPct = typeof ota?.state?.progressPct === 'number' && ota.state.progressPct > 0
+    ? Math.round(ota.state.progressPct)
+    : 0;
+
   const rows: Array<{ label: string; value: string }> = [
     { label: tr('当前版本'), value: status?.currentVersion || '—' },
     { label: 'GitHub Releases', value: renderCandidateVersion(status?.githubRelease) },
@@ -186,10 +191,31 @@ export default function UpdateCenterSection() {
         <div style={{ fontSize: 13, fontWeight: 600 }}>{tr('更新中心')}</div>
         <button
           className="btn btn-primary btn-sm"
-          disabled={checking}
-          onClick={() => void handleCheck()}
+          disabled={checking || otaBusy}
+          onClick={() => {
+            if (otaBusy) return;
+            if (canApplyOnline) void handleOtaApply(otaTargetVersion);
+            else void handleCheck();
+          }}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
         >
-          {checking ? tr('检查中...') : tr('检查更新')}
+          {canApplyOnline || otaBusy ? (
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--color-warning)', flexShrink: 0 }} aria-hidden="true">
+              <path d="M12 3v12" />
+              <path d="M8 11l4 4 4-4" />
+              <path d="M5 21h14" />
+            </svg>
+          ) : (
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          )}
+          {otaBusy
+            ? (otaProgressPct > 0 ? `${tr('在线更新中')} ${otaProgressPct}%` : tr('在线更新中...'))
+            : canApplyOnline
+              ? `更新到 v${otaTargetVersion}`
+              : checking ? tr('检查中...') : tr('检查更新')}
         </button>
       </div>
 
@@ -214,20 +240,6 @@ export default function UpdateCenterSection() {
         ))}
       </div>
 
-      {ota?.supported && reminder.highlight && otaTargetVersion && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-          <button
-            className="btn btn-primary btn-sm"
-            disabled={otaBusy}
-            onClick={() => void handleOtaApply(otaTargetVersion)}
-          >
-            {otaBusy ? tr('在线更新中...') : `在线更新到 v${otaTargetVersion}`}
-          </button>
-          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-            热替换方式更新（OTA），失败可回滚
-          </span>
-        </div>
-      )}
       {ota?.supported && ota.mode === 'host' && ota.host && (
         <div style={{ fontSize: 12, marginTop: 8, color: 'var(--color-text-muted)' }}>
           {ota.host.tier === 'direct'
