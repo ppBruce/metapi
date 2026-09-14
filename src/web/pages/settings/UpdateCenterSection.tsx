@@ -200,7 +200,7 @@ export default function UpdateCenterSection() {
           style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
         >
           {canApplyOnline || otaBusy ? (
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--color-warning)', flexShrink: 0 }} aria-hidden="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, opacity: 0.92 }} aria-hidden="true">
               <path d="M12 3v12" />
               <path d="M8 11l4 4 4-4" />
               <path d="M5 21h14" />
