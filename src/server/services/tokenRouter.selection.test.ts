@@ -9,6 +9,7 @@ type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
 type ConfigModule = typeof import('../config.js');
 type ProxyChannelCoordinatorModule = typeof import('./proxyChannelCoordinator.js');
+type SiteContextModule = typeof import('./siteContextCapabilityService.js');
 
 const mockedCatalogRoutingCost = vi.fn<(
   input: { siteId: number; accountId: number; modelName: string }
@@ -34,6 +35,8 @@ describe('TokenRouter selection scoring', () => {
   let config: ConfigModule['config'];
   let proxyChannelCoordinator: ProxyChannelCoordinatorModule['proxyChannelCoordinator'];
   let resetProxyChannelCoordinatorState: ProxyChannelCoordinatorModule['resetProxyChannelCoordinatorState'];
+  let resetSiteContextCapabilityCache: SiteContextModule['__resetSiteContextCapabilityCacheForTests'];
+  let ensureSiteContextCapabilityLoaded: SiteContextModule['ensureSiteContextCapabilityLoaded'];
   let dataDir = '';
   let idSeed = 0;
   let originalRoutingWeights: typeof config.routingWeights;
@@ -56,6 +59,7 @@ describe('TokenRouter selection scoring', () => {
     const tokenRouterModule = await import('./tokenRouter.js');
     const configModule = await import('../config.js');
     const coordinatorModule = await import('./proxyChannelCoordinator.js');
+    const siteContextModule = await import('./siteContextCapabilityService.js');
     db = dbModule.db;
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
@@ -67,6 +71,8 @@ describe('TokenRouter selection scoring', () => {
     config = configModule.config;
     proxyChannelCoordinator = coordinatorModule.proxyChannelCoordinator;
     resetProxyChannelCoordinatorState = coordinatorModule.resetProxyChannelCoordinatorState;
+    resetSiteContextCapabilityCache = siteContextModule.__resetSiteContextCapabilityCacheForTests;
+    ensureSiteContextCapabilityLoaded = siteContextModule.ensureSiteContextCapabilityLoaded;
     originalRoutingWeights = { ...config.routingWeights };
     originalDefaultRoutingStrategy = config.defaultRoutingStrategy;
     originalRoutingFallbackUnitCost = config.routingFallbackUnitCost;
@@ -84,12 +90,14 @@ describe('TokenRouter selection scoring', () => {
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.settings).run();
+    await db.delete(schema.siteModelContext).run();
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
     resetSiteRuntimeHealthState();
     resetProxyChannelCoordinatorState();
+    resetSiteContextCapabilityCache();
   });
 
   afterAll(() => {
@@ -177,6 +185,42 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.summary.some((item) => item.includes('分层轮询：P0'))).toBe(true);
     expect(decision.candidates.find((item) => item.channelId === low.id)?.reasonCodes)
       .toContain('round_robin_waiting');
+  });
+
+  it('fails open when the context filter would empty the whole candidate set', async () => {
+    config.contextAwareRouting = 'exclude_known';
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'context-fallback-model',
+      enabled: true,
+    }).returning().get();
+    const site = await createSite('ctx-fallback');
+    const account = await createAccount(site.id, 'ctx-fallback');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id, accountId: account.id, priority: 0, weight: 10, enabled: true,
+    }).returning().get();
+
+    // A real overflow already taught this site a small window for the model.
+    await db.insert(schema.siteModelContext).values({
+      siteId: site.id,
+      modelName: 'context-fallback-model',
+      contextLimit: 32_000,
+      source: 'error',
+    }).run();
+    resetSiteContextCapabilityCache();
+    await ensureSiteContextCapabilityLoaded();
+
+    const router = new TokenRouter();
+
+    // Requirement exceeds every known window: the filter would empty the set,
+    // so availability-first must still hand the request to the only channel.
+    const selected = await router.selectChannel('context-fallback-model', undefined, {
+      requiredContextTokens: 200_000,
+    });
+    expect(selected?.channel.id).toBe(channel.id);
+
+    // Without a context requirement the call shape and outcome are unchanged.
+    const plain = await new TokenRouter().selectChannel('context-fallback-model');
+    expect(plain?.channel.id).toBe(channel.id);
   });
 
   it('reuses a preferred channel only while it remains healthy', async () => {

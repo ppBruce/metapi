@@ -931,16 +931,27 @@ export class TokenRouter {
     if (!match) return 0;
     const nowIso = new Date().toISOString();
     const requestedByDisplayName = isRouteDisplayNameMatch(effectiveModel, match.route.displayName);
-    return match.channels.filter((candidate) => (
+    const countWith = (contextTokens?: number): number => match.channels.filter((candidate) => (
       this.getCandidateEligibilityReasons(candidate, {
         requestedModel: effectiveModel,
         bypassSourceModelCheck: requestedByDisplayName,
         excludeChannelIds,
         nowIso,
         downstreamPolicy,
-        requiredContextTokens: options?.requiredContextTokens,
+        requiredContextTokens: contextTokens,
       }).length === 0
     )).length;
+    const eligibleCount = countWith(options?.requiredContextTokens);
+    if (
+      eligibleCount === 0
+      && (options?.requiredContextTokens ?? 0) > 0
+      && config.contextAwareRouting !== 'off'
+    ) {
+      // Same availability-first fallback as selectFromMatch so the failover
+      // budget is sized for the set the attempt will actually use.
+      return countWith(undefined);
+    }
+    return eligibleCount;
   }
 
   async selectNextChannel(
@@ -2430,16 +2441,34 @@ export class TokenRouter {
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
-    const available = match.channels.filter((candidate) => (
-      this.getCandidateEligibilityReasons(candidate, {
-        requestedModel,
-        bypassSourceModelCheck,
-        excludeChannelIds,
-        nowIso,
-        downstreamPolicy,
-        requiredContextTokens,
-      }).length === 0
+    const eligibilityOptions = {
+      requestedModel,
+      bypassSourceModelCheck,
+      excludeChannelIds,
+      nowIso,
+      downstreamPolicy,
+      requiredContextTokens,
+    };
+    let available = match.channels.filter((candidate) => (
+      this.getCandidateEligibilityReasons(candidate, eligibilityOptions).length === 0
     ));
+
+    if (
+      available.length === 0
+      && requiredContextTokens != null && requiredContextTokens > 0
+      && config.contextAwareRouting !== 'off'
+    ) {
+      // Availability first: the context filter must never be the ONLY reason a
+      // request ends up with no channel at all. Learned limits can be stale
+      // (site upgraded, misparsed error) and the requirement is an estimate —
+      // fall back to the full candidate set and let the attempt itself decide.
+      available = match.channels.filter((candidate) => (
+        this.getCandidateEligibilityReasons(candidate, {
+          ...eligibilityOptions,
+          requiredContextTokens: undefined,
+        }).length === 0
+      ));
+    }
 
     if (available.length === 0) return null;
 
