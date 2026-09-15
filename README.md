@@ -337,6 +337,6 @@ Metapi 完全自托管，所有数据（账号、令牌、路由、日志）均�
 
 **⭐ 如果 Metapi 对你有帮助，给个 Star 就是最大的支持！**
 
-`<sub>`Built with ❤️ by the AI community`</sub>`
+<sub>Built with ❤️ by the AI community</sub>
 
 </div>
