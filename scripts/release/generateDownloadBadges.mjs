@@ -1,18 +1,23 @@
 #!/usr/bin/env node
-// Download links for GitHub Release bodies and the README download blocks.
-// FlClash-style: one line per OS, each shields.io badge is itself a direct
-// download link. No version is hardcoded — every file name is read from the
-// artifacts directory, so tagged releases, nightlies and the READMEs all use
-// this one script.
+// Download links for GitHub Release bodies and the README header.
+// No version is hardcoded — every file name is read from the artifacts
+// directory, so tagged releases, nightlies and the READMEs share one script.
+//
+// Two layouts, picked by --format:
+//   md   release body: one labelled line per OS (bold title + badges), the
+//        unmatched files collapsed at the bottom. Bold titles read well on a
+//        release page and keep the mac architectures apart.
+//   html README header: a single row of badges whose labels carry the variant
+//        (Setup / Portable / ARM / Intel / ...) — the logos already say which
+//        OS, so no label text sits next to the badges and nothing can drift
+//        out of line. Measured at ~580px, i.e. narrower than the badge row
+//        above it, so it stays on one line instead of wrapping mid-group.
 //
 // Usage:
-//   # release body (markdown, stdout or --out)
 //   node scripts/release/generateDownloadBadges.mjs --tag v1.7.6 --dir release-assets \
-//     --out release-body.md
-//
-//   # rewrite the block between the markers in the READMEs (idempotent)
+//     --registries --pull-command --out release-body.md
 //   node scripts/release/generateDownloadBadges.mjs --tag v1.7.6 --dir release-assets \
-//     --format html --inplace README.md --inplace README_EN.md
+//     --format html --registries --image-tag latest --inplace README.md --inplace README_EN.md
 //
 // Exit codes: 0 = links produced; 1 = usage/IO error; 2 = no asset matched.
 
@@ -20,9 +25,11 @@ import { readdirSync, statSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const REPO = 'wyf9661/metapi';
+// The image is published under the same owner/repo slug (Docker Hub + ghcr,
+// multi-arch manifests for `latest` and the git tag).
+const IMAGE = REPO;
 const MARKER_START = '<!-- downloads:start -->';
 const MARKER_END = '<!-- downloads:end -->';
-const RELEASES_URL = `https://github.com/${REPO}/releases`;
 
 const badgeUrl = ({ label, color, logo, logoColor = 'white' }) => {
   // shields.io path encoding: '-' must be escaped as '--', '_' as '__',
@@ -36,57 +43,92 @@ const badgeUrl = ({ label, color, logo, logoColor = 'white' }) => {
 };
 
 const assetUrl = (tag, name) =>
-  `${RELEASES_URL}/download/${encodeURIComponent(tag)}/${encodeURIComponent(name)}`;
+  `https://github.com/${REPO}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(name)}`;
 
 const isMac = (name) => name.includes('-mac-');
 const isArm = (name) => /(arm64|aarch64)/.test(name);
 const isZip = (name) => name.endsWith('.zip');
 
-// Order here is the display order. Each badge matches the asset file names it
-// links to; a badge that matches nothing is dropped from the row.
+// Simple Icons dropped the Windows glyph (present in v12, 404 in v14), so
+// shields' `logo=windows` silently renders the badge without any icon. Inline
+// the official glyph as a data URI instead of depending on a removed slug.
+// The colour has to be baked in: shields embeds the inlined glyph as an
+// <image>, so logoColor=white cannot reach it and it would render black.
+const WINDOWS_LOGO =
+  'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTAsMEgxMS4zNzdWMTEuMzcySDBaTTEyLjYyMywwSDI0VjExLjM3MkgxMi42MjNaTTAsMTIuNjIzSDExLjM3N1YyNEgwWm0xMi42MjMsMEgyNFYyNEgxMi42MjMiLz48L3N2Zz4=';
+const WINDOWS = { logo: WINDOWS_LOGO, color: '0078D4' };
+const APPLE = { logo: 'apple', color: '000000' };
+const DOCKER = { logo: 'docker', color: '2496ED' };
+
+// Order here is the display order. `label` is used on the labelled (release
+// body) layout, `short` on the single README row; `compact: false` marks a
+// badge that only belongs in the labelled layout because it would push the
+// single row past the reading column.
 const GROUPS = [
   {
     title: 'Windows x64',
     badges: [
-      { test: (n) => n.endsWith('.exe'), label: 'Setup', logo: 'windows', color: '0078D4' },
-      { test: (n) => isZip(n) && n.includes('-win-'), label: 'Portable', logo: 'windows', color: '0078D4' },
+      { test: (n) => n.endsWith('.exe'), label: 'Setup', short: 'Setup', ...WINDOWS },
+      { test: (n) => isZip(n) && n.includes('-win-'), label: 'Portable', short: 'Portable', ...WINDOWS },
     ],
   },
   {
     title: 'macOS Apple Silicon',
     badges: [
-      { test: (n) => n.endsWith('.dmg') && isMac(n) && isArm(n), label: 'DMG', logo: 'apple', color: '000000' },
-      { test: (n) => isZip(n) && isMac(n) && isArm(n), label: 'ZIP', logo: 'apple', color: '000000' },
+      { test: (n) => n.endsWith('.dmg') && isMac(n) && isArm(n), label: 'DMG', short: 'ARM', ...APPLE },
+      { test: (n) => isZip(n) && isMac(n) && isArm(n), label: 'ZIP', short: 'ARM ZIP', compact: false, ...APPLE },
     ],
   },
   {
     title: 'macOS Intel',
     badges: [
-      { test: (n) => n.endsWith('.dmg') && isMac(n) && !isArm(n), label: 'DMG', logo: 'apple', color: '000000' },
-      { test: (n) => isZip(n) && isMac(n) && !isArm(n), label: 'ZIP', logo: 'apple', color: '000000' },
+      { test: (n) => n.endsWith('.dmg') && isMac(n) && !isArm(n), label: 'DMG', short: 'Intel', ...APPLE },
+      { test: (n) => isZip(n) && isMac(n) && !isArm(n), label: 'ZIP', short: 'Intel ZIP', compact: false, ...APPLE },
     ],
   },
   {
     title: 'Linux x64',
     badges: [
-      { test: (n) => n.endsWith('.AppImage'), label: 'AppImage', logo: 'linux', color: 'FCC624', logoColor: 'black' },
-      { test: (n) => n.endsWith('.deb'), label: 'DEB', logo: 'debian', color: 'A800D2' },
-      { test: (n) => n.endsWith('.rpm'), label: 'RPM', logo: 'redhat', color: 'EE0000' },
+      { test: (n) => n.endsWith('.AppImage'), label: 'AppImage', short: 'AppImage', logo: 'linux', color: 'FCC624', logoColor: 'black' },
+      { test: (n) => n.endsWith('.deb'), label: 'DEB', short: 'DEB', logo: 'debian', color: 'A800D2' },
+      { test: (n) => n.endsWith('.rpm'), label: 'RPM', short: 'RPM', logo: 'redhat', color: 'EE0000' },
     ],
   },
   {
     // Nightly only: the per-arch docker image tars (`...-<arch>.tar.gz`).
     title: 'Docker (docker load)',
     badges: [
-      { test: (n) => /-amd64\.tar\.gz$/.test(n), label: 'Docker amd64', logo: 'docker', color: '2496ED' },
-      { test: (n) => /-arm64\.tar\.gz$/.test(n), label: 'Docker arm64', logo: 'docker', color: '2496ED' },
-      { test: (n) => /-armv7\.tar\.gz$/.test(n), label: 'Docker armv7', logo: 'docker', color: '2496ED' },
+      { test: (n) => /-amd64\.tar\.gz$/.test(n), label: 'Docker amd64', short: 'amd64', ...DOCKER },
+      { test: (n) => /-arm64\.tar\.gz$/.test(n), label: 'Docker arm64', short: 'arm64', ...DOCKER },
+      { test: (n) => /-armv7\.tar\.gz$/.test(n), label: 'Docker armv7', short: 'armv7', ...DOCKER },
     ],
   },
 ];
 
+// Registry listings are not release assets, so they come from the repo slug.
+// Opt-in via --registries: the nightly release only ships image tars and must
+// not advertise a nightly image tag.
+const REGISTRIES = [
+  {
+    label: 'Docker Hub',
+    short: 'Docker Hub',
+    href: `https://hub.docker.com/r/${IMAGE}/tags`,
+    ...DOCKER,
+  },
+  {
+    label: 'ghcr.io',
+    short: 'ghcr.io',
+    href: `https://github.com/${REPO}/pkgs/container/${REPO.split('/')[1]}`,
+    logo: 'github',
+    color: '181717',
+  },
+];
+
 const parseArgs = () => {
-  const args = { tag: '', dir: '', format: 'md', out: '', inplace: [] };
+  const args = {
+    tag: '', dir: '', format: 'md', out: '', inplace: [],
+    registries: false, imageTag: '', pullCommand: false,
+  };
   const rest = process.argv.slice(2);
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i];
@@ -95,63 +137,78 @@ const parseArgs = () => {
     else if (arg === '--format') args.format = rest[++i] ?? 'md';
     else if (arg === '--out') args.out = rest[++i] ?? '';
     else if (arg === '--inplace') args.inplace.push(rest[++i] ?? '');
+    else if (arg === '--registries') args.registries = true;
+    else if (arg === '--image-tag') args.imageTag = rest[++i] ?? '';
+    else if (arg === '--pull-command') args.pullCommand = true;
   }
   return args;
 };
 
-const renderBlock = (tag, names, format) => {
-  const link = (badge, alt, href) =>
-    format === 'html'
-      ? `<a href="${href}"><img alt="${alt}" src="${badgeUrl(badge)}"></a>`
-      : `[![${alt}](${badgeUrl(badge)})](${href})`;
+const renderBlock = (tag, names, format, options) => {
+  const html = format === 'html';
+  const link = (badge, label, href) =>
+    html
+      ? `<a href="${href}"><img alt="${label}" src="${badgeUrl({ ...badge, label })}"></a>`
+      : `[![${label}](${badgeUrl({ ...badge, label })})](${href})`;
 
-  const rows = [];
   const covered = new Set();
+  const rows = [];
+  const row = [];
+
+  const badgesOf = (group) =>
+    html ? group.badges.filter((badge) => badge.compact !== false) : group.badges;
 
   for (const group of GROUPS) {
     const links = [];
-    for (const badge of group.badges) {
-      const assets = names.filter((n) => badge.test(n)).sort();
+    for (const badge of badgesOf(group)) {
+      const assets = names.filter((name) => badge.test(name)).sort();
       if (assets.length === 0) continue;
       for (const asset of assets) covered.add(asset);
-      links.push(
-        assets.map((asset) => link(badge, badge.label, assetUrl(tag, asset))).join(' '),
-      );
+      const label = (html ? badge.short : badge.label) ?? badge.label;
+      const rendered = assets.map((asset) => link(badge, label, assetUrl(tag, asset)));
+      if (html) row.push(...rendered);
+      else links.push(rendered.join(' '));
     }
-    if (links.length > 0) rows.push({ title: group.title, links: links.join(' ') });
+    if (!html && links.length > 0) rows.push({ title: group.title, links: links.join(' ') });
   }
 
-  if (rows.length === 0) return { block: '', covered };
+  if (options.registries) {
+    const imageTag = options.imageTag || tag;
+    if (html) {
+      for (const registry of REGISTRIES) row.push(link(registry, registry.short, registry.href));
+    } else {
+      const links = REGISTRIES.map((registry) => link(registry, registry.label, registry.href));
+      // A release body also spells the pull command out — that is where people
+      // copy it from; the README row stays badge-only.
+      if (options.pullCommand) links.push(`\`docker pull ${IMAGE}:${imageTag}\``);
+      rows.push({ title: 'Docker (registry)', links: links.join(' ') });
+    }
+  }
 
-  const body = format === 'html'
-    ? rows.map((row) => `<b>${row.title}</b>: ${row.links}`).join('<br>\n')
-    : rows.map((row) => `**${row.title}**: ${row.links}`).join('\n');
+  if (html ? row.length === 0 : rows.length === 0) return { block: '', covered };
 
   const lines = [];
-  if (format === 'html') {
-    lines.push('<p align="center">');
-    lines.push(body);
-    lines.push(`<br><a href="${RELEASES_URL}">全部文件 / All files</a>`);
-    lines.push('</p>');
+  if (html) {
+    lines.push('<p align="center">', row.join(' '), '</p>');
   } else {
     lines.push('**下载 / Download based on your OS:**', '');
-    lines.push(body);
-  }
+    lines.push(rows.map((entry) => `**${entry.title}**: ${entry.links}`).join('\n'));
 
-  // Everything that is not a user-facing installer (OTAs bundle, checksums,
-  // blockmaps, updater manifests) stays one click away instead of cluttering
-  // the top of the release body. The READMEs keep the badge block only.
-  const rest = format === 'html' ? [] : names.filter((n) => !covered.has(n)).sort();
-  if (rest.length > 0) {
-    lines.push(
-      '',
-      '<details>',
-      `<summary>其他文件 / Other files（离线包 · 校验 · 自动更新元数据，共 ${rest.length} 个）</summary>`,
-      '',
-      ...rest.map((name) => `- [${name}](${assetUrl(tag, name)})`),
-      '',
-      '</details>',
-    );
+    // Everything that is not a user-facing installer (OTA bundle, checksums,
+    // blockmaps, updater manifests) stays one click away instead of
+    // cluttering the top of the release body.
+    const rest = names.filter((name) => !covered.has(name)).sort();
+    if (rest.length > 0) {
+      lines.push(
+        '',
+        '<details>',
+        `<summary>其他文件 / Other files（离线包 · 校验 · 自动更新元数据，共 ${rest.length} 个）</summary>`,
+        '',
+        ...rest.map((name) => `- [${name}](${assetUrl(tag, name)})`),
+        '',
+        '</details>',
+      );
+    }
   }
 
   return { block: `${lines.join('\n')}\n`, covered };
@@ -174,9 +231,9 @@ const rewriteMarkedBlock = (file, block) => {
 };
 
 function main() {
-  const { tag, dir, format, out: outFile, inplace } = parseArgs();
+  const { tag, dir, format, out: outFile, inplace, registries, imageTag, pullCommand } = parseArgs();
   if (!tag || !dir || !['md', 'html'].includes(format)) {
-    console.error('usage: generateDownloadBadges.mjs --tag <tag> --dir <dir> [--format md|html] [--out <file>] [--inplace <file>]');
+    console.error('usage: generateDownloadBadges.mjs --tag <tag> --dir <dir> [--format md|html] [--out <file>] [--inplace <file>] [--registries] [--image-tag <tag>] [--pull-command]');
     process.exit(1);
   }
 
@@ -188,7 +245,7 @@ function main() {
     process.exit(1);
   }
 
-  const { block } = renderBlock(tag, names, format);
+  const { block } = renderBlock(tag, names, format, { registries, imageTag, pullCommand });
   if (!block) {
     console.error(`no asset in ${dir} matched any download group`);
     process.exit(2);

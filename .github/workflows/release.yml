@@ -321,7 +321,8 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/release/generateDownloadBadges.mjs \
-            --tag "${{ github.ref_name }}" --dir release-assets --out "$RUNNER_TEMP/downloads.md"
+            --tag "${{ github.ref_name }}" --dir release-assets --registries --pull-command \
+            --out "$RUNNER_TEMP/downloads.md"
           gh api "repos/${{ github.repository }}/releases/generate-notes" \
             -f tag_name="${{ github.ref_name }}" --jq .body > "$RUNNER_TEMP/notes.md"
           { cat "$RUNNER_TEMP/downloads.md"; echo; echo '---'; echo; cat "$RUNNER_TEMP/notes.md"; } \
@@ -361,6 +362,7 @@ jobs:
         run: |
           node scripts/release/generateDownloadBadges.mjs \
             --tag "${{ github.ref_name }}" --dir release-assets --format html \
+            --registries --image-tag latest \
             --inplace README.md --inplace README_EN.md
 
       - name: Commit and push

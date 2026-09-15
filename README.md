@@ -23,6 +23,12 @@
 </a><img alt="Node.js" src="https://img.shields.io/badge/Node.js-25%2B-339933?logo=node.js&style=flat"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&style=flat">
 </p>
 
+<!-- downloads:start -->
+<p align="center">
+<a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-win-x64.exe"><img alt="Setup" src="https://img.shields.io/badge/Setup-0078D4?style=flat&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTAsMEgxMS4zNzdWMTEuMzcySDBaTTEyLjYyMywwSDI0VjExLjM3MkgxMi42MjNaTTAsMTIuNjIzSDExLjM3N1YyNEgwWm0xMi42MjMsMEgyNFYyNEgxMi42MjMiLz48L3N2Zz4=&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-win-x64.zip"><img alt="Portable" src="https://img.shields.io/badge/Portable-0078D4?style=flat&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTAsMEgxMS4zNzdWMTEuMzcySDBaTTEyLjYyMywwSDI0VjExLjM3MkgxMi42MjNaTTAsMTIuNjIzSDExLjM3N1YyNEgwWm0xMi42MjMsMEgyNFYyNEgxMi42MjMiLz48L3N2Zz4=&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-arm64.dmg"><img alt="ARM" src="https://img.shields.io/badge/ARM-000000?style=flat&logo=apple&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-x64.dmg"><img alt="Intel" src="https://img.shields.io/badge/Intel-000000?style=flat&logo=apple&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-linux-x86_64.AppImage"><img alt="AppImage" src="https://img.shields.io/badge/AppImage-FCC624?style=flat&logo=linux&logoColor=black"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-linux-amd64.deb"><img alt="DEB" src="https://img.shields.io/badge/DEB-A800D2?style=flat&logo=debian&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-linux-x86_64.rpm"><img alt="RPM" src="https://img.shields.io/badge/RPM-EE0000?style=flat&logo=redhat&logoColor=white"></a> <a href="https://hub.docker.com/r/wyf9661/metapi/tags"><img alt="Docker Hub" src="https://img.shields.io/badge/Docker%20Hub-2496ED?style=flat&logo=docker&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/pkgs/container/metapi"><img alt="ghcr.io" src="https://img.shields.io/badge/ghcr.io-181717?style=flat&logo=github&logoColor=white"></a>
+</p>
+<!-- downloads:end -->
+
 <p align="center">
   <a href="README.md"><strong>中文</strong></a> |
   <a href="README_EN.md">English</a>
@@ -31,18 +37,6 @@
 </div>
 
 ---
-
-## ⬇️ 下载
-
-<!-- downloads:start -->
-<p align="center">
-<b>Windows x64</b>: <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-win-x64.exe"><img alt="Setup" src="https://img.shields.io/badge/Setup-0078D4?style=flat&logo=windows&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-win-x64.zip"><img alt="Portable" src="https://img.shields.io/badge/Portable-0078D4?style=flat&logo=windows&logoColor=white"></a><br>
-<b>macOS Apple Silicon</b>: <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-arm64.dmg"><img alt="DMG" src="https://img.shields.io/badge/DMG-000000?style=flat&logo=apple&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-arm64.zip"><img alt="ZIP" src="https://img.shields.io/badge/ZIP-000000?style=flat&logo=apple&logoColor=white"></a><br>
-<b>macOS Intel</b>: <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-x64.dmg"><img alt="DMG" src="https://img.shields.io/badge/DMG-000000?style=flat&logo=apple&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-x64.zip"><img alt="ZIP" src="https://img.shields.io/badge/ZIP-000000?style=flat&logo=apple&logoColor=white"></a><br>
-<b>Linux x64</b>: <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-linux-x86_64.AppImage"><img alt="AppImage" src="https://img.shields.io/badge/AppImage-FCC624?style=flat&logo=linux&logoColor=black"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-linux-amd64.deb"><img alt="DEB" src="https://img.shields.io/badge/DEB-A800D2?style=flat&logo=debian&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-linux-x86_64.rpm"><img alt="RPM" src="https://img.shields.io/badge/RPM-EE0000?style=flat&logo=redhat&logoColor=white"></a>
-<br><a href="https://github.com/wyf9661/metapi/releases">全部文件 / All files</a>
-</p>
-<!-- downloads:end -->
 
 <!-- 体验站已移除 -->
 
