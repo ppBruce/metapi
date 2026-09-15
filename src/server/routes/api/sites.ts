@@ -54,6 +54,7 @@ import {
   lookupBrandIcon,
   lookupSiteFavicon,
   normalizeBrandIconRequest,
+  resolveFaviconSite,
 } from '../../services/iconProxyService.js';
 
 function sseWrite(raw: import('http').ServerResponse, event: string, data: unknown) {
@@ -1347,7 +1348,7 @@ export async function sitesRoutes(app: FastifyInstance) {
   // Proxy site favicons and brand icons through the server: keeps the browser
   // on our own origin, works for Cloudflare-protected / internal upstreams, and
   // gives every client one shared server-side cache.
-  app.get<{ Querystring: { url?: string } }>(
+  app.get<{ Querystring: { url?: string; siteId?: string } }>(
     '/api/site-favicon',
     async (request, reply) => {
       const raw = String(request.query.url || '').trim();
@@ -1367,15 +1368,18 @@ export async function sitesRoutes(app: FastifyInstance) {
       // Hosts the admin already configured as sites are trusted: an internal
       // NewAPI deployment is a legitimate target. Everything else keeps the
       // strict private-IP guard so this cannot be abused as an SSRF proxy.
-      const configuredSite = await db
-        .select({ id: schema.sites.id })
-        .from(schema.sites)
-        .where(eq(schema.sites.url, origin))
-        .limit(1)
-        .all();
+      const siteId = request.query.siteId === undefined ? undefined : Number(request.query.siteId);
+      if (siteId !== undefined && (!Number.isSafeInteger(siteId) || siteId <= 0)) {
+        return reply.code(400).send({ error: 'invalid site id' });
+      }
+      const configuredSite = await resolveFaviconSite(origin, siteId);
+      if (siteId !== undefined && !configuredSite) {
+        return reply.code(404).send({ error: 'site not found for this origin' });
+      }
 
       const result = await lookupSiteFavicon(origin, {
-        trustPrivateHost: configuredSite.length > 0,
+        trustPrivateHost: !!configuredSite,
+        proxyUrl: configuredSite?.proxyUrl,
       });
       if (result.status === 'forbidden') {
         return reply.code(403).send({ error: 'private hosts are not allowed' });

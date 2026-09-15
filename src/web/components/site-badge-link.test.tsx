@@ -67,7 +67,7 @@ describe('SiteBadgeLink', () => {
     const imgs = root.root.findAllByType('img');
     expect(imgs).toHaveLength(1);
     expect(String(imgs[0].props.src)).toBe(
-      '/api/site-favicon?url=https%3A%2F%2Fdemo.example.com',
+      '/api/site-favicon?url=https%3A%2F%2Fdemo.example.com&siteId=7',
     );
 
     root.unmount();

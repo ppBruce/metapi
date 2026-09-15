@@ -101,6 +101,8 @@ describe('Models mobile layout', () => {
             {
               id: 1,
               site: '站点 A',
+              siteId: 101,
+              siteUrl: 'https://site-a.example.com',
               username: 'alice',
               latency: 320,
               balance: 12.5,
@@ -150,6 +152,24 @@ describe('Models mobile layout', () => {
       ))).toHaveLength(0);
     } finally {
       root?.unmount();
+    }
+  });
+
+  it('binds supplier filter icons to their site identity', async () => {
+    globalThis.document = originalDocument;
+    stubWindowWidth(1440, () => false);
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(<MemoryRouter><ToastProvider><Models /></ToastProvider></MemoryRouter>);
+      });
+      await flushMicrotasks();
+      const icons = root.root.findAll((node) => node.type === 'img'
+        && String(node.props.src).includes('site-a.example.com'));
+      expect(icons.length).toBeGreaterThan(0);
+      for (const icon of icons) expect(icon.props.src).toContain('&siteId=101');
+    } finally {
+      await act(async () => { root?.unmount(); });
     }
   });
 

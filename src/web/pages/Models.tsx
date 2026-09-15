@@ -510,20 +510,21 @@ export default function Models() {
 
   /* ---- derived: site list ---- */
   const siteMap = useMemo(() => {
-    const m = new Map<string, { count: number; siteUrl: string | null }>();
+    const m = new Map<string, { count: number; siteUrl: string | null; siteId: number | null }>();
     for (const model of data.models) {
       for (const a of model.accounts) {
         const existing = m.get(a.site);
         if (existing) {
           existing.count++;
           if (!existing.siteUrl && a.siteUrl) existing.siteUrl = a.siteUrl;
+          if (!existing.siteId && a.siteId) existing.siteId = a.siteId;
         } else {
-          m.set(a.site, { count: 1, siteUrl: a.siteUrl || null });
+          m.set(a.site, { count: 1, siteUrl: a.siteUrl || null, siteId: a.siteId || null });
         }
       }
     }
     return [...m.entries()]
-      .map(([site, { count, siteUrl }]) => ({ site, count, siteUrl }))
+      .map(([site, { count, siteUrl, siteId }]) => ({ site, count, siteUrl, siteId }))
       .sort((a, b) => b.count - a.count);
   }, [data.models]);
 
@@ -998,14 +999,14 @@ export default function Models() {
           {tr('供应商')}
           {activeSite && <button onClick={() => setActiveSite(null)}>{tr('重置')}</button>}
         </div>
-        {siteMap.map(({ site, count, siteUrl }) => (
+        {siteMap.map(({ site, count, siteUrl, siteId }) => (
           <div
             key={site}
             className={`filter-item ${activeSite === site ? 'active' : ''}`}
             onClick={() => setActiveSite(activeSite === site ? null : site)}
           >
             <span className="filter-item-icon" style={{ background: 'var(--color-bg)', borderRadius: 6, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <SiteIcon name={site} size={14} url={siteUrl} />
+              <SiteIcon name={site} size={14} url={siteUrl} siteId={siteId} />
             </span>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{site}</span>
             <span className="filter-item-count">{count}</span>

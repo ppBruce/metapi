@@ -1,5 +1,9 @@
 import * as net from 'node:net';
 import { promises as dns } from 'node:dns';
+import { asc, eq } from 'drizzle-orm';
+import { db, schema } from '../db/index.js';
+import { fetch, getSetCookies, type Cookie, type Response } from 'undici';
+import { normalizeSiteProxyUrl, withExplicitProxyRequestInit } from './siteProxy.js';
 
 /**
  * Shared icon fetching + caching for the web UI.
@@ -24,6 +28,8 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 512 * 1024;
+const MAX_ICON_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 const iconCache = new Map<string, CacheEntry>();
 const missCache = new Map<string, number>();
@@ -152,25 +158,97 @@ export function decodeDataUriIcon(href: string): IconPayload | null {
   }
 }
 
+type RedirectCookie = Cookie & { origin: string; path: string; expiresAt: number };
+
+async function fetchIconResource(
+  target: string | URL,
+  referer?: string,
+  proxyUrl?: string | null,
+): Promise<Response | null> {
+  let url = new URL(target);
+  const initialOrigin = url.origin;
+  const cookies = new Map<string, RedirectCookie>();
+  const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+
+  // Redirect cookies belong to this anonymous fetch only, never to an account
+  // or another origin. Every hop retains the same explicitly selected proxy.
+  for (let hop = 0; hop <= MAX_ICON_REDIRECTS; hop += 1) {
+    if (url.origin !== initialOrigin && await resolvesToPrivate(url.hostname)) return null;
+    const cookieHeader = [...cookies.values()]
+      .filter((cookie) => cookie.origin === url.origin
+        && (!cookie.secure || url.protocol === 'https:')
+        && cookie.expiresAt > Date.now()
+        && (url.pathname === cookie.path
+          || url.pathname.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`)))
+      .sort((left, right) => right.path.length - left.path.length)
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join('; ');
+    const response = await fetch(url, withExplicitProxyRequestInit(proxyUrl, {
+      headers: {
+        ...BROWSER_HEADERS,
+        ...(referer ? { Referer: referer } : {}),
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+      },
+      signal,
+      redirect: 'manual',
+    }));
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+    for (const cookie of getSetCookies(response.headers)) {
+      const domain = cookie.domain?.replace(/^\./, '').toLowerCase();
+      if (domain && url.hostname !== domain && !url.hostname.endsWith(`.${domain}`)) continue;
+      const path = cookie.path?.startsWith('/')
+        ? cookie.path
+        : url.pathname.slice(0, url.pathname.lastIndexOf('/')) || '/';
+      const expiresAt = cookie.maxAge !== undefined
+        ? Date.now() + cookie.maxAge * 1000
+        : cookie.expires ? new Date(cookie.expires).getTime() : Number.POSITIVE_INFINITY;
+      cookies.set(`${url.origin}\0${path}\0${cookie.name}`, { ...cookie, origin: url.origin, path, expiresAt });
+    }
+    const location = response.headers.get('location');
+    await response.body?.cancel();
+    if (!location || hop === MAX_ICON_REDIRECTS) return null;
+    const next = resolveIconUrl(location, url.toString());
+    if (!next || next.username || next.password) return null;
+    if (url.protocol === 'https:' && next.protocol !== 'https:') return null;
+    url = next;
+  }
+  return null;
+}
+
 async function fetchImage(
   target: string | URL,
   referer?: string,
+  proxyUrl?: string | null,
 ): Promise<IconPayload | null> {
   try {
-    const response = await fetch(target, {
-      headers: referer ? { ...BROWSER_HEADERS, Referer: referer } : BROWSER_HEADERS,
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      redirect: 'follow',
-    });
-    if (!response.ok) return null;
+    const response = await fetchIconResource(target, referer, proxyUrl);
+    if (!response) return null;
     const contentType = response.headers.get('content-type') || '';
-    if (!contentType.startsWith('image/')) return null;
+    if (!response.ok || !contentType.startsWith('image/')) {
+      await response.body?.cancel();
+      return null;
+    }
     const buffer = Buffer.from(await response.arrayBuffer());
     if (buffer.length === 0) return null;
     return { buffer, contentType, source: String(target) };
   } catch {
     return null;
   }
+}
+
+/** Resolve only an administrator-configured site on the requested origin. */
+export async function resolveFaviconSite(origin: string, siteId?: number) {
+  const rows = await db
+    .select({ id: schema.sites.id, url: schema.sites.url, proxyUrl: schema.sites.proxyUrl })
+    .from(schema.sites)
+    .where(siteId === undefined ? undefined : eq(schema.sites.id, siteId))
+    .orderBy(asc(schema.sites.id))
+    .all();
+  const matches = rows.filter((site) => {
+    try { return new URL(site.url).origin === origin; } catch { return false; }
+  });
+  return matches.find((site) => site.url.replace(/\/+$/, '') === origin) ?? matches[0] ?? null;
 }
 
 export type FaviconLookup =
@@ -185,9 +263,10 @@ export type FaviconLookup =
  */
 export async function lookupSiteFavicon(
   origin: string,
-  options: { trustPrivateHost?: boolean } = {},
+  options: { trustPrivateHost?: boolean; proxyUrl?: string | null } = {},
 ): Promise<FaviconLookup> {
-  const cacheKey = `site:${origin}`;
+  const proxyUrl = normalizeSiteProxyUrl(options.proxyUrl);
+  const cacheKey = `site:${origin}:${proxyUrl || 'direct'}:${!!options.trustPrivateHost}`;
   const cached = readCache(cacheKey);
   if (cached) return { status: 'ok', payload: cached, cache: 'HIT' };
 
@@ -204,7 +283,7 @@ export async function lookupSiteFavicon(
   if (isNegativelyCached(cacheKey)) return { status: 'not-found' };
 
   for (const candidate of FAVICON_CANDIDATES) {
-    const payload = await fetchImage(`${origin}${candidate}`, origin);
+    const payload = await fetchImage(`${origin}${candidate}`, origin, proxyUrl);
     if (payload) {
       const resolved = { ...payload, source: candidate };
       writeCache(cacheKey, resolved);
@@ -213,12 +292,8 @@ export async function lookupSiteFavicon(
   }
 
   try {
-    const page = await fetch(origin, {
-      headers: { ...BROWSER_HEADERS, Referer: origin },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      redirect: 'follow',
-    });
-    if (page.ok) {
+    const page = await fetchIconResource(origin, origin, proxyUrl);
+    if (page?.ok) {
       const html = (await page.text()).slice(0, MAX_HTML_BYTES);
       for (const href of extractIconHrefs(html)) {
         const inline = decodeDataUriIcon(href);
@@ -230,7 +305,7 @@ export async function lookupSiteFavicon(
         if (!resolvedUrl) continue;
         // A crafted href could point at internal infrastructure; re-check.
         if (await resolvesToPrivate(resolvedUrl.hostname)) continue;
-        const payload = await fetchImage(resolvedUrl, origin);
+        const payload = await fetchImage(resolvedUrl, origin, proxyUrl);
         if (payload) {
           writeCache(cacheKey, payload);
           return { status: 'ok', payload, cache: 'MISS' };

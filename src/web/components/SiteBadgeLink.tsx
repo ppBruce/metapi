@@ -11,12 +11,14 @@ type SiteBadgeLinkProps = {
   tone?: 'primary';
 };
 
-function buildFaviconUrl(rawUrl?: string | null): string | null {
+function buildFaviconUrl(rawUrl?: string | null, siteId?: number | null): string | null {
   if (!rawUrl) return null;
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-    return `/api/site-favicon?url=${encodeURIComponent(url.origin)}`;
+    const siteQuery = typeof siteId === 'number' && Number.isSafeInteger(siteId) && siteId > 0
+      ? `&siteId=${siteId}` : '';
+    return `/api/site-favicon?url=${encodeURIComponent(url.origin)}${siteQuery}`;
   } catch {
     return null;
   }
@@ -75,14 +77,16 @@ export function SiteIcon({
   name,
   size,
   url,
+  siteId,
   onDominantColor,
 }: {
   name: string;
   size: number;
   url?: string | null;
+  siteId?: number | null;
   onDominantColor?: (color: string | null) => void;
 }) {
-  const faviconUrl = buildFaviconUrl(url);
+  const faviconUrl = buildFaviconUrl(url, siteId);
   const [faviconFailed, setFaviconFailed] = useState(false);
   const [imgLoaded, setImgLoaded] = useState(false);
   const theme = useIconCdn() as 'dark' | 'light';
@@ -210,7 +214,7 @@ export default function SiteBadgeLink({
 
   const badge = (
     <>
-      {label !== '-' && <SiteIcon name={label} size={14} url={siteUrl} onDominantColor={setFaviconColor} />}
+      {label !== '-' && <SiteIcon key={`${siteId}:${siteUrl}`} name={label} size={14} url={siteUrl} siteId={siteId} onDominantColor={setFaviconColor} />}
       <span style={{ lineHeight: 1.2 }}>{label}</span>
     </>
   );
