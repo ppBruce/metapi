@@ -131,7 +131,11 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       request.body = mergeParamOverrideIntoBody(request.body, input.paramOverride);
     }
     const defaultTarget = buildUpstreamUrl(input.siteUrl, request.path);
-    const targetUrl = input.proxyUrl
+    // proxyUrl doubles as an upstream-base override ONLY on the default fetch
+    // path (no dispatch hook). Flows that supply dispatchRequest already apply
+    // the outbound proxy inside the hook; rewriting the target there would send
+    // the request to the proxy address itself (an HTTP proxy port answers 400).
+    const targetUrl = input.proxyUrl && !input.dispatchRequest
       ? buildUpstreamUrl(input.proxyUrl, request.path)
       : defaultTarget;
 
@@ -227,7 +231,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       if (recovered?.upstream?.ok) {
         const recoveredRequest = recovered.request ?? baseContext.request;
         const recoveredTargetUrl = recovered.targetUrl ?? (
-          input.proxyUrl
+          input.proxyUrl && !input.dispatchRequest
             ? buildUpstreamUrl(input.proxyUrl, recovered.upstreamPath)
             : buildUpstreamUrl(input.siteUrl, recovered.upstreamPath)
         );
