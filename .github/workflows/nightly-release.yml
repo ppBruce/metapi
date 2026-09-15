@@ -336,6 +336,7 @@ jobs:
             --out "$RUNNER_TEMP/downloads.md"
           {
             cat "$RUNNER_TEMP/downloads.md"
+            echo
             echo '---'
             echo
             echo 'Automated nightly build. Same pipeline as the tagged release; the'

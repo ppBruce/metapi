@@ -4,9 +4,10 @@
 // directory, so tagged releases, nightlies and the READMEs share one script.
 //
 // Two layouts, picked by --format:
-//   md   release body: one labelled line per OS (bold title + badges), the
-//        unmatched files collapsed at the bottom. Bold titles read well on a
-//        release page and keep the mac architectures apart.
+//   md   release body: a two-column table (platform | packages, FlClash shape)
+//        with the packages stacked inside the cell. Files that are not a
+//        user-facing package are deliberately not listed — the release page
+//        already lists every asset in its own Assets section.
 //   html README header: a single row of badges whose labels carry the variant
 //        (Setup / Portable / ARM / Intel / ...) — the logos already say which
 //        OS, so no label text sits next to the badges and nothing can drift
@@ -15,9 +16,9 @@
 //
 // Usage:
 //   node scripts/release/generateDownloadBadges.mjs --tag v1.7.6 --dir release-assets \
-//     --registries --pull-command --out release-body.md
+//     --registries --out release-body.md
 //   node scripts/release/generateDownloadBadges.mjs --tag v1.7.6 --dir release-assets \
-//     --format html --registries --image-tag latest --inplace README.md --inplace README_EN.md
+//     --format html --registries --inplace README.md --inplace README_EN.md
 //
 // Exit codes: 0 = links produced; 1 = usage/IO error; 2 = no asset matched.
 
@@ -96,11 +97,11 @@ const GROUPS = [
   },
   {
     // Nightly only: the per-arch docker image tars (`...-<arch>.tar.gz`).
-    title: 'Docker (docker load)',
+    title: 'Docker',
     badges: [
-      { test: (n) => /-amd64\.tar\.gz$/.test(n), label: 'Docker amd64', short: 'amd64', ...DOCKER },
-      { test: (n) => /-arm64\.tar\.gz$/.test(n), label: 'Docker arm64', short: 'arm64', ...DOCKER },
-      { test: (n) => /-armv7\.tar\.gz$/.test(n), label: 'Docker armv7', short: 'armv7', ...DOCKER },
+      { test: (n) => /-amd64\.tar\.gz$/.test(n), label: 'amd64', ...DOCKER },
+      { test: (n) => /-arm64\.tar\.gz$/.test(n), label: 'arm64', ...DOCKER },
+      { test: (n) => /-armv7\.tar\.gz$/.test(n), label: 'armv7', ...DOCKER },
     ],
   },
 ];
@@ -127,7 +128,7 @@ const REGISTRIES = [
 const parseArgs = () => {
   const args = {
     tag: '', dir: '', format: 'md', out: '', inplace: [],
-    registries: false, imageTag: '', pullCommand: false,
+    registries: false,
   };
   const rest = process.argv.slice(2);
   for (let i = 0; i < rest.length; i += 1) {
@@ -138,20 +139,18 @@ const parseArgs = () => {
     else if (arg === '--out') args.out = rest[++i] ?? '';
     else if (arg === '--inplace') args.inplace.push(rest[++i] ?? '');
     else if (arg === '--registries') args.registries = true;
-    else if (arg === '--image-tag') args.imageTag = rest[++i] ?? '';
-    else if (arg === '--pull-command') args.pullCommand = true;
+
   }
   return args;
 };
 
 const renderBlock = (tag, names, format, options) => {
   const html = format === 'html';
+  // Always raw HTML: markdown is not processed inside a <td> (or inside the
+  // <p> the README uses), so image syntax there would print as literal text.
   const link = (badge, label, href) =>
-    html
-      ? `<a href="${href}"><img alt="${label}" src="${badgeUrl({ ...badge, label })}"></a>`
-      : `[![${label}](${badgeUrl({ ...badge, label })})](${href})`;
+    `<a href="${href}"><img alt="${label}" src="${badgeUrl({ ...badge, label })}"></a>`;
 
-  const covered = new Set();
   const rows = [];
   const row = [];
 
@@ -163,55 +162,49 @@ const renderBlock = (tag, names, format, options) => {
     for (const badge of badgesOf(group)) {
       const assets = names.filter((name) => badge.test(name)).sort();
       if (assets.length === 0) continue;
-      for (const asset of assets) covered.add(asset);
       const label = (html ? badge.short : badge.label) ?? badge.label;
       const rendered = assets.map((asset) => link(badge, label, assetUrl(tag, asset)));
       if (html) row.push(...rendered);
-      else links.push(rendered.join(' '));
+      else links.push(...rendered);
     }
-    if (!html && links.length > 0) rows.push({ title: group.title, links: links.join(' ') });
+    if (!html && links.length > 0) rows.push({ title: group.title, links });
   }
 
   if (options.registries) {
-    const imageTag = options.imageTag || tag;
     if (html) {
       for (const registry of REGISTRIES) row.push(link(registry, registry.short, registry.href));
     } else {
-      const links = REGISTRIES.map((registry) => link(registry, registry.label, registry.href));
-      // A release body also spells the pull command out — that is where people
-      // copy it from; the README row stays badge-only.
-      if (options.pullCommand) links.push(`\`docker pull ${IMAGE}:${imageTag}\``);
-      rows.push({ title: 'Docker (registry)', links: links.join(' ') });
+      // Registry badges only: the pull command belongs on the registry page
+      // the badge opens, not in the release table.
+      rows.push({ title: 'Docker', links: REGISTRIES.map((registry) => link(registry, registry.label, registry.href)) });
     }
   }
 
-  if (html ? row.length === 0 : rows.length === 0) return { block: '', covered };
+  if (html ? row.length === 0 : rows.length === 0) return { block: '' };
 
   const lines = [];
   if (html) {
     lines.push('<p align="center">', row.join(' '), '</p>');
   } else {
-    lines.push('**下载 / Download based on your OS:**', '');
-    lines.push(rows.map((entry) => `**${entry.title}**: ${entry.links}`).join('\n'));
-
-    // Everything that is not a user-facing installer (OTA bundle, checksums,
-    // blockmaps, updater manifests) stays one click away instead of
-    // cluttering the top of the release body.
-    const rest = names.filter((name) => !covered.has(name)).sort();
-    if (rest.length > 0) {
-      lines.push(
-        '',
-        '<details>',
-        `<summary>其他文件 / Other files（离线包 · 校验 · 自动更新元数据，共 ${rest.length} 个）</summary>`,
-        '',
-        ...rest.map((name) => `- [${name}](${assetUrl(tag, name)})`),
-        '',
-        '</details>',
-      );
+    // Platform on the left, packages stacked on the right — the shape FlClash
+    // uses, which keeps the arch readable without a label next to each badge.
+    // Files that are not a user-facing package (OTA bundle, checksums,
+    // blockmaps, updater manifests) get no listing here on purpose: the
+    // release page already lists every asset in its Assets section.
+    lines.push('**下载 / Download based on your OS:**', '', '<table>', '  <thead>', '    <tr>');
+    lines.push('      <th>平台 / OS</th>', '      <th>下载 / Download</th>', '    </tr>', '  </thead>', '  <tbody>');
+    for (const entry of rows) {
+      lines.push('    <tr>');
+      lines.push(`      <td>${entry.title}</td>`);
+      // One line per platform: badges sit side by side in the cell, so every
+      // row is a single line tall instead of a stack.
+      lines.push(`      <td>${entry.links.join(' ')}</td>`);
+      lines.push('    </tr>');
     }
+    lines.push('  </tbody>', '</table>', '');
   }
 
-  return { block: `${lines.join('\n')}\n`, covered };
+  return { block: `${lines.join('\n')}\n` };
 };
 
 const rewriteMarkedBlock = (file, block) => {
@@ -231,9 +224,9 @@ const rewriteMarkedBlock = (file, block) => {
 };
 
 function main() {
-  const { tag, dir, format, out: outFile, inplace, registries, imageTag, pullCommand } = parseArgs();
+  const { tag, dir, format, out: outFile, inplace, registries } = parseArgs();
   if (!tag || !dir || !['md', 'html'].includes(format)) {
-    console.error('usage: generateDownloadBadges.mjs --tag <tag> --dir <dir> [--format md|html] [--out <file>] [--inplace <file>] [--registries] [--image-tag <tag>] [--pull-command]');
+    console.error('usage: generateDownloadBadges.mjs --tag <tag> --dir <dir> [--format md|html] [--out <file>] [--inplace <file>] [--registries]');
     process.exit(1);
   }
 
@@ -245,7 +238,7 @@ function main() {
     process.exit(1);
   }
 
-  const { block } = renderBlock(tag, names, format, { registries, imageTag, pullCommand });
+  const { block } = renderBlock(tag, names, format, { registries });
   if (!block) {
     console.error(`no asset in ${dir} matched any download group`);
     process.exit(2);

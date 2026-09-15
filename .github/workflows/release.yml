@@ -321,10 +321,12 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/release/generateDownloadBadges.mjs \
-            --tag "${{ github.ref_name }}" --dir release-assets --registries --pull-command \
+            --tag "${{ github.ref_name }}" --dir release-assets --registries \
             --out "$RUNNER_TEMP/downloads.md"
           gh api "repos/${{ github.repository }}/releases/generate-notes" \
             -f tag_name="${{ github.ref_name }}" --jq .body > "$RUNNER_TEMP/notes.md"
+          # The badge table is a raw HTML block: the blank line is what ends it,
+          # so the separator below renders as a rule instead of literal text.
           { cat "$RUNNER_TEMP/downloads.md"; echo; echo '---'; echo; cat "$RUNNER_TEMP/notes.md"; } \
             > "$RUNNER_TEMP/release-body.md"
           head -20 "$RUNNER_TEMP/release-body.md"
@@ -335,6 +337,15 @@ jobs:
           tag_name: ${{ github.ref_name }}
           body_path: ${{ runner.temp }}/release-body.md
           files: release-assets/*
+
+      # Re-pushing a tag must not stack a second copy of the notes on the
+      # existing release: this pins the body to exactly what this run built,
+      # so a re-run replaces the text instead of growing it.
+      - name: Pin the release body
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" --notes-file "$RUNNER_TEMP/release-body.md"
 
   update-readme-downloads:
     name: Refresh README download links
@@ -362,8 +373,7 @@ jobs:
         run: |
           node scripts/release/generateDownloadBadges.mjs \
             --tag "${{ github.ref_name }}" --dir release-assets --format html \
-            --registries --image-tag latest \
-            --inplace README.md --inplace README_EN.md
+            --registries --inplace README.md --inplace README_EN.md
 
       - name: Commit and push
         shell: bash
