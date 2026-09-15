@@ -35,6 +35,7 @@
     "build:desktop": "tsc -p tsconfig.desktop.json",
     "build": "npm run build:web && npm run build:server && npm run build:desktop",
     "release:ota-bundle": "tsx scripts/release/buildOtaBundle.ts",
+    "release:download-badges": "node scripts/release/generateDownloadBadges.mjs",
     "typecheck:web": "tsc -p tsconfig.web.json",
     "typecheck:web:test": "tsc -p tsconfig.web.test.json",
     "typecheck:server": "tsc --noEmit -p tsconfig.server.json",

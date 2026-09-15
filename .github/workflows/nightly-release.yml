@@ -327,6 +327,27 @@ jobs:
             gh release delete "$old" --cleanup-tag --yes
           done
 
+      - name: Generate release body
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/generateDownloadBadges.mjs \
+            --tag "${{ steps.tag.outputs.tag }}" --dir release-assets \
+            --out "$RUNNER_TEMP/downloads.md"
+          {
+            cat "$RUNNER_TEMP/downloads.md"
+            echo '---'
+            echo
+            echo 'Automated nightly build. Same pipeline as the tagged release; the'
+            echo 'Docker images are **not pushed** to any registry — download the'
+            echo 'tar.gz for your architecture and load it locally:'
+            echo
+            echo '```'
+            echo 'docker load -i metapi-*<arch>.tar.gz'
+            echo '```'
+          } > "$RUNNER_TEMP/nightly-body.md"
+          head -20 "$RUNNER_TEMP/nightly-body.md"
+
       - name: Upload Nightly Release Assets
         uses: softprops/action-gh-release@v3
         with:
@@ -334,12 +355,5 @@ jobs:
           name: 'Nightly (${{ steps.tag.outputs.tag }})'
           prerelease: true
           generate_release_notes: false
-          body: |
-            Automated nightly build. Same pipeline as the tagged release; the
-            Docker images are **not pushed** to any registry — download the
-            tar.gz for your architecture and load it locally:
-
-            ```
-            docker load -i metapi-*nightly-*.tar.gz
-            ```
+          body_path: ${{ runner.temp }}/nightly-body.md
           files: release-assets/*

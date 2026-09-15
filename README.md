@@ -32,6 +32,18 @@
 
 ---
 
+## ⬇️ 下载
+
+<!-- downloads:start -->
+<p align="center">
+<b>Windows x64</b>: <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-win-x64.exe"><img alt="Setup" src="https://img.shields.io/badge/Setup-0078D4?style=flat&logo=windows&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-win-x64.zip"><img alt="Portable" src="https://img.shields.io/badge/Portable-0078D4?style=flat&logo=windows&logoColor=white"></a><br>
+<b>macOS Apple Silicon</b>: <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-arm64.dmg"><img alt="DMG" src="https://img.shields.io/badge/DMG-000000?style=flat&logo=apple&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-arm64.zip"><img alt="ZIP" src="https://img.shields.io/badge/ZIP-000000?style=flat&logo=apple&logoColor=white"></a><br>
+<b>macOS Intel</b>: <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-x64.dmg"><img alt="DMG" src="https://img.shields.io/badge/DMG-000000?style=flat&logo=apple&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-mac-x64.zip"><img alt="ZIP" src="https://img.shields.io/badge/ZIP-000000?style=flat&logo=apple&logoColor=white"></a><br>
+<b>Linux x64</b>: <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-linux-x86_64.AppImage"><img alt="AppImage" src="https://img.shields.io/badge/AppImage-FCC624?style=flat&logo=linux&logoColor=black"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-linux-amd64.deb"><img alt="DEB" src="https://img.shields.io/badge/DEB-A800D2?style=flat&logo=debian&logoColor=white"></a> <a href="https://github.com/wyf9661/metapi/releases/download/v1.7.6/metapi-1.7.6-linux-x86_64.rpm"><img alt="RPM" src="https://img.shields.io/badge/RPM-EE0000?style=flat&logo=redhat&logoColor=white"></a>
+<br><a href="https://github.com/wyf9661/metapi/releases">全部文件 / All files</a>
+</p>
+<!-- downloads:end -->
+
 <!-- 体验站已移除 -->
 
 ## 📖 介绍
