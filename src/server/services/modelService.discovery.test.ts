@@ -137,6 +137,39 @@ describe('refreshModelsForAccount credential discovery', () => {
     expect(tokenRows).toHaveLength(0);
   });
 
+  it('passes the site codex-client requirement into model discovery calls', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
+      token === 'session-token' ? ['gpt-6-astra', 'claude-opus-5'] : []
+    ));
+
+    const site = await db.insert(schema.sites).values({
+      name: 'codex-gated',
+      url: 'https://codex-gated.example.com',
+      platform: 'new-api',
+      status: 'active',
+      protocolProfile: JSON.stringify({
+        preferResponses: true,
+        requireCodexClient: true,
+        credentialMode: 'auto',
+      }),
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'carol',
+      accessToken: 'session-token',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    const result = await refreshModelsForAccount(account.id);
+    expect(result).toMatchObject({ refreshed: true, status: 'success' });
+
+    const sessionCall = getModelsMock.mock.calls.find((call) => call[1] === 'session-token');
+    expect(sessionCall?.[3]).toEqual({ requireCodexClient: true });
+  });
+
   it('does not merge session /api/user/models when ready managed tokens exist', async () => {
     // NewAPI session models are account-wide (all groups); sk /v1/models is group-bound.
     getApiTokenMock.mockResolvedValue(null);

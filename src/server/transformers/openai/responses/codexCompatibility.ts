@@ -177,12 +177,18 @@ function stripCodexUnsupportedResponsesFields(
   body: Record<string, unknown>,
   sitePlatform: string,
 ): Record<string, unknown> {
-  if (sitePlatform !== 'codex') return body;
   const next = { ...body };
+  // stream_options is a chat-completions-only field: the Responses API has no
+  // such parameter, and codex-shaped backends reject it as unknown_parameter.
+  // Observed live: codex-gated new-api gateways 400 on
+  // stream_options.include_usage when a downstream stream asked for usage
+  // (the chat→responses conversion carries the field into this body). Drop it
+  // for every Responses-shaped upstream.
+  delete next.stream_options;
+  if (sitePlatform !== 'codex') return next;
   delete next.max_output_tokens;
   delete next.max_completion_tokens;
   delete next.max_tokens;
-  delete next.stream_options;
   return next;
 }
 
@@ -197,28 +203,38 @@ function applyCodexResponsesCompatibility(
 export function normalizeCodexResponsesBodyForProxy(
   body: Record<string, unknown>,
   sitePlatform: string,
+  options?: { codexCompat?: boolean },
 ): Record<string, unknown> {
-  if (sitePlatform === 'codex') {
+  // A site whose protocol profile requires the Codex client (the sites
+  // editor's Codex-client toggle) is validated by the upstream exactly like a
+  // native codex platform, so it gets the identical body treatment.
+  const platform = options?.codexCompat === true ? 'codex' : sitePlatform;
+  if (platform === 'codex') {
     return ensureCodexResponsesStoreFalse(
       stripCodexUnsupportedResponsesFields(
         ensureCodexResponsesInstructions(
-          applyCodexResponsesCompatibility(body, sitePlatform),
-          sitePlatform,
+          applyCodexResponsesCompatibility(body, platform),
+          platform,
         ),
-        sitePlatform,
+        platform,
       ),
-      sitePlatform,
+      platform,
     );
   }
-  if (CODEX_GATED_PLATFORMS.has(sitePlatform)) {
+  if (CODEX_GATED_PLATFORMS.has(platform)) {
     // For codex-gated platforms (sub2api/new-api/openai), apply only safe body
     // normalizations that real Codex CLI clients always send (top-level
     // `instructions`). The header fingerprint is already injected by
     // ensureCodexClientFingerprintHeaders; keeping the body consistent avoids
     // upstream "This account only allows Codex official clients" rejections.
-    return ensureCodexResponsesInstructions(
-      applyCodexResponsesCompatibility(body, sitePlatform),
-      sitePlatform,
+    // stream_options is dropped here too: codex-shaped backends reject the
+    // chat-only field as unknown_parameter even on gated relays.
+    return stripCodexUnsupportedResponsesFields(
+      ensureCodexResponsesInstructions(
+        applyCodexResponsesCompatibility(body, platform),
+        platform,
+      ),
+      platform,
     );
   }
   return body;

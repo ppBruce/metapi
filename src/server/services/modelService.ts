@@ -32,6 +32,7 @@ import {
 } from './platformDiscoveryRegistry.js';
 import { probeRuntimeModel, type RuntimeModelProbeStatus } from './runtimeModelProbe.js';
 import { canonicalizeModelName } from '../shared/modelCanonicalization.js';
+import { siteProtocolRequiresCodexClient } from '../shared/siteProtocolProfile.js';
 import {
   isModelDisabledForSite,
   loadSiteDisabledModelsIndex,
@@ -440,7 +441,9 @@ export async function probeSiteModels(
     ))
     .all();
 
-  const scope = (options?.scope ?? (site.postRefreshProbeScope === 'all' ? 'all' : 'single')) as 'single' | 'all';
+  const scope = options?.scope ?? (options?.modelName !== undefined
+    ? 'single'
+    : site.postRefreshProbeScope === 'all' ? 'all' : 'single');
   const availableModels = modelRows.map((r: any) => r.modelName.trim()).filter((m: any) => m.length > 0);
   if (availableModels.length === 0) {
     return empty(scope, '该站点暂无已发现模型，请先刷新模型列表');
@@ -451,10 +454,16 @@ export async function probeSiteModels(
     modelsToProbe = availableModels;
   } else {
     const configModel = ((options?.modelName ?? site.postRefreshProbeModel) || '').trim().toLowerCase();
+    if (options?.modelName !== undefined && !configModel) {
+      return empty(scope, 'modelName 必须是非空模型名称');
+    }
     const found = configModel
-      ? (availableModels.find((m: any) => m.toLowerCase() === configModel) ?? availableModels[0])
+      ? availableModels.find((m: any) => m.toLowerCase() === configModel)
       : availableModels[0];
-    modelsToProbe = [found];
+    if (options?.modelName?.trim() && !found) {
+      return empty(scope, `指定模型 "${options.modelName.trim()}" 不在该站点已发现的可用模型列表中，请先刷新模型列表`);
+    }
+    modelsToProbe = [found ?? availableModels[0]];
   }
 
   onProgress?.({ type: 'start', scope, modelsCount: modelsToProbe.length, modelsToProbe });
@@ -1276,6 +1285,16 @@ async function doRefreshModelsForAccount(
     });
   }
 
+  // Codex-gated NewAPI sites ("Codex 兼容" / requireCodexClient) reject
+  // /v1/models unless the caller presents the Codex CLI client fingerprint —
+  // verified on AgentRouter (401 "unauthorized client detected" without it,
+  // full model list with it). Chat traffic gets the fingerprint from
+  // upstreamRequestBuilder; discovery does not, so pass it into the adapter.
+  const codexClientFingerprint = siteProtocolRequiresCodexClient({
+    protocolProfile: site.protocolProfile,
+    customHeaders: site.customHeaders,
+  });
+
   const accountModels = new Map<string, string>();   // lowercase key → original name (first-wins)
   const modelLatency = new Map<string, number | null>();
   let scannedTokenCount = 0;
@@ -1314,7 +1333,9 @@ async function doRefreshModelsForAccount(
       models = normalizeModels(
         await withTimeout(
           () => withAccountProxyOverride(accountProxyUrl,
-            () => adapter.getModels(aiBaseUrl, credential, platformUserId)),
+            () => (codexClientFingerprint
+              ? adapter.getModels(aiBaseUrl, credential, platformUserId, { requireCodexClient: true })
+              : adapter.getModels(aiBaseUrl, credential, platformUserId))),
           MODEL_DISCOVERY_TIMEOUT_MS,
           `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
         ),
@@ -1350,7 +1371,9 @@ async function doRefreshModelsForAccount(
       models = normalizeModels(
         await withTimeout(
           () => withAccountProxyOverride(accountProxyUrl,
-            () => adapter.getModels(aiBaseUrl, token.token, platformUserId)),
+            () => (codexClientFingerprint
+              ? adapter.getModels(aiBaseUrl, token.token, platformUserId, { requireCodexClient: true })
+              : adapter.getModels(aiBaseUrl, token.token, platformUserId))),
           MODEL_DISCOVERY_TIMEOUT_MS,
           `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
         ),

@@ -16,6 +16,7 @@ describe('siteProtocolProfile', () => {
       credentialMode: 'session',
     });
     expect(profile.preferResponses).toBe(true);
+    expect(profile.requireCodexClient).toBe(true);
     expect(JSON.parse(serializeSiteProtocolProfile(profile)).requireCodexClient).toBe(true);
   });
 

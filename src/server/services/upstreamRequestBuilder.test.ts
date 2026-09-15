@@ -77,6 +77,91 @@ describe('upstreamRequestBuilder', () => {
     expect((nonStreaming.body as Record<string, unknown>).stream_options).toBeUndefined();
   });
 
+  it('strips chat-only stream_options and pins store:false for Codex-client sites on responses endpoints', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-6-astra',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://anyrouter.top',
+      requireCodexClient: true,
+      openaiBody: {
+        model: 'gpt-6-astra',
+        stream: true,
+        stream_options: { include_usage: true },
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.stream_options).toBeUndefined();
+    expect(request.body.store).toBe(false);
+    expect(request.body.instructions).toEqual(expect.any(String));
+  });
+
+  it('stamps the Codex fingerprint on messages and chat for Codex-client sites', () => {
+    const messagesRequest = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-opus-5',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://agentrouter.org',
+      requireCodexClient: true,
+      openaiBody: {
+        model: 'claude-opus-5',
+        stream: true,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(messagesRequest.path).toBe('/v1/messages');
+    expect(messagesRequest.headers['User-Agent']).toContain('codex_cli_rs');
+    expect(messagesRequest.headers.Originator).toBe('codex_cli_rs');
+    expect(messagesRequest.headers['anthropic-version']).toBeTruthy();
+
+    const chatRequest = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'claude-opus-5',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://agentrouter.org',
+      requireCodexClient: true,
+      openaiBody: {
+        model: 'claude-opus-5',
+        stream: true,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(chatRequest.headers['User-Agent']).toContain('codex_cli_rs');
+  });
+
+  it('does not stamp the Claude fingerprint when Claude mode is off', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'claude-opus-5',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://agentrouter.org',
+      openaiBody: {
+        model: 'claude-opus-5',
+        stream: true,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.headers['User-Agent'] ?? '').not.toContain('claude-cli');
+    expect(request.headers['X-App']).toBeUndefined();
+  });
+
   it('routes Gemini official chat tool history through native generateContent with signed functionCall parts', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',

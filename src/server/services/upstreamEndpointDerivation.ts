@@ -2,7 +2,10 @@ import {
   rankConversationFileEndpoints,
   type ConversationFileInputSummary,
 } from '../proxy-core/capabilities/conversationFileCapabilities.js';
-import { siteProtocolPrefersResponses } from '../shared/siteProtocolProfile.js';
+import {
+  siteProtocolPrefersResponses,
+  siteProtocolRequiresCodexClient,
+} from '../shared/siteProtocolProfile.js';
 import type { UpstreamEndpoint } from '../proxy-core/orchestration/upstreamRequest.js';
 import { fetchModelPricingCatalog } from './modelPricingService.js';
 import {
@@ -199,14 +202,24 @@ export async function resolveUpstreamEndpointCandidates(
     hasRemoteDocumentUrl: false,
   };
 
+  const siteProfileInput = {
+    protocolProfile: context.site.protocolProfile,
+    customHeaders: (context.site as any).customHeaders,
+  };
+  // Codex-gated sites carry the Codex fingerprint on the Anthropic Messages
+  // face too, so Claude-family models keep messages-first ordering even when
+  // the site otherwise prefers Responses: the upstream serves Claude traffic
+  // natively on that protocol. Non-Claude models keep the Responses-first
+  // guarantee below.
+  const codexClientSiteMessagesFirst = (
+    preferMessagesForClaudeModel
+    && siteProtocolRequiresCodexClient(siteProfileInput)
+  );
   // Explicit Codex/Responses compatibility only — never infer from client alone.
   // Order: responses first, then messages, then chat (messages remains preferred fallback).
   // Runtime endpoint memory may promote a previously successful chat/messages
   // endpoint; for Codex-compat sites that must never demote responses.
-  if (siteProtocolPrefersResponses({
-    protocolProfile: context.site.protocolProfile,
-    customHeaders: (context.site as any).customHeaders,
-  })) {
+  if (!codexClientSiteMessagesFirst && siteProtocolPrefersResponses(siteProfileInput)) {
     const candidates = finalizeCandidates(['responses', 'messages', 'chat']);
     // count_tokens is a native Anthropic operation; preserve its messages-only
     // constraint even for sites that otherwise require Responses.

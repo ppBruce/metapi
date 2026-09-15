@@ -9,6 +9,7 @@ import {
 } from '../transformers/openai/responses/conversion.js';
 import { normalizeCodexResponsesBodyForProxy } from '../transformers/openai/responses/codexCompatibility.js';
 import { asTrimmedString } from '../shared/trimString.js';
+import { CODEX_CLI_USER_AGENT } from '../shared/codexClientFamily.js';
 import {
   convertOpenAiBodyToAnthropicMessagesBody,
   sanitizeAnthropicMessagesBody,
@@ -295,7 +296,7 @@ function ensureCodexClientFingerprintHeaders(
     // betray the request as a non-Codex client and trip the upstream
     // "This account only allows Codex official clients" check. Always force the
     // Codex CLI UA over any downstream UA.
-    userAgentOverride: 'codex_cli_rs/0.149.1 (Mac OS 26.0.1; arm64) Apple_Terminal/464',
+    userAgentOverride: CODEX_CLI_USER_AGENT,
   });
   const next = { ...headers };
   for (const key of [
@@ -471,6 +472,11 @@ export function buildUpstreamEndpointRequest(input: {
   oauthProvider?: string;
   oauthProjectId?: string;
   sitePlatform?: string;
+  /**
+   * Site protocol-profile flag: the upstream validates requests as Codex-client
+   * traffic, so responses bodies get the same treatment as platform 'codex'.
+   */
+  requireCodexClient?: boolean;
   siteUrl?: string;
   openaiBody: Record<string, unknown>;
   downstreamFormat: DownstreamFormat | 'responses';
@@ -747,7 +753,7 @@ export function buildUpstreamEndpointRequest(input: {
       });
     }
 
-    const headers = buildClaudeRuntimeHeaders({
+    let headers = buildClaudeRuntimeHeaders({
       baseHeaders: commonHeaders,
       claudeHeaders,
       anthropicVersion,
@@ -755,6 +761,13 @@ export function buildUpstreamEndpointRequest(input: {
       isClaudeOauthUpstream,
       tokenValue: input.tokenValue,
     });
+    // Sites gated to the Codex client fingerprint (「Codex 客户端」) validate the
+    // client identity on every face, not only /v1/responses: stamp the same
+    // fingerprint on the Anthropic Messages face so Claude models pass the
+    // upstream client-whitelist gate instead of being rejected as unknown clients.
+    if (input.requireCodexClient) {
+      headers = ensureCodexClientFingerprintHeaders(headers, sitePlatform);
+    }
 
     return {
       path: resolveEndpointPath('messages'),
@@ -787,9 +800,15 @@ export function buildUpstreamEndpointRequest(input: {
     if (preserveWebsocketIncrementalMode && rawBody.generate === false) {
       sanitizedResponsesBody.generate = false;
     }
+    // A site that requires the Codex client fingerprint gets the same body
+    // treatment as a native codex platform: the upstream validates the request
+    // as official-client traffic (drop chat-only fields like stream_options,
+    // pin store:false, ensure instructions).
+    const codexCompat = input.requireCodexClient === true;
     const body = normalizeCodexResponsesBodyForProxy(
       sanitizedResponsesBody,
       sitePlatform,
+      { codexCompat },
     );
     const configuredResponsesBody = normalizeCodexResponsesBodyForProxy(
       normalizeSub2ApiResponsesBodyForProxy(
@@ -797,6 +816,7 @@ export function buildUpstreamEndpointRequest(input: {
         sitePlatform,
       ),
       sitePlatform,
+      { codexCompat },
     );
 
     if (sitePlatform === 'codex') {
@@ -842,7 +862,10 @@ export function buildUpstreamEndpointRequest(input: {
     };
   }
 
-  const headers = ensureStreamAcceptHeader(commonHeaders, input.stream);
+  let headers = ensureStreamAcceptHeader(commonHeaders, input.stream);
+  if (input.requireCodexClient) {
+    headers = ensureCodexClientFingerprintHeaders(headers, sitePlatform);
+  }
   const chatBody: Record<string, unknown> = {
     ...openaiBody,
     model: input.modelName,

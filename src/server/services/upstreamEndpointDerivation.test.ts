@@ -202,6 +202,44 @@ describe('upstreamEndpointDerivation', () => {
     expect(order).toEqual(['responses', 'messages', 'chat']);
   });
 
+  it('keeps Claude-family models messages-first on Codex-client sites even when responses are preferred', async () => {
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: {
+          ...baseContext.site,
+          protocolProfile: JSON.stringify({
+            preferResponses: true,
+            requireCodexClient: true,
+            credentialMode: 'auto',
+          }),
+        },
+      },
+      'claude-opus-5',
+      'openai',
+    );
+    expect(order).toEqual(['messages', 'chat', 'responses']);
+  });
+
+  it('keeps non-Claude models responses-first on Codex-client sites that prefer responses', async () => {
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: {
+          ...baseContext.site,
+          protocolProfile: JSON.stringify({
+            preferResponses: true,
+            requireCodexClient: true,
+            credentialMode: 'auto',
+          }),
+        },
+      },
+      'gpt-5.6-sol',
+      'openai',
+    );
+    expect(order).toEqual(['responses', 'messages', 'chat']);
+  });
+
   it('keeps preferResponses sites responses-first even when runtime memory blocks responses', async () => {
     const { recordUpstreamEndpointFailure } = await import('./upstreamEndpointRuntimeMemory.js');
     recordUpstreamEndpointFailure({

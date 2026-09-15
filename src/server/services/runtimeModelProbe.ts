@@ -14,6 +14,7 @@ import {
   collectResponsesFinalPayloadFromSseText,
   looksLikeResponsesSseText,
 } from '../proxy-core/runtime/responsesSseFinal.js';
+import { resolveSiteProtocolProfile } from '../shared/siteProtocolProfile.js';
 import { isEndpointDowngradeError } from '../transformers/shared/endpointCompatibility.js';
 import { shouldAbortSameSiteEndpointFallback } from './proxyRetryPolicy.js';
 import type { schema } from '../db/index.js';
@@ -70,12 +71,32 @@ function classifyUnsupportedFailure(status: number, rawErrorText: string): boole
 }
 
 /**
+ * True when an upstream body is an HTML page (WAF / anti-bot challenge, CDN
+ * error page) rather than model output. A 200 challenge page used to be
+ * logged as probe success, which made a blocked site look healthy.
+ */
+export function looksLikeNonModelHtmlResponse(text: string | null | undefined): boolean {
+  const head = String(text || '').slice(0, 4096);
+  if (!head) return false;
+  if (/^\s*<(!doctype\s+html|html\b)/i.test(head)) return true;
+  const lower = head.toLowerCase();
+  return lower.includes('aliyun_waf')
+    || lower.includes('acw_sc__v2')
+    || lower.includes('_cf_chl')
+    || lower.includes('turnstile')
+    || lower.includes('attention required');
+}
+
+/**
  * Failures returned by a relay can describe its downstream model channel rather
  * than the MetAPI account credential. Keep that distinction explicit for the
  * marketplace so a healthy account is not presented as expired or broken.
  */
 export function classifyProbeFailureReason(status: number, rawErrorText: string): string {
   const text = String(rawErrorText || '').trim();
+  if (looksLikeNonModelHtmlResponse(text)) {
+    return '上游返回了 HTML / 风控验证页（非模型输出）';
+  }
   const lower = text.toLowerCase();
   const isChannelAuthFailure = (
     lower.includes('authorization failed')
@@ -655,6 +676,10 @@ export async function probeRuntimeModel(input: {
         oauthProvider: oauth?.provider,
         oauthProjectId: oauth?.projectId,
         sitePlatform: input.site.platform,
+        requireCodexClient: resolveSiteProtocolProfile({
+          protocolProfile: input.site.protocolProfile,
+          customHeaders: input.site.customHeaders,
+        }).requireCodexClient,
         siteUrl: endpointBaseUrl,
         openaiBody,
         downstreamFormat: 'openai',
@@ -750,7 +775,10 @@ export async function probeRuntimeModel(input: {
         result.upstream,
         remainingExecutionTimeoutMs,
       );
-      if (stream.ttftMs != null || (stream.done && !stream.error)) {
+      // A 200 response whose body is an HTML/WAF challenge page is NOT success:
+      // mislabeling it made a blocked site look healthy in the marketplace.
+      const htmlChallengePage = looksLikeNonModelHtmlResponse(stream.text);
+      if (!htmlChallengePage && (stream.ttftMs != null || (stream.done && !stream.error))) {
         const probeLatencyMs = stream.ttftMs ?? latencyMs;
         void (async () => {
           try {
@@ -785,6 +813,11 @@ export async function probeRuntimeModel(input: {
       const streamError = stream.error || extractSseOrJsonError(stream.text);
       const rawErrorText = String(streamError || '').trim();
       const probeStatus = streamError ? 'unsupported' : 'inconclusive';
+      // HTML challenge pages carry no stream error; surface an explicit reason
+      // so the probe log says why the model never answered.
+      const failureReason = htmlChallengePage
+        ? '上游返回了 HTML / 风控验证页（非模型输出）'
+        : classifyProbeFailureReason(0, rawErrorText);
       // Keep draining an unfinished stream in the background so the upstream
       // connection closes naturally instead of being abandoned (client gone).
       if (stream.reader) {
@@ -800,13 +833,13 @@ export async function probeRuntimeModel(input: {
         status: 'failed',
         latencyMs,
         tokensUsed: null,
-        errorMessage: classifyProbeFailureReason(0, rawErrorText),
+        errorMessage: failureReason,
       }).catch((err: unknown) => console.error('[probe-log] Failed to insert probe log:', err));
 
       return {
         status: probeStatus,
         latencyMs,
-        reason: classifyProbeFailureReason(0, rawErrorText),
+        reason: failureReason,
       };
     }
 

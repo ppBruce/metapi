@@ -91,6 +91,16 @@ export interface CreateApiTokenOptions {
   modelLimits?: string;
 }
 
+/** Options for adapter model discovery calls. */
+export interface ModelDiscoveryOptions {
+  /**
+   * Upstream site requires a Codex CLI client fingerprint (User-Agent /
+   * originator) on discovery requests; chat traffic gets the same fingerprint
+   * from upstreamRequestBuilder.
+   */
+  requireCodexClient?: boolean;
+}
+
 export interface PlatformAdapter {
   readonly platformName: string;
   detect(url: string): Promise<boolean>;
@@ -99,7 +109,7 @@ export interface PlatformAdapter {
   verifyToken(baseUrl: string, token: string, platformUserId?: number): Promise<TokenVerifyResult>;
   checkin(baseUrl: string, accessToken: string, platformUserId?: number): Promise<CheckinResult>;
   getBalance(baseUrl: string, accessToken: string, platformUserId?: number): Promise<BalanceInfo>;
-  getModels(baseUrl: string, token: string, platformUserId?: number): Promise<string[]>;
+  getModels(baseUrl: string, token: string, platformUserId?: number, options?: ModelDiscoveryOptions): Promise<string[]>;
   getApiToken(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string | null>;
   getApiTokens(baseUrl: string, accessToken: string, platformUserId?: number): Promise<ApiTokenInfo[]>;
   issueManagementToken?(baseUrl: string, sessionCredential: string, platformUserId?: number): Promise<string | null>;
@@ -115,7 +125,7 @@ export abstract class BasePlatformAdapter implements PlatformAdapter {
   abstract detect(url: string): Promise<boolean>;
   abstract checkin(baseUrl: string, accessToken: string): Promise<CheckinResult>;
   abstract getBalance(baseUrl: string, accessToken: string): Promise<BalanceInfo>;
-  abstract getModels(baseUrl: string, token: string, platformUserId?: number): Promise<string[]>;
+  abstract getModels(baseUrl: string, token: string, platformUserId?: number, options?: ModelDiscoveryOptions): Promise<string[]>;
 
   async verifyToken(baseUrl: string, token: string, _platformUserId?: number): Promise<TokenVerifyResult> {
     // 1. Try as session/access token first (for management APIs)

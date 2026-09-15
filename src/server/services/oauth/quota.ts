@@ -12,6 +12,7 @@ import {
 } from './oauthAccount.js';
 import { resolveOauthAccountProxyUrl } from './requestProxy.js';
 import type { OauthQuotaSnapshot, OauthQuotaWindowSnapshot } from './quotaTypes.js';
+import { CODEX_CLIENT_VERSION, CODEX_CLI_USER_AGENT } from '../../shared/codexClientFamily.js';
 
 type CodexJwtClaims = {
   'https://api.openai.com/auth'?: {
@@ -49,8 +50,6 @@ type NormalizedCodexQuotaHeaders = {
 };
 
 const CODEX_QUOTA_PROBE_MODEL = 'gpt-5.4';
-const CODEX_QUOTA_PROBE_VERSION = '0.149.1';
-const CODEX_QUOTA_PROBE_USER_AGENT = 'codex_cli_rs/0.149.1 (Mac OS 26.0.1; arm64) Apple_Terminal/464';
 const CODEX_QUOTA_PROBE_BETA = 'responses-2025-03-11';
 const CODEX_QUOTA_PROBE_INSTRUCTIONS = 'You are a helpful assistant.';
 const CODEX_QUOTA_PROBE_TIMEOUT_MS = 10_000;
@@ -671,7 +670,7 @@ async function probeCodexQuotaWithWhamFirst(input: {
           Accept: 'application/json',
           'OpenAI-Beta': CODEX_QUOTA_PROBE_BETA,
           Originator: 'codex_cli_rs',
-          'User-Agent': CODEX_QUOTA_PROBE_USER_AGENT,
+          'User-Agent': CODEX_CLI_USER_AGENT,
           ...(input.oauth.accountId || input.oauth.accountKey
             ? { 'Chatgpt-Account-Id': input.oauth.accountId || input.oauth.accountKey }
             : {}),
@@ -718,8 +717,8 @@ function buildCodexQuotaProbeHeaders(input: {
     Accept: 'text/event-stream',
     Connection: 'Keep-Alive',
     Originator: 'codex_cli_rs',
-    Version: CODEX_QUOTA_PROBE_VERSION,
-    'User-Agent': CODEX_QUOTA_PROBE_USER_AGENT,
+    Version: CODEX_CLIENT_VERSION,
+    'User-Agent': CODEX_CLI_USER_AGENT,
     'OpenAI-Beta': CODEX_QUOTA_PROBE_BETA,
     Session_id: randomUUID(),
     ...(input.accountId ? { 'Chatgpt-Account-Id': input.accountId } : {}),

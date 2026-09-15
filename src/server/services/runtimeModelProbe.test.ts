@@ -333,4 +333,54 @@ describe('probeRuntimeModel', () => {
     expect(messages[1]?.role).toBe('user');
   });
 
+  it('flags HTML/WAF challenge pages as non-model output', async () => {
+    const { looksLikeNonModelHtmlResponse, classifyProbeFailureReason } = await import('./runtimeModelProbe.js');
+    const waf = '<!doctype html>\n<meta name="aliyun_waf_aa" content="ff92">\n<title></title>';
+    expect(looksLikeNonModelHtmlResponse(waf)).toBe(true);
+    expect(looksLikeNonModelHtmlResponse('<html><body>nginx</body></html>')).toBe(true);
+    expect(looksLikeNonModelHtmlResponse('两管同时打开，2.4 小时可以注满水池。')).toBe(false);
+    expect(looksLikeNonModelHtmlResponse(null)).toBe(false);
+    expect(classifyProbeFailureReason(0, waf)).toContain('HTML');
+  });
+
+  it('does not report success when a 200 stream carries an HTML/WAF challenge page', async () => {
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue([{
+      id: 'chat',
+      path: '/v1/chat/completions',
+      format: 'openai',
+    }]);
+    const wafHtml = '<!doctype html>\n<meta name="aliyun_waf_aa" content="ff926c7f">\n<script>!function(){var x=1}</script>';
+    let served = false;
+    dispatchRuntimeRequestMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => wafHtml,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (served) return { done: true };
+            served = true;
+            return { done: false, value: new TextEncoder().encode(wafHtml) };
+          },
+        }),
+      },
+    });
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    const result = await probeRuntimeModel({
+      site,
+      account,
+      modelName: 'claude-opus-5',
+      timeoutMs: 5000,
+    });
+
+    // The old behavior marked any 200-without-error as success; a WAF page
+    // must surface as an honest failure instead.
+    expect(result.status).not.toBe('supported');
+    expect(result.reason).toContain('HTML');
+    const insertArgs = probeLogsInsertMock.mock.calls[0]?.[0] as any;
+    expect(insertArgs.status).toBe('failed');
+    expect(String(insertArgs.errorMessage)).toContain('HTML');
+  });
+
 });

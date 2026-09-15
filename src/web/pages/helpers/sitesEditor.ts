@@ -157,7 +157,6 @@ export function applyCodexCompatibilityMode(form: SiteForm, enabled: boolean): S
   };
 }
 
-
 /** Preset used by the “Browser UA” switch for Cloudflare / WAF-gated sites. */
 export const BROWSER_UA_PROFILE_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36',
@@ -255,7 +254,11 @@ export function emptySiteForm(): SiteForm {
     customHeaders: [emptySiteCustomHeader()],
     customHeadersOverrideRequestHeaders: false,
     paramOverride: '',
-    protocolProfile: { preferResponses: false, requireCodexClient: false, credentialMode: 'auto' },
+    protocolProfile: {
+      preferResponses: false,
+      requireCodexClient: false,
+      credentialMode: 'auto',
+    },
     globalWeight: '1',
   };
 }
@@ -339,7 +342,13 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
           requireCodexClient: !!raw?.requireCodexClient,
           credentialMode: raw?.credentialMode || 'auto',
         };
-      } catch { return { preferResponses: false, requireCodexClient: false, credentialMode: 'auto' }; }
+      } catch {
+        return {
+          preferResponses: false,
+          requireCodexClient: false,
+          credentialMode: 'auto',
+        };
+      }
     })(),
     globalWeight,
   };

@@ -126,6 +126,37 @@ describe('normalizeCodexResponsesBodyForProxy', () => {
     }
   });
 
+  it('drops chat-only stream_options on codex-gated platforms while keeping other fields', () => {
+    for (const platform of ['sub2api', 'new-api', 'openai', 'one-api']) {
+      const body = normalizeCodexResponsesBodyForProxy({
+        input: 'hello',
+        stream_options: { include_usage: true },
+        max_output_tokens: 512,
+      }, platform);
+
+      expect(body.stream_options).toBeUndefined();
+      expect(body.max_output_tokens).toBe(512);
+      expect(body.instructions).toBe(CODEX_DEFAULT_INSTRUCTIONS);
+    }
+  });
+
+  it('treats Codex-client sites like the codex platform (full codex body treatment)', () => {
+    const body = normalizeCodexResponsesBodyForProxy({
+      input: 'hello',
+      max_output_tokens: 512,
+      max_completion_tokens: 256,
+      max_tokens: 128,
+      stream_options: { include_usage: true },
+      store: true,
+    }, 'new-api', { codexCompat: true });
+
+    expect(body).toEqual({
+      input: 'hello',
+      instructions: CODEX_DEFAULT_INSTRUCTIONS,
+      store: false,
+    });
+  });
+
   it('extracts system input into instructions on gated platforms', () => {
     const body = normalizeCodexResponsesBodyForProxy({
       input: [
