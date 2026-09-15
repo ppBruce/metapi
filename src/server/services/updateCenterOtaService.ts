@@ -48,6 +48,8 @@ import { join } from 'node:path';
 
 import { fetch } from 'undici';
 
+import { resolveSystemProxyUrl, withSystemProxyRequestInit } from './systemProxy.js';
+
 import { db, schema } from '../db/index.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import {
@@ -100,6 +102,22 @@ let otaRunning = false;
 function summarizeError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return String(error || 'unknown error');
+}
+
+/**
+ * Transport-level download failures (`fetch failed` / connect timeout) are
+ * opaque to users — on networks where github.com:443 is unreachable without a
+ * proxy they look like a broken update button. Attach the actionable hint to
+ * exactly those errors; every other failure keeps its own message.
+ */
+export function withNetworkDownloadHint(error: unknown): string {
+  const message = summarizeError(error);
+  const cause = (error as { cause?: { code?: string } } | null | undefined)?.cause;
+  const transportLevel = message === 'fetch failed' || cause?.code === 'UND_ERR_CONNECT_TIMEOUT';
+  if (!transportLevel) return message;
+  return resolveSystemProxyUrl(process.env)
+    ? `${message}（已配置系统代理但下载仍失败，请确认代理可达）`
+    : `${message}；下载 GitHub 发布包需要可达 github.com 的网络：可在运行环境设置 HTTPS_PROXY（如 http://127.0.0.1:7897），或把 METAPI_OTA_BUNDLE_DIR 指向已放好更新包的本地目录`;
 }
 
 function setOtaState(patch: Partial<OtaState>): void {
@@ -281,10 +299,10 @@ async function fetchJsonWithTimeout(url: string, timeoutMs = JSON_TIMEOUT_MS): P
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, {
+    const response = await fetch(url, withSystemProxyRequestInit(process.env, {
       headers: { accept: 'application/vnd.github+json', 'user-agent': 'metapi-update-center/1.0' },
       signal: controller.signal,
-    });
+    }));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.json();
   } finally {
@@ -329,7 +347,9 @@ async function downloadBundle(location: BundleLocation, destPath: string): Promi
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
   try {
-    const response = await fetch(location.tarballUrl, { signal: controller.signal });
+    const response = await fetch(location.tarballUrl, withSystemProxyRequestInit(process.env, {
+      signal: controller.signal,
+    }));
     if (!response.ok || !response.body) throw new Error(`下载失败：HTTP ${response.status}`);
     const total = Number(response.headers.get('content-length') || 0);
     const file = createWriteStream(destPath);
@@ -355,7 +375,9 @@ async function readSha256Sidecar(location: BundleLocation): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), JSON_TIMEOUT_MS);
   try {
-    const response = await fetch(location.sha256Url, { signal: controller.signal });
+    const response = await fetch(location.sha256Url, withSystemProxyRequestInit(process.env, {
+      signal: controller.signal,
+    }));
     if (!response.ok) throw new Error(`校验文件下载失败：HTTP ${response.status}`);
     return await response.text();
   } finally {
@@ -520,7 +542,7 @@ export function rollbackAppliedBundle(input: { root: string }): { toVersion: str
 }
 
 function shSingleQuote(value: string): string {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+  return `'${String(value).replace(/'/g, '\'\\\'\'')}'`;
 }
 
 /**
@@ -805,7 +827,7 @@ export async function startOtaApply(version: string): Promise<void> {
     setOtaState({
       phase: 'failed',
       message: '在线更新失败',
-      error: summarizeError(error),
+      error: withNetworkDownloadHint(error),
       finishedAt: new Date().toISOString(),
     });
     throw error;

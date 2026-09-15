@@ -18,6 +18,7 @@ import {
   readAppliedInfo,
   rollbackAppliedBundle,
   verifyBundleSha256,
+  withNetworkDownloadHint,
 } from './updateCenterOtaService.js';
 import { buildOtaManifest, OTA_MANIFEST_FILENAME } from './updateCenterOtaManifest.js';
 
@@ -171,6 +172,36 @@ describe('updateCenterOtaService', () => {
     expect(decideHostApplyTier({ writableAppRoot: false, graphicalSession: false, pkexecAvailable: true })).toBe('manual');
   });
 
+  it('attaches the actionable hint to transport-level download failures only', () => {
+    // Without proxy configuration: the hint tells the operator what to set.
+    // Clear every variant — shells commonly carry lowercase forms too.
+    for (const key of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) {
+      delete process.env[key];
+    }
+    expect(withNetworkDownloadHint(new Error('fetch failed'))).toContain('HTTPS_PROXY');
+    expect(withNetworkDownloadHint(Object.assign(new Error('fetch failed'), {
+      cause: { code: 'UND_ERR_CONNECT_TIMEOUT' },
+    }))).toContain('HTTPS_PROXY');
+    expect(withNetworkDownloadHint(Object.assign(new Error('fetch failed'), {
+      cause: { code: 'UND_ERR_CONNECT_TIMEOUT' },
+    }))).toContain('METAPI_OTA_BUNDLE_DIR');
+
+    // Other failure classes keep their own message untouched.
+    expect(withNetworkDownloadHint(new Error('下载失败：HTTP 404'))).toBe('下载失败：HTTP 404');
+    expect(withNetworkDownloadHint(new Error('更新包超出大小上限'))).toBe('更新包超出大小上限');
+
+    // With a proxy configured the hint switches to a connectivity diagnosis.
+    const restore = process.env.HTTPS_PROXY;
+    try {
+      process.env.HTTPS_PROXY = 'http://127.0.0.1:7897';
+      expect(withNetworkDownloadHint(new Error('fetch failed'))).toContain('已配置系统代理');
+      expect(withNetworkDownloadHint(new Error('fetch failed'))).not.toContain('METAPI_OTA_BUNDLE_DIR');
+    } finally {
+      if (restore === undefined) delete process.env.HTTPS_PROXY;
+      else process.env.HTTPS_PROXY = restore;
+    }
+  });
+
   it('detects app-root writability', () => {
     const root = makeTempRoot();
     const readonlyRoot = makeTempRoot();
@@ -189,9 +220,9 @@ describe('updateCenterOtaService', () => {
     const dir = makeTempDir();
     try {
       const script = generateHostApplyScript({
-        root: `/opt/metapi test's dir`,
+        root: '/opt/metapi test\'s dir',
         stagingDir: join(dir, 'staging'),
-        backupDir: `/opt/metapi test's dir/.ota/backup-1.7.5-x`,
+        backupDir: '/opt/metapi test\'s dir/.ota/backup-1.7.5-x',
         targetVersion: '1.7.6',
         previousVersion: '1.7.5',
         gitSha: 'abc123',

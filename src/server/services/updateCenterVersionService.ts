@@ -1,4 +1,6 @@
 import { fetch, type RequestInit as UndiciRequestInit } from 'undici';
+
+import { withSystemProxyRequestInit } from './systemProxy.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -58,10 +60,10 @@ async function fetchJsonWithTimeout(url: string, init: UndiciRequestInit, timeou
   }, UPDATE_CENTER_VERSION_FETCH_TIMEOUT_MS);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(url, withSystemProxyRequestInit(process.env, {
       ...init,
       signal: controller.signal,
-    });
+    }));
     if (!response.ok) {
       throw new Error(`${timeoutLabel} failed with HTTP ${response.status}`);
     }

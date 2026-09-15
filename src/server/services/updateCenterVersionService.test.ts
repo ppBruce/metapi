@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 
 const { fetchMock } = vi.hoisted(() => ({
   fetchMock: vi.fn(),
@@ -277,6 +277,38 @@ describe('update center version service', () => {
       fetchMock.mockRejectedValue(abortError);
 
       await expect(fetchLatestStableGitHubRelease()).rejects.toThrow('GitHub releases lookup timeout');
+    });
+  });
+
+  describe('system proxy pass-through', () => {
+    const savedProxy = process.env.HTTPS_PROXY;
+    afterEach(() => {
+      if (savedProxy === undefined) delete process.env.HTTPS_PROXY;
+      else process.env.HTTPS_PROXY = savedProxy;
+    });
+
+    it('sends the fetch through the configured proxy dispatcher', async () => {
+      process.env.HTTPS_PROXY = 'http://127.0.0.1:7897';
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ results: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+      await fetchDockerHubTagCandidates();
+      const init = fetchMock.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined;
+      expect(init?.dispatcher).toBeDefined();
+    });
+
+    it('keeps the fetch init untouched when no proxy is configured', async () => {
+      for (const key of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) {
+        delete process.env[key];
+      }
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ results: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+      await fetchDockerHubTagCandidates();
+      const init = fetchMock.mock.calls[0]?.[1];
+      expect(init && 'dispatcher' in (init as object)).toBe(false);
     });
   });
 

@@ -7,7 +7,8 @@ import { fetch } from 'undici';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { upsertSetting } from '../db/upsertSetting.js';
-import { normalizeSiteProxyUrl, withExplicitProxyRequestInit } from './siteProxy.js';
+import { withExplicitProxyRequestInit } from './siteProxy.js';
+import { resolveSystemProxyUrl } from './systemProxy.js';
 
 type TunnelStateFile = {
   enabled: boolean;
@@ -316,16 +317,12 @@ export function buildCloudflaredDownloadUrl(assetName: string): string {
 }
 
 /**
- * Proxy for the cloudflared download, resolved from standard proxy environment
- * variables only (HTTPS_PROXY / HTTP_PROXY / ALL_PROXY, upper or lower case).
- * Unset or invalid values resolve to null (direct connection).
+ * Proxy for the cloudflared download: delegates to the shared system-proxy
+ * resolver (standard HTTPS_PROXY / HTTP_PROXY / ALL_PROXY env vars). Kept as
+ * a named export so callers and tests address it by its own contract.
  */
 export function resolveCloudflaredDownloadProxyUrl(env: NodeJS.ProcessEnv = process.env): string | null {
-  const raw = env.HTTPS_PROXY || env.https_proxy
-    || env.HTTP_PROXY || env.http_proxy
-    || env.ALL_PROXY || env.all_proxy
-    || '';
-  return normalizeSiteProxyUrl(raw);
+  return resolveSystemProxyUrl(env);
 }
 
 /** Drop an unread response body so a peer close can never strand a paused
