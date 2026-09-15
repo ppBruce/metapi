@@ -14,7 +14,8 @@ vi.mock('undici', () => ({
   fetch: (...args: unknown[]) => fetchMock(...args),
 }));
 
-vi.mock('./platforms/newApiShield.js', () => ({
+vi.mock('./platforms/newApiShield.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./platforms/newApiShield.js')>(),
   buildNewApiCookieCandidates: () => [],
   fetchJsonWithShieldCookieRetry: (...args: unknown[]) => fetchJsonWithShieldCookieRetryMock(...args),
 }));

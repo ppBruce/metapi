@@ -1,4 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('undici', () => ({ fetch: vi.fn() }));
+vi.mock('./siteProxy.js', () => ({
+  withSiteProxyRequestInit: async (_url: string, init: unknown) => init,
+  withSiteRecordProxyRequestInit: (_site: unknown, init: unknown) => init,
+}));
 import {
   extractSelfLogItems,
   findBestSelfLogMatch,

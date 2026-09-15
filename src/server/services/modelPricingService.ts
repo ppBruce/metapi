@@ -3,6 +3,7 @@ import { withSiteProxyRequestInit } from './siteProxy.js';
 import {
   buildNewApiCookieCandidates,
   fetchJsonWithShieldCookieRetry,
+  isShieldCooldownActive,
 } from './platforms/newApiShield.js';
 import {
   lookupModelsDevPrice,
@@ -359,11 +360,13 @@ function buildTokenCandidates(input: EstimateProxyCostInput): string[] {
 }
 
 async function fetchCommonPricing(baseUrl: string, token?: string, _sitePlatform?: string): Promise<PricingData | null> {
+  if (isShieldCooldownActive(baseUrl)) return null;
   const shouldTryShieldCookie = !!token && token.includes('=');
   if (shouldTryShieldCookie) {
     const payload = await fetchJsonViaNewApiShield(`${baseUrl}/api/pricing`, token!);
     const data = normalizeCommonPricingPayload(payload);
     if (data) return data;
+    if (isShieldCooldownActive(baseUrl)) return null;
   }
 
   const headers: Record<string, string> = {};
@@ -767,10 +770,22 @@ function evaluateTieredExpr(expr: string, params: TieredBillingParams): TieredBi
   const abs = Math.abs;
   const ceil = Math.ceil;
   const floor = Math.floor;
+  // fixed(amount): USD per request — NewAPI scales it by 1_000_000 to its
+  // internal quota unit, and our formula divides back by 1_000_000, so the
+  // value ends up as a real USD price again. Must stay a number literal path.
+  const fixed = (amount: number) => Number(amount) * 1_000_000;
+  const has = (source: unknown, substr: unknown) => String(source).includes(String(substr));
+  // Request-context probes. The pricing evaluator runs without a request body
+  // (routing reference / log billing), so these resolve to neutral values:
+  // a header missing → empty string; a param missing → empty string. Request
+  // rules then evaluate to their `: 1` fallback branch instead of crashing.
+  const header = (_key: string) => '';
+  const param = (_path: string) => '';
   // safe: expressions come from trusted upstream /api/pricing, not user input
   const fn = new Function(
     'p', 'c', 'len', 'cr', 'cc', 'cc1h', 'img', 'img_o', 'ai', 'ao', 'tier',
     'hour', 'minute', 'weekday', 'month', 'day', 'max', 'min', 'abs', 'ceil', 'floor',
+    'fixed', 'has', 'header', 'param',
     `return (${expr});`,
   );
   const cost = Number(fn(
@@ -795,6 +810,10 @@ function evaluateTieredExpr(expr: string, params: TieredBillingParams): TieredBi
     abs,
     ceil,
     floor,
+    fixed,
+    has,
+    header,
+    param,
   ));
   if (!Number.isFinite(cost)) {
     throw new Error('tiered billing expression returned a non-finite value');

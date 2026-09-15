@@ -130,6 +130,27 @@ describe('checkinService auto relogin', () => {
     expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({ accessToken: 'fresh-token' }));
   });
 
+  it('uses the stored login session for checkin instead of its management token', async () => {
+    selectAllMock.mockReturnValue([{
+      accounts: {
+        id: 269, username: 'test_42', accessToken: 'stored-session', status: 'active',
+        extraConfig: JSON.stringify({ platformUserId: 42, newApiManagedAuth: { managementToken: 'management-token' } }),
+      },
+      sites: { id: 269, name: 'session-only-checkin', url: 'https://upstream.example', platform: 'new-api' },
+    }]);
+    adapterMock.checkin.mockImplementation(async (_url, credential) => credential === 'stored-session'
+      ? { success: true, message: 'checked in' }
+      : { success: false, message: '无权进行此操作，未登录且未提供 access token' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(269);
+
+    expect(result.success).toBe(true);
+    expect(adapterMock.checkin).toHaveBeenCalledTimes(1);
+    expect(adapterMock.checkin).toHaveBeenCalledWith('https://upstream.example', 'stored-session', 42);
+    expect(adapterMock.login).not.toHaveBeenCalled();
+  });
+
   it('passes guessed platform user id when config does not include it', async () => {
     selectAllMock.mockReturnValue([
       {

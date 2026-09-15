@@ -3,6 +3,8 @@ import { resolvePlatformUserId } from './accountExtraConfig.js';
 import {
   buildNewApiCookieCandidates,
   fetchJsonWithShieldCookieRetry,
+  isShieldCooldownActive,
+  NewApiShieldError,
 } from './platforms/newApiShield.js';
 import {withSiteRecordProxyRequestInit} from './siteProxy.js';
 const SELF_LOG_FETCH_TIMEOUT_MS = 8_000;
@@ -410,10 +412,12 @@ async function fetchSelfLogPayload(baseUrl: string, token: string, input: ProxyU
           },
           signal: controller.signal,
         });
+        if (result.failure?.terminal) throw new NewApiShieldError(result.failure);
         if (result.data) return result.data;
       }
     }
 
+    if (isShieldCooldownActive(url)) return null;
     const response = await fetch(url, withSiteRecordProxyRequestInit(input.site, {
       method: 'GET',
       headers,
@@ -442,13 +446,17 @@ async function fetchSelfLogPayload(baseUrl: string, token: string, input: ProxyU
 
 async function fetchRecentSelfLogItems(input: ProxyUsageFallbackInput): Promise<SelfLogItem[]> {
   const baseUrl = normalizeUrl(input.site.url);
+  const platform = String(input.site.platform || '').toLowerCase();
   const tokens = buildTokenCandidates(input);
   for (const token of tokens) {
+    if (platform === 'new-api' && isShieldCooldownActive(baseUrl)) return [];
     try {
       const payload = await fetchSelfLogPayload(baseUrl, token, input);
       const items = extractSelfLogItems(payload);
       if (items.length > 0) return items;
-    } catch {}
+    } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
   }
   return [];
 }

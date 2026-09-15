@@ -19,8 +19,10 @@ const CHECKIN_INVALID_URL_TOKEN = 'checkin-invalid-url-token';
 const CHECKIN_INVALID_URL_EXPIRED_SESSION_TOKEN = 'checkin-invalid-url-expired-session-token';
 const CHECKIN_INVALID_URL_FORBIDDEN_SESSION_TOKEN = 'checkin-invalid-url-forbidden-session-token';
 const CHECKIN_CLOUDFLARE_530_TOKEN = 'checkin-cloudflare-530-token';
+const CHECKIN_SHIELDED_BEARER_TOKEN = 'checkin-shielded-bearer-token';
 const BALANCE_FAIL_TOKEN = 'balance-fail-token';
 const BALANCE_SHIELD_FAILURE_TOKEN = 'balance-shield-failure-token';
+const BALANCE_SHIELDED_BEARER_TOKEN = 'balance-shielded-bearer-token';
 const GROUP_EXPIRED_TOKEN = 'group-expired-token';
 const SHIELD_LOGIN_USERNAME = 'shield-user';
 const SHIELD_LOGIN_PASSWORD = 'shield-pass';
@@ -30,6 +32,7 @@ const COOKIE_ONLY_LOGIN_USERNAME = 'cookie-only-user';
 const COOKIE_ONLY_LOGIN_PASSWORD = 'cookie-only-pass';
 const COOKIE_ONLY_LOGIN_SESSION = 'cookie-only-session';
 const OPENAI_MODELS_SHIELDED_TOKEN = 'openai-models-shielded-token';
+const CODEX_FINGERPRINT_MODELS_TOKEN = 'codex-fingerprint-models-token';
 const COOKIE_SHIELDED_TOKEN = Buffer.from(
   `1771864970|${Buffer.from('username=linuxdo_131936').toString('base64')}|sig`,
 ).toString('base64');
@@ -97,6 +100,17 @@ describe('NewApiAdapter', () => {
               { id: 'claude-opus-4-6' },
             ],
           }));
+          return;
+        }
+
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CODEX_FINGERPRINT_MODELS_TOKEN}`) {
+          if (req.headers.originator === 'codex_cli_rs' && String(req.headers['user-agent'] || '').startsWith('codex_cli_rs/')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ data: [{ id: 'gpt-6-astra' }, { id: 'claude-opus-5' }] }));
+            return;
+          }
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'unauthorized client detected' } }));
           return;
         }
 
@@ -299,6 +313,29 @@ describe('NewApiAdapter', () => {
             'Set-Cookie': `cdn_sec_tc=${SHIELD_LOGIN_COOKIE}; Path=/; HttpOnly`,
           });
           res.end(SHIELD_CHALLENGE_HTML);
+          return;
+        }
+
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${BALANCE_SHIELDED_BEARER_TOKEN}`) {
+          const cookieHeader = typeof req.headers.cookie === 'string' ? req.headers.cookie : '';
+          if (!cookieHeader.includes(`acw_sc__v2=${SHIELD_CHALLENGE_ACW}`)) {
+            res.writeHead(200, {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Set-Cookie': `cdn_sec_tc=${SHIELD_LOGIN_COOKIE}; Path=/; HttpOnly`,
+            });
+            res.end(SHIELD_CHALLENGE_HTML);
+            return;
+          }
+          if (req.headers['new-api-user'] !== '203453') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: 'missing New-Api-User' }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: { id: 203453, username: 'linuxdo_203453', quota: 4200000, used_quota: 1200000 },
+          }));
           return;
         }
 
@@ -521,6 +558,20 @@ describe('NewApiAdapter', () => {
           res.end(JSON.stringify({ success: false, message: 'Unauthorized, not logged in and no access token provided' }));
           return;
         }
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_SHIELDED_BEARER_TOKEN}`) {
+          const cookieHeader = typeof req.headers.cookie === 'string' ? req.headers.cookie : '';
+          if (!cookieHeader.includes(`acw_sc__v2=${SHIELD_CHALLENGE_ACW}`)) {
+            res.writeHead(200, {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Set-Cookie': `cdn_sec_tc=${SHIELD_LOGIN_COOKIE}; Path=/; HttpOnly`,
+            });
+            res.end(SHIELD_CHALLENGE_HTML);
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'checkin success', data: { reward: 66 } }));
+          return;
+        }
         if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${COOKIE_SHIELDED_TOKEN}`) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, message: 'unauthorized' }));
@@ -600,6 +651,27 @@ describe('NewApiAdapter', () => {
     expect(
       requests.some((r) => r.url === '/api/user/models' && r.headers['new-api-user'] === '11494'),
     ).toBe(true);
+  });
+
+  it('presents the Codex client fingerprint on /v1/models when discovery requires it', async () => {
+    const adapter = new NewApiAdapter();
+
+    await adapter.getModels(baseUrl, CODEX_FINGERPRINT_MODELS_TOKEN);
+    const plainRequest = requests.find(
+      (r) => r.url === '/v1/models' && r.headers.authorization === `Bearer ${CODEX_FINGERPRINT_MODELS_TOKEN}`,
+    );
+    expect(plainRequest?.headers.originator).toBeUndefined();
+
+    const models = await adapter.getModels(baseUrl, CODEX_FINGERPRINT_MODELS_TOKEN, undefined, {
+      requireCodexClient: true,
+    });
+    expect(models).toEqual(['gpt-6-astra', 'claude-opus-5']);
+
+    const fingerprintedRequest = [...requests].reverse().find(
+      (r) => r.url === '/v1/models' && r.headers.authorization === `Bearer ${CODEX_FINGERPRINT_MODELS_TOKEN}`,
+    );
+    expect(fingerprintedRequest?.headers.originator).toBe('codex_cli_rs');
+    expect(String(fingerprintedRequest?.headers['user-agent'] || '')).toMatch(/^codex_cli_rs\//);
   });
 
   it('parses token list response with data.items[] shape', async () => {
@@ -764,6 +836,40 @@ describe('NewApiAdapter', () => {
 
     await expect(adapter.getBalance(baseUrl, BALANCE_SHIELD_FAILURE_TOKEN)).rejects
       .toThrow('无权进行此操作，未登录且未提供 access token');
+  });
+
+  it('solves the acw challenge for the Bearer balance probe (managed token on WAF-protected New API)', async () => {
+    const adapter = new NewApiAdapter();
+    const balance = await adapter.getBalance(baseUrl, BALANCE_SHIELDED_BEARER_TOKEN, 203453);
+
+    expect(balance.balance).toBe(8.4);
+    expect(balance.used).toBe(2.4);
+    expect(
+      requests.some(
+        (r) =>
+          r.url === '/api/user/self' &&
+          r.headers.authorization === `Bearer ${BALANCE_SHIELDED_BEARER_TOKEN}` &&
+          typeof r.headers.cookie === 'string' &&
+          r.headers.cookie.includes(`acw_sc__v2=${SHIELD_CHALLENGE_ACW}`),
+      ),
+    ).toBe(true);
+  });
+
+  it('solves the acw challenge for the Bearer checkin probe (WAF-protected New API)', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, CHECKIN_SHIELDED_BEARER_TOKEN, 203453);
+
+    expect(result.success).toBe(true);
+    expect(result.reward).toBe('66');
+    expect(
+      requests.some(
+        (r) =>
+          r.url === '/api/user/checkin' &&
+          r.headers.authorization === `Bearer ${CHECKIN_SHIELDED_BEARER_TOKEN}` &&
+          typeof r.headers.cookie === 'string' &&
+          r.headers.cookie.includes(`acw_sc__v2=${SHIELD_CHALLENGE_ACW}`),
+      ),
+    ).toBe(true);
   });
 
   it('preserves nested checkin error message instead of generic fallback', async () => {

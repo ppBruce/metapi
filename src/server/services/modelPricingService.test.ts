@@ -386,6 +386,33 @@ describe('modelPricingService', () => {
       expect(cost).toBeCloseTo(0.2, 4);
     });
 
+    it('supports NewAPI fixed() per-request pricing leaves (tier("request", fixed(1)) = $1/req)', () => {
+      const requestModel: PricingModel = {
+        modelName: 'grok-imagine-image',
+        quotaType: 0,
+        modelRatio: 1,
+        completionRatio: 1,
+        modelPrice: null,
+        enableGroups: ['default'],
+        billingMode: 'tiered_expr',
+        billingExpr: 'tier("request", fixed(1))',
+      };
+      // fixed(1) = $1 per request regardless of token usage; 1e6 cost × ratio 1 / 1e6 = 1.
+      const cost = calculateModelUsageCost(
+        requestModel,
+        { promptTokens: 500_000, completionTokens: 500_000, totalTokens: 1_000_000 },
+        { default: 1 },
+      );
+      expect(cost).toBeCloseTo(1, 6);
+      // The multiplier still applies.
+      const doubled = calculateModelUsageCost(
+        requestModel,
+        { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        { default: 2 },
+      );
+      expect(doubled).toBeCloseTo(2, 6);
+    });
+
     it('supports NewAPI time helper functions used by production pricing expressions', () => {
       const model: PricingModel = {
         modelName: 'time-aware',

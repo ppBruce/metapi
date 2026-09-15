@@ -179,7 +179,10 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
 
   const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
-  let activeAccessToken = getNewApiManagementTokenFromExtraConfig(account.extraConfig) || account.accessToken;
+  // Check-in can require the original login session even when a derived
+  // management token is valid for balance reads. Never substitute that token
+  // for an available session; keep it only for legacy rows without one.
+  let activeAccessToken = account.accessToken || getNewApiManagementTokenFromExtraConfig(account.extraConfig) || '';
   let result = await withAccountProxyOverride(accountProxyUrl,
     () => adapter.checkin(site.url, activeAccessToken, platformUserId));
 

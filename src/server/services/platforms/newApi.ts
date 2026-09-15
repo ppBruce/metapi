@@ -1,12 +1,28 @@
-import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type SiteAnnouncement } from './base.js';
+import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type ModelDiscoveryOptions, type SiteAnnouncement } from './base.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
-import { withManagementRequestTimeout } from './upstreamRequestTimeout.js';
-import { createContext, runInContext } from 'node:vm';
-import { withSiteProxyRequestInit } from '../siteProxy.js';
-import { fetchJsonWithShieldCookieRetry } from './newApiShield.js';
+import { fetchJsonWithShieldCookieRetry, classifyShieldGateFailureText, NewApiShieldError } from './newApiShield.js';
+import { CODEX_CLI_USER_AGENT } from '../../shared/codexClientFamily.js';
+
+// Codex CLI client fingerprint for model discovery calls on sites whose
+// protocol profile requires a Codex client ("Codex 兼容" site setting). Chat
+// traffic gets the full version-consistent fingerprint from
+// upstreamRequestBuilder; discovery bypasses that builder, so /v1/models
+// presents the minimal fingerprint here. The UA comes from the shared Codex
+// client identity so discovery can never drift from the proxy surfaces.
+const CODEX_DISCOVERY_FINGERPRINT_HEADERS: Record<string, string> = {
+  'user-agent': CODEX_CLI_USER_AGENT,
+  originator: 'codex_cli_rs',
+};
 
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
+
+  protected override async fetchJson<T>(url: string, options?: UndiciRequestInit): Promise<T> {
+    const result = await fetchJsonWithShieldCookieRetry<T>(url, options);
+    if (result.failure) throw new NewApiShieldError(result.failure);
+    if (!result.ok) throw new Error(`HTTP ${result.status}: 上游请求未完成`);
+    return result.data as T;
+  }
 
   async detect(url: string): Promise<boolean> {
     try {
@@ -387,110 +403,6 @@ export class NewApiAdapter extends BasePlatformAdapter {
     };
   }
 
-  private parseChallengeArg1(html: string): string | null {
-    const match = html.match(/var\s+arg1\s*=\s*['"]([0-9a-fA-F]+)['"]/);
-    return match?.[1]?.toUpperCase() || null;
-  }
-
-  private parseChallengeMapping(html: string): number[] | null {
-    const match = html.match(/for\(var m=\[([^\]]+)\],p=L\(0x115\)/);
-    if (!match?.[1]) return null;
-
-    const values = match[1].split(',').map((raw) => {
-      const v = raw.trim().toLowerCase();
-      if (!v) return Number.NaN;
-      if (v.startsWith('0x')) return Number.parseInt(v.slice(2), 16);
-      return Number.parseInt(v, 10);
-    });
-    if (values.some((v) => Number.isNaN(v))) return null;
-    return values;
-  }
-
-  private parseChallengeXorSeed(html: string): string | null {
-    const fnStart = html.indexOf('function a0i()');
-    const bStart = html.indexOf('function b(');
-    const rotateStart = html.indexOf('(function(a,c){');
-    const rotateEnd = html.indexOf('),!(function', rotateStart);
-    if (fnStart < 0 || bStart < 0 || bStart <= fnStart || rotateStart < 0 || rotateEnd < 0) {
-      return null;
-    }
-
-    const helperCode = html.slice(fnStart, bStart);
-    const rotateCode = `${html.slice(rotateStart, rotateEnd + 1)})`;
-
-    try {
-      const sandbox: Record<string, unknown> = { decodeURIComponent };
-      createContext(sandbox);
-      runInContext(helperCode, sandbox, { timeout: 100 });
-      runInContext(rotateCode, sandbox, { timeout: 100 });
-      const decoder = sandbox['a0j'];
-      if (typeof decoder !== 'function') return null;
-      const seed = (decoder as (idx: number) => unknown)(0x115);
-      if (typeof seed !== 'string' || !/^[0-9a-f]+$/i.test(seed)) return null;
-      return seed;
-    } catch {
-      return null;
-    }
-  }
-
-  private solveAcwScV2(html: string): string | null {
-    const arg1 = this.parseChallengeArg1(html);
-    const mapping = this.parseChallengeMapping(html);
-    const xorSeed = this.parseChallengeXorSeed(html);
-    if (!arg1 || !mapping || !xorSeed) return null;
-
-    const q: string[] = [];
-    for (let i = 0; i < arg1.length; i += 1) {
-      const ch = arg1[i];
-      for (let j = 0; j < mapping.length; j += 1) {
-        if (mapping[j] === i + 1) {
-          q[j] = ch;
-        }
-      }
-    }
-
-    const reordered = q.join('');
-    let out = '';
-    for (let i = 0; i < reordered.length && i < xorSeed.length; i += 2) {
-      const left = Number.parseInt(reordered.slice(i, i + 2), 16);
-      const right = Number.parseInt(xorSeed.slice(i, i + 2), 16);
-      if (Number.isNaN(left) || Number.isNaN(right)) return null;
-      out += (left ^ right).toString(16).padStart(2, '0');
-    }
-
-    return out || null;
-  }
-
-  private upsertCookie(cookieHeader: string, name: string, value: string): string {
-    const parts = cookieHeader.split(';').map((part) => part.trim()).filter(Boolean);
-    let replaced = false;
-    const next = parts.map((part) => {
-      const eq = part.indexOf('=');
-      if (eq < 0) return part;
-      const key = part.slice(0, eq).trim();
-      if (key !== name) return part;
-      replaced = true;
-      return `${name}=${value}`;
-    });
-    if (!replaced) next.push(`${name}=${value}`);
-    return next.join('; ');
-  }
-
-  private mergeSetCookiePairs(cookieHeader: string, setCookieHeaders: string[]): string {
-    let merged = cookieHeader;
-    for (const raw of setCookieHeaders) {
-      if (!raw) continue;
-      const firstPair = raw.split(';')[0]?.trim();
-      if (!firstPair) continue;
-      const eq = firstPair.indexOf('=');
-      if (eq <= 0) continue;
-      const name = firstPair.slice(0, eq).trim();
-      const value = firstPair.slice(eq + 1);
-      merged = this.upsertCookie(merged, name, value);
-    }
-    return merged;
-  }
-
   private parseJsonSafe<T>(text: string): T | null {
     try {
       return JSON.parse(text) as T;
@@ -557,40 +469,6 @@ export class NewApiAdapter extends BasePlatformAdapter {
       text.includes("unexpected token '<'")
       || (text.includes('not valid json') && (text.includes('<html') || text.includes('<script')))
     );
-  }
-
-  private isShieldChallenge(contentType: string, text: string): boolean {
-    const ct = (contentType || '').toLowerCase();
-    if (ct.includes('text/html') && /var\s+arg1\s*=|acw_sc__v2|cdn_sec_tc|<script/i.test(text)) {
-      return true;
-    }
-    return /var\s+arg1\s*=/.test(text);
-  }
-
-  private normalizeHeaders(headers?: UndiciRequestInit['headers']): Record<string, string> {
-    const output: Record<string, string> = {};
-    if (!headers) return output;
-
-    if (Array.isArray(headers)) {
-      for (const [k, v] of headers) {
-        output[String(k)] = String(v);
-      }
-      return output;
-    }
-
-    const maybeIterable = headers as { forEach?: (fn: (v: string, k: string) => void) => void };
-    if (typeof maybeIterable.forEach === 'function') {
-      maybeIterable.forEach((v, k) => {
-        output[String(k)] = String(v);
-      });
-      return output;
-    }
-
-    for (const [k, v] of Object.entries(headers as Record<string, unknown>)) {
-      if (v === undefined || v === null) continue;
-      output[k] = String(v);
-    }
-    return output;
   }
 
   private hasUsableSessionCookie(cookieHeader: string): boolean {
@@ -772,56 +650,28 @@ export class NewApiAdapter extends BasePlatformAdapter {
     url: string,
     options?: UndiciRequestInit,
   ): Promise<{ data: T | null; cookieHeader: string }> {
-    const { fetch } = await import('undici');
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-      ...this.normalizeHeaders(options?.headers),
-    };
-
-    let cookieHeader = headers['Cookie'] || headers['cookie'] || '';
-    if (cookieHeader) {
-      headers['Cookie'] = cookieHeader;
-      delete headers['cookie'];
+    const result = await fetchJsonWithShieldCookieRetry<T>(url, options);
+    if (result.failure?.terminal) throw new NewApiShieldError(result.failure);
+    // Raw callers may inspect authentication errors, but never consume an
+    // error status as successful token/model data.
+    if (result.failure?.code === 'upstream_http_error') {
+      return { ...result, data: { success: false, message: result.failure.responseMessage || '' } as T };
     }
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const requestOptions: UndiciRequestInit = {
-        ...options,
-        body: options?.body ?? undefined,
-        headers,
-      };
-      const proxiedRequestOptions = await withSiteProxyRequestInit(url, withManagementRequestTimeout(requestOptions));
-      const res = await fetch(url, proxiedRequestOptions);
-      const text = await res.text();
-      const getSetCookie = (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;
-      if (typeof getSetCookie === 'function') {
-        cookieHeader = this.mergeSetCookiePairs(cookieHeader, getSetCookie.call(res.headers) || []);
-      }
-      const parsed = this.parseJsonSafe<T>(text);
-      if (parsed) return { data: parsed, cookieHeader };
-
-      if (!this.isShieldChallenge(res.headers.get('content-type') || '', text)) {
-        return { data: null, cookieHeader };
-      }
-      if (!cookieHeader) {
-        return { data: null, cookieHeader };
-      }
-
-      const acwScV2 = this.solveAcwScV2(text);
-      if (!acwScV2) {
-        return { data: null, cookieHeader };
-      }
-      cookieHeader = this.upsertCookie(cookieHeader, 'acw_sc__v2', acwScV2);
-      headers['Cookie'] = cookieHeader;
-    }
-
-    return { data: null, cookieHeader };
+    return result;
   }
 
   private async fetchJsonRaw<T>(url: string, options?: UndiciRequestInit): Promise<T | null> {
     const result = await this.fetchJsonRawWithCookie<T>(url, options);
     return result.data;
+  }
+
+  private async fetchJsonViaShield<T>(url: string, options?: UndiciRequestInit): Promise<T | null> {
+    try {
+      const { data } = await fetchJsonWithShieldCookieRetry<T>(url, options);
+      return data;
+    } catch {
+      return null;
+    }
   }
 
   private async fetchUserSelfByCookie(
@@ -839,7 +689,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
         if (typeof res?.message === 'string' && res.message.trim()) {
           onFailureMessage?.(res.message.trim());
         }
-      } catch {}
+      } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
     }
     // Every credential/endpoint variant failed: leave a trace instead of a bare
     // null, otherwise the caller only sees "nothing worked".
@@ -856,7 +708,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
             headers: { Cookie: cookie, ...this.userIdHeaders(id) },
           });
           if (res?.success && res?.data) return id;
-        } catch {}
+        } catch (error) {
+          if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+        }
       }
     }
     // Every credential/endpoint variant failed: leave a trace instead of a bare
@@ -918,13 +772,14 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return payload.data.map((m: any) => m?.id).filter(Boolean);
   }
 
-  private async getOpenAiModelsViaShieldCookie(baseUrl: string, token: string): Promise<string[]> {
+  private async getOpenAiModelsViaShieldCookie(baseUrl: string, token: string, options?: ModelDiscoveryOptions): Promise<string[]> {
     for (const cookie of this.buildCookieCandidates(token)) {
       try {
         const { data } = await fetchJsonWithShieldCookieRetry<any>(`${baseUrl}/v1/models`, {
           headers: {
             Authorization: `Bearer ${token}`,
             Cookie: cookie,
+            ...(options?.requireCodexClient ? CODEX_DISCOVERY_FINGERPRINT_HEADERS : {}),
           },
         });
         const models = this.extractOpenAiModels(data);
@@ -937,11 +792,11 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return [];
   }
 
-  private async getOpenAiModels(baseUrl: string, token: string): Promise<string[]> {
+  private async getOpenAiModels(baseUrl: string, token: string, options?: ModelDiscoveryOptions): Promise<string[]> {
     // Session base64 values often end with "=" padding; that must NOT trigger the
     const shouldTryShieldCookie = this.looksLikeCookiePairCredential(token);
     if (shouldTryShieldCookie) {
-      const shieldModels = await this.getOpenAiModelsViaShieldCookie(baseUrl, token);
+      const shieldModels = await this.getOpenAiModelsViaShieldCookie(baseUrl, token, options);
       if (shieldModels.length > 0) return shieldModels;
     }
 
@@ -952,7 +807,10 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
     try {
       const res = await this.fetchJson<any>(`${baseUrl}/v1/models`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(options?.requireCodexClient ? CODEX_DISCOVERY_FINGERPRINT_HEADERS : {}),
+        },
       });
       return this.extractOpenAiModels(res);
     } catch {
@@ -969,7 +827,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
           headers: this.authHeaders(accessToken, jwtId),
         });
         if (res?.success && res?.data) return jwtId;
-      } catch {}
+      } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
     }
 
     try {
@@ -977,12 +837,16 @@ export class NewApiAdapter extends BasePlatformAdapter {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (res?.success && res?.data?.id) return res.data.id;
-    } catch {}
+    } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
 
     try {
       const cookieRes = await this.fetchUserSelfByCookie(baseUrl, accessToken);
       if (cookieRes?.success && cookieRes?.data?.id) return cookieRes.data.id;
-    } catch {}
+    } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
 
     const cookieId = await this.probeUserIdByCookie(baseUrl, accessToken);
     if (cookieId) return cookieId;
@@ -1190,13 +1054,18 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async checkin(baseUrl: string, accessToken: string, platformUserId?: number): Promise<CheckinResult> {
-    const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
+    let resolvedUserId: number | null;
+    try { resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken); }
+    catch (error) {
+      if (error instanceof NewApiShieldError) return { success: false, message: error.message };
+      throw error;
+    }
     let firstFailureMessage: string | undefined;
     const preferCookieFirst = this.isSessionLikeCredential(accessToken);
 
     const finalizeFailure = (message?: string) => ({
       success: false as const,
-      message: message || 'checkin failed',
+      message: classifyShieldGateFailureText(message) || message || 'checkin failed',
     });
 
     const tryBearerCheckin = async (): Promise<CheckinResult | null> => {
@@ -1215,7 +1084,30 @@ export class NewApiAdapter extends BasePlatformAdapter {
         }
         firstFailureMessage = this.rememberCheckinFailureMessage(firstFailureMessage, directMessage);
       } catch (err) {
+        if (err instanceof NewApiShieldError && err.failure.terminal) return finalizeFailure(err.message);
         const parsed = this.formatRequestErrorMessage(err);
+        // Aliyun WAF (acw_sc__v2) answers 200 + HTML to plain JSON fetches:
+        // solve the challenge and resend the same Bearer checkin through the
+        // shield-cookie flow (mirrors the balance-path recovery). Without
+        // this, a challenged checkin surfaced as a raw JSON.parse error.
+        if (parsed && this.isHtmlJsonParseErrorMessage(parsed)) {
+          const shielded = await this.fetchJsonViaShield<any>(`${baseUrl}/api/user/checkin`, {
+            method: 'POST',
+            headers: this.authHeaders(accessToken, resolvedUserId || undefined),
+          });
+          if (shielded?.success) {
+            return {
+              success: true,
+              message: shielded.message || 'checkin success',
+              reward: shielded.data?.reward?.toString(),
+            };
+          }
+          const shieldedMessage = this.extractResponseMessage(shielded);
+          if (this.isAlreadyCheckedInMessage(shieldedMessage)) {
+            return { success: false, message: shieldedMessage };
+          }
+          firstFailureMessage = this.rememberCheckinFailureMessage(firstFailureMessage, shieldedMessage);
+        }
         firstFailureMessage = this.rememberCheckinFailureMessage(firstFailureMessage, parsed);
       }
       return null;
@@ -1241,6 +1133,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
           }
           firstFailureMessage = this.rememberCheckinFailureMessage(firstFailureMessage, cookieMessage);
         } catch (err) {
+          if (err instanceof NewApiShieldError && err.failure.terminal) return finalizeFailure(err.message);
           const parsed = this.formatRequestErrorMessage(err);
           firstFailureMessage = this.rememberCheckinFailureMessage(firstFailureMessage, parsed);
         }
@@ -1271,6 +1164,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
             firstFailureMessage = this.rememberCheckinFailureMessage(firstFailureMessage, signInMessage);
           }
         } catch (err) {
+          if (err instanceof NewApiShieldError && err.failure.terminal) return finalizeFailure(err.message);
           const parsed = this.formatRequestErrorMessage(err);
           if (!this.isMissingCheckinEndpointMessage(parsed)) {
             firstFailureMessage = this.rememberCheckinFailureMessage(firstFailureMessage, parsed);
@@ -1328,7 +1222,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
         failureMessage = text;
         return;
       }
-      if (this.isHtmlJsonParseErrorMessage(failureMessage) && !this.isHtmlJsonParseErrorMessage(text)) {
+      if ((this.isHtmlJsonParseErrorMessage(failureMessage) || /上游.*风控挑战/.test(failureMessage)) && !this.isHtmlJsonParseErrorMessage(text)) {
         failureMessage = text;
       }
     };
@@ -1342,7 +1236,20 @@ export class NewApiAdapter extends BasePlatformAdapter {
       }
       rememberFailure(typeof res?.message === 'string' ? res.message : null);
     } catch (err) {
-      rememberFailure(this.formatRequestErrorMessage(err));
+      if (err instanceof NewApiShieldError && err.failure.terminal) throw err;
+      const message = this.formatRequestErrorMessage(err);
+      rememberFailure(message);
+      // Aliyun WAF (acw_sc__v2) answers 200 + HTML to plain JSON fetches. Solve
+      // the challenge and resend the same Bearer probe through the shield-cookie
+      // flow (covers managed management tokens on WAF-protected New API sites).
+      if (message && this.isHtmlJsonParseErrorMessage(message)) {
+        const shielded = await this.fetchJsonViaShield<any>(`${baseUrl}/api/user/self`, {
+          headers: this.authHeaders(accessToken, resolvedUserId || undefined),
+        });
+        if (shielded?.success && shielded?.data) {
+          return this.parseBalance(shielded.data);
+        }
+      }
     }
 
     const cookieRes = await this.fetchUserSelfByCookie(
@@ -1363,11 +1270,12 @@ export class NewApiAdapter extends BasePlatformAdapter {
       }
     }
 
-    throw new Error(failureMessage || 'failed to fetch balance');
+    const humanizedFailure = classifyShieldGateFailureText(failureMessage);
+    throw new Error(humanizedFailure || failureMessage || 'failed to fetch balance');
   }
 
-  async getModels(baseUrl: string, token: string, platformUserId?: number): Promise<string[]> {
-    const openAiModels = await this.getOpenAiModels(baseUrl, token);
+  async getModels(baseUrl: string, token: string, platformUserId?: number, options?: ModelDiscoveryOptions): Promise<string[]> {
+    const openAiModels = await this.getOpenAiModels(baseUrl, token, options);
     if (openAiModels.length > 0) return openAiModels;
 
     const userId = platformUserId || await this.discoverUserId(baseUrl, token);
@@ -1485,22 +1393,26 @@ export class NewApiAdapter extends BasePlatformAdapter {
         headers: this.authHeaders(accessToken, resolvedUserId || undefined),
       });
       if (res?.success === false) {
-        terminalError = this.resolveGroupFetchErrorMessage(res);
+        terminalError = terminalError || this.resolveGroupFetchErrorMessage(res);
       }
       const parsed = dedupe(this.parseGroupKeys(res));
       if (parsed.length > 0) return parsed;
-    } catch {}
+    } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
 
     try {
       const res = await this.fetchJson<any>(`${baseUrl}/api/user_group_map`, {
         headers: this.authHeaders(accessToken, resolvedUserId || undefined),
       });
       if (res?.success === false) {
-        terminalError = this.resolveGroupFetchErrorMessage(res);
+        terminalError = terminalError || this.resolveGroupFetchErrorMessage(res);
       }
       const parsed = dedupe(this.parseGroupKeys(res));
       if (parsed.length > 0) return parsed;
-    } catch {}
+    } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
 
     const cookieUserId = resolvedUserId || await this.probeUserIdByCookie(baseUrl, accessToken);
     for (const cookie of this.buildCookieCandidates(accessToken)) {
@@ -1510,20 +1422,24 @@ export class NewApiAdapter extends BasePlatformAdapter {
       try {
         const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self/groups`, { headers });
         if (res?.success === false) {
-          terminalError = this.resolveGroupFetchErrorMessage(res);
+          terminalError = terminalError || this.resolveGroupFetchErrorMessage(res);
         }
         const parsed = dedupe(this.parseGroupKeys(res));
         if (parsed.length > 0) return parsed;
-      } catch {}
+      } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
 
       try {
         const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user_group_map`, { headers });
         if (res?.success === false) {
-          terminalError = this.resolveGroupFetchErrorMessage(res);
+          terminalError = terminalError || this.resolveGroupFetchErrorMessage(res);
         }
         const parsed = dedupe(this.parseGroupKeys(res));
         if (parsed.length > 0) return parsed;
-      } catch {}
+      } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
     }
 
     if (terminalError) {
@@ -1532,8 +1448,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
     // Every credential/endpoint variant failed: leave a trace instead of a bare
     // null, otherwise the caller only sees "nothing worked".
-    console.warn('[new-api] getUserGroups: all variants failed');
-    return ['default'];
+    throw new Error('拉取分组失败：未获得有效的上游分组响应');
   }
 
   async deleteApiToken(
@@ -1558,12 +1473,28 @@ export class NewApiAdapter extends BasePlatformAdapter {
     };
 
     let tokenId: number | null = null;
+    let tokenListVerified = false;
+    const observeTokenList = (list: any) => {
+      if (!list || list.success === false) return;
+      const items = [list.data, list.data?.items, list.data?.data, list.items, list.list, list.data?.list]
+        .find(Array.isArray) as any[] | undefined;
+      if (!items) return;
+      tokenId = pickTokenId(items);
+      const total = list.data?.total ?? list.total;
+      // A single page does not prove absence when more pages or masked keys
+      // may hide the target. Fail closed rather than claiming revocation.
+      const complete = total !== undefined
+        ? Number.isFinite(Number(total)) && Number(total) >= 0 && Number(total) <= items.length
+        : items.length < 100;
+      const keysVisible = items.every((item) => typeof item?.key === 'string' && !item.key.includes('*'));
+      if (complete && keysVisible) tokenListVerified = true;
+    };
 
     try {
       const list = await this.fetchJson<any>(`${baseUrl}/api/token/?p=0&size=100`, {
         headers: this.authHeaders(accessToken, resolvedUserId || undefined),
       });
-      tokenId = pickTokenId(this.parseTokenItems(list));
+      observeTokenList(list);
       if (tokenId) {
         const res = await this.fetchJson<any>(`${baseUrl}/api/token/${tokenId}`, {
           method: 'DELETE',
@@ -1571,7 +1502,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
         });
         return !!res?.success;
       }
-    } catch {}
+    } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
 
     const cookieUserId = resolvedUserId || await this.probeUserIdByCookie(baseUrl, accessToken);
     for (const cookie of this.buildCookieCandidates(accessToken)) {
@@ -1581,7 +1514,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
       try {
         if (!tokenId) {
           const list = await this.fetchJsonRaw<any>(`${baseUrl}/api/token/?p=0&size=100`, { headers });
-          tokenId = pickTokenId(this.parseTokenItems(list));
+          observeTokenList(list);
         }
 
         if (!tokenId) continue;
@@ -1591,11 +1524,13 @@ export class NewApiAdapter extends BasePlatformAdapter {
           headers,
         });
         if (res?.success) return true;
-      } catch {}
+      } catch (error) {
+      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+    }
     }
 
     // Upstream key already absent means local deletion is safe.
-    if (!tokenId) return true;
+    if (!tokenId) return tokenListVerified;
     // Every credential/endpoint variant failed: leave a trace instead of a bare
     // null, otherwise the caller only sees "nothing worked".
     console.warn('[new-api] deleteApiToken: all variants failed');
