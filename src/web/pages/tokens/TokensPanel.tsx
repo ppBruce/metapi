@@ -462,7 +462,11 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange, siteId:
 
   const confirmDelete = async () => {
     const target = deleteConfirm;
-    if (!target?.tokenId) return;
+    console.log("confirmDelete called, deleteConfirm state:", deleteConfirm);
+    if (!target?.tokenId) {
+      console.log("confirmDelete: target.tokenId is missing, returning early");
+      return;
+    }
 
     setDeleteConfirm(null);
     await withRowLoading(`token-${target.tokenId}-delete`, async () => {
@@ -1328,7 +1332,10 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange, siteId:
                             </button>
                           ) : null}
                           <button
-                            onClick={() => setDeleteConfirm({ mode: 'single', tokenId: token.id, tokenName: token.name || '' })}
+                            onClick={() => {
+                              console.log("Delete button clicked, token:", { id: token.id, name: token.name });
+                              setDeleteConfirm({ mode: 'single', tokenId: token.id, tokenName: token.name || '' });
+                            }}
                             disabled={!!rowLoading[`${loadingPrefix}-delete`]}
                             className="btn btn-link btn-link-danger"
                           >
@@ -1454,7 +1461,10 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange, siteId:
                           </button>
                         ) : null}
                         <button
-                          onClick={() => setDeleteConfirm({ mode: 'single', tokenId: token.id, tokenName: token.name || '' })}
+                          onClick={() => {
+                              console.log("Delete button clicked, token:", { id: token.id, name: token.name });
+                              setDeleteConfirm({ mode: 'single', tokenId: token.id, tokenName: token.name || '' });
+                            }}
                           disabled={!!rowLoading[`${loadingPrefix}-delete`]}
                           className="btn btn-link btn-link-danger token-table-action-btn"
                         >

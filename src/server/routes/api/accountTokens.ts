@@ -683,6 +683,12 @@ export async function accountTokensRoutes(app: FastifyInstance) {
 
     if (shouldDeleteUpstream) {
       const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
+      console.log('[deleteAccountTokenById] Attempting upstream delete:', {
+        tokenId,
+        tokenName: existing.name,
+        siteUrl: site.url,
+        platform: site.platform,
+      });
       const upstreamDeleted = await withAccountProxyOverride(
         getProxyUrlFromExtraConfig(account.extraConfig),
         () => adapter!.deleteApiToken(
@@ -692,8 +698,10 @@ export async function accountTokensRoutes(app: FastifyInstance) {
           platformUserId,
         ),
       );
+      console.log('[deleteAccountTokenById] Upstream delete result:', { tokenId, upstreamDeleted });
       if (!upstreamDeleted) {
-        return { success: false, message: '站点删除令牌失败，本地未删除' };
+        console.warn('[deleteAccountTokenById] Upstream delete failed, but continuing with local delete for tokenId:', tokenId);
+        // 站点删除失败也继续删除本地记录（可能是令牌在站点上已不存在）
       }
     }
 
