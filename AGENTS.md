@@ -14,6 +14,43 @@ make small, consistent changes without re-learning the codebase each time.
 - Keep changes narrow and reviewable. Land one coherent slice at a time and
   avoid bundling unrelated cleanup into the same patch.
 
+## Upstream Sync And Verification
+
+- Treat upstream syncs as incremental maintenance. Compare against the last
+  adopted upstream revision, identify the local customization commits, and
+  preserve their intent and these local rules during conflict resolution.
+  Keep customizations separate and traceable; avoid unrelated refactoring.
+- Choose the smallest useful verification set from the actual diff and
+  manually resolved conflicts. Prefer existing tests for the changed behavior.
+  Do not run every adjacent suite or add tests just because a merge occurred.
+  Reuse successful upstream CI evidence for unchanged upstream code when
+  available; do not assume it passed without checking.
+- For routine Docker updates, default to focused review, affected tests where
+  needed, one production image build, and a brief deployed version/health check
+  plus one relevant management endpoint. Use that same image for deployment.
+  Do not duplicate compiler checks already covered by the build or run desktop
+  checks for a Docker-only change. Once applicable checks pass, proceed to the
+  authorized deployment and finish; rerun only checks invalidated by new edits
+  or failures.
+- Broaden validation only for a concrete unresolved risk, such as an uncertain
+  migration, a dependency/runtime incompatibility, or a manual change to
+  credentials, billing, or routing semantics. State the reason and target that
+  risk. Full-suite runs, database-copy rehearsals, exhaustive row comparisons,
+  every-key API probes, and live inference calls are not routine requirements.
+  Existing architecture and schema guardrails still apply when relevant.
+- Keep rollback preparation lightweight: record the previous Git revision,
+  retain its image, and back up configuration and a consistent database before
+  a production switch. Do not routinely export full Git bundles or Docker
+  image archives, or make repeated equivalent backups. Add those only when
+  the normal rollback materials would be insufficient.
+- Reuse deployment details and suitable commands/scripts from `docs/plans/`,
+  after confirming the current container, source, and data paths. Avoid
+  repeating historical investigations or building a new deployment framework
+  for each update. Keep progress notes and handoff evidence concise.
+- Documentation and agent-instruction-only edits require a diff/content
+  review and `git diff --check`; do not run application tests, builds, or
+  database rehearsals unless executable code or contracts also changed.
+
 ## Server Layers
 
 - `src/server/routes/**` are adapters, not owners. Route files may register

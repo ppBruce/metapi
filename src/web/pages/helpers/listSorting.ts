@@ -4,6 +4,7 @@ type SortableBase = {
   id: number;
   isPinned?: boolean | null;
   sortOrder?: number | null;
+  status?: string | null;
 };
 
 export function sortItemsForDisplay<T extends SortableBase>(
@@ -16,6 +17,11 @@ export function sortItemsForDisplay<T extends SortableBase>(
     const aPinned = a.isPinned ? 1 : 0;
     const bPinned = b.isPinned ? 1 : 0;
     if (aPinned !== bPinned) return bPinned - aPinned;
+
+    // 在默认排序下,已禁用的站点排到最后
+    const aDisabled = a.status === 'disabled' ? 1 : 0;
+    const bDisabled = b.status === 'disabled' ? 1 : 0;
+    if (aDisabled !== bDisabled) return aDisabled - bDisabled;
 
     const aOrder = Number.isFinite(a.sortOrder as number) ? Number(a.sortOrder) : Number.MAX_SAFE_INTEGER;
     const bOrder = Number.isFinite(b.sortOrder as number) ? Number(b.sortOrder) : Number.MAX_SAFE_INTEGER;
