@@ -420,4 +420,125 @@ describe('channelRecoveryProbeService', () => {
       }
     }
   });
+
+  it('does not count inconclusive recovery probes (request never reached the model) as channel failures', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'inconclusive-site',
+      url: 'https://inconclusive-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'inconclusive-user',
+      accessToken: 'access-inconclusive',
+      apiToken: 'sk-inconclusive',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'token-inconclusive',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'model-inconclusive',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      enabled: true,
+      cooldownUntil: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      lastFailAt: new Date().toISOString(),
+      consecutiveFailCount: 1,
+      cooldownLevel: 0,
+    }).returning().get();
+
+    probeRuntimeModelMock.mockResolvedValue({
+      status: 'inconclusive',
+      latencyMs: 30_000,
+      reason: 'runtime model probe candidate resolution timeout (30s)',
+    });
+
+    await runChannelProbeSweep();
+
+    expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
+
+    const refreshed = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    // Inconclusive = the probe itself could not run (endpoint/timeout), so the
+    // channel must keep its existing cooldown untouched instead of registering
+    // a NEW failure that extends the cooldown.
+    expect(refreshed?.consecutiveFailCount).toBe(1);
+    expect(refreshed?.cooldownLevel).toBe(0);
+  });
+
+  it('still counts unsupported recovery probes (upstream refused the model) as channel failures', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'unsupported-site',
+      url: 'https://unsupported-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'unsupported-user',
+      accessToken: 'access-unsupported',
+      apiToken: 'sk-unsupported',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'token-unsupported',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'model-unsupported',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      enabled: true,
+      cooldownUntil: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      lastFailAt: new Date().toISOString(),
+      consecutiveFailCount: 1,
+      cooldownLevel: 0,
+    }).returning().get();
+
+    probeRuntimeModelMock.mockResolvedValue({
+      status: 'unsupported',
+      latencyMs: 1_500,
+      reason: 'Upstream returned HTTP 400: model not found',
+    });
+
+    await runChannelProbeSweep();
+
+    expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
+
+    const refreshed = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    // Unsupported = upstream gave a definitive negative answer, so the failure
+    // must be recorded: failCount increments and lastFailAt refreshes.
+    // (classifyProxyFailure sees no HTTP status for probe failures, so the
+    // cooldown body itself stays in its existing skipCooldown semantics.)
+    expect(refreshed?.failCount).toBeGreaterThan(0);
+    expect(refreshed?.lastFailAt).not.toBeNull();
+  });
 });

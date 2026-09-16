@@ -225,19 +225,21 @@ async function runProbeCandidate(candidate: ProbeCandidate, nowMs: number): Prom
         result.latencyMs ?? 0,
         candidate.modelName,
       );
-    } else {
-      // 探活失败：触发冷却机制（延长冷却、升级 level）
+    } else if (result.status === 'unsupported') {
+      // 上游给出明确否定（模型不支持等）：真实渠道失败，记录失败并冷却
       await tokenRouter.recordFailure(
         candidate.channelId,
         { modelName: candidate.modelName },
       );
+    } else {
+      // inconclusive / skipped：探测自身未能完成（候选解析超时、请求未出站
+      // 等），不能证明渠道状态变化。不计失败、不清冷却，只推迟下轮探测，
+      // 避免形成「冷却到期→探测失败→再冷却」的每分钟骚扰循环（上游会把这
+      // 种持续的空转请求视为恶意流量）。
     }
   } catch (error) {
-    // 网络/超时等异常也视为失败，触发冷却
-    await tokenRouter.recordFailure(
-      candidate.channelId,
-      { modelName: candidate.modelName, errorText: error instanceof Error ? error.message : 'probe failed' },
-    );
+    // 网络/超时异常属于探测自身失败（多数情况请求未到达上游或未收到回包），
+    // 不计入渠道失败冷却，避免同样的空转循环。
   } finally {
     probeInFlightKeys.delete(key);
   }
