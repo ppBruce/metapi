@@ -66,7 +66,6 @@ describe('settings and auth events', () => {
     config.routingFallbackUnitCost = 1;
     (config as any).proxyFirstByteTimeoutSec = 0;
     (config as any).proxyChannelFailoverMaxAttempts = 30;
-    (config as any).proxyChannelFailoverLowValueStreakStop = 6;
     (config as any).tokenRouterFailureCooldownMaxSec = 30 * 24 * 60 * 60;
     (config as any).disableCrossProtocolFallback = false;
     (config as any).payloadRules = {
@@ -645,26 +644,19 @@ describe('settings and auth events', () => {
       url: '/api/settings/runtime',
       payload: {
         proxyChannelFailoverMaxAttempts: 24,
-        proxyChannelFailoverLowValueStreakStop: 5,
       },
     });
 
     expect(updateResponse.statusCode).toBe(200);
     const updated = updateResponse.json() as {
       proxyChannelFailoverMaxAttempts?: number;
-      proxyChannelFailoverLowValueStreakStop?: number;
     };
     expect(updated.proxyChannelFailoverMaxAttempts).toBe(24);
-    expect(updated.proxyChannelFailoverLowValueStreakStop).toBe(5);
     expect((config as any).proxyChannelFailoverMaxAttempts).toBe(24);
-    expect((config as any).proxyChannelFailoverLowValueStreakStop).toBe(5);
 
     const maxAttempts = await db.select().from(schema.settings)
       .where(eq(schema.settings.key, 'proxy_channel_failover_max_attempts')).get();
-    const lowValueStreakStop = await db.select().from(schema.settings)
-      .where(eq(schema.settings.key, 'proxy_channel_failover_low_value_streak_stop')).get();
     expect(maxAttempts?.value).toBe(JSON.stringify(24));
-    expect(lowValueStreakStop?.value).toBe(JSON.stringify(5));
 
     const getResponse = await app.inject({
       method: 'GET',
@@ -673,10 +665,8 @@ describe('settings and auth events', () => {
     expect(getResponse.statusCode).toBe(200);
     const runtime = getResponse.json() as {
       proxyChannelFailoverMaxAttempts?: number;
-      proxyChannelFailoverLowValueStreakStop?: number;
     };
     expect(runtime.proxyChannelFailoverMaxAttempts).toBe(24);
-    expect(runtime.proxyChannelFailoverLowValueStreakStop).toBe(5);
   });
 
   it('persists and returns disable cross protocol fallback from runtime settings', async () => {

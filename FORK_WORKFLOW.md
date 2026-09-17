@@ -99,18 +99,6 @@ git push origin local/1.8.0-custom
 当上游更新时，可以这样告诉 AI：
 
 ```
-上游 wyf9661/metapi 已更新到 vX.X.X，请：
-1. 拉取上游更新并合并到当前分支
-2. 保留我的所有自定义修改（群组优先、过滤群组内模型、禁用站点排序）
-3. 解决冲突（如果有）
-4. 运行类型检查
-5. 构建新的 Docker 镜像 metapi:X.X.X-custom
-6. 更新并重启容器
-7. 推送到我的 GitHub
-```
-
-或者简短版本：
-```
 合并上游 vX.X.X，保留本地修改，构建部署并推送到 GitHub
 ```
 
@@ -128,6 +116,7 @@ git push origin local/1.8.0-custom
 3. **推送前务必运行 `npm run typecheck`** 确保代码正确
 4. **Docker 镜像命名规范**：`metapi:<version>-custom`
 5. **定期推送到 GitHub**，避免本地修改丢失
+6. **冲突决策**：当上游分支与本地修改出现冲突时，务必询问修改方案，手动确认。
 
 ## 快速命令参考
 

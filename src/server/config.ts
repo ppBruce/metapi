@@ -174,19 +174,11 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
     // Fallback when countEligibleChannels fails (static path).
     proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 5))),
-    // Soft cap on live multi-channel failover (min(pool, cap)). Default 30 —
-    // large free-pool models should be able to walk their whole candidate list;
-    // the wall-clock failover budget (PROXY_CHANNEL_FAILOVER_BUDGET_MS) is the
-    // guard that keeps one client request from thrashing for minutes.
+    // Soft cap on live multi-channel failover (min(pool, cap)). Default 8 —
+    // prevents 20+ free-pool channels from thrashing one client request.
     proxyChannelFailoverMaxAttempts: Math.max(
       1,
-      Math.trunc(parseNumber(env.PROXY_CHANNEL_FAILOVER_MAX_ATTEMPTS, 30)),
-    ),
-    // Stop failover after this many consecutive low-value failures (WAF/model/quota/ambiguous).
-    // Default 6; increase for large pools where many channels may share the same upstream issue.
-    proxyChannelFailoverLowValueStreakStop: Math.max(
-      1,
-      Math.trunc(parseNumber(env.PROXY_CHANNEL_FAILOVER_LOW_VALUE_STREAK_STOP, 6)),
+      Math.trunc(parseNumber(env.PROXY_CHANNEL_FAILOVER_MAX_ATTEMPTS, 8)),
     ),
     // Explicit wall-clock budget (ms). 0 = live path uses soft default 30s for
     // multi-channel pools (see getProxyEffectiveFailoverBudgetMs).

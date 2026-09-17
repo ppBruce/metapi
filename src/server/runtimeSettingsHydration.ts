@@ -238,11 +238,6 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     config.proxyChannelFailoverMaxAttempts = Math.max(1, Math.trunc(proxyChannelFailoverMaxAttempts));
   }
 
-  const proxyChannelFailoverLowValueStreakStop = parseSettingFromMap<number>(settingsMap, 'proxy_channel_failover_low_value_streak_stop');
-  if (typeof proxyChannelFailoverLowValueStreakStop === 'number' && Number.isFinite(proxyChannelFailoverLowValueStreakStop) && proxyChannelFailoverLowValueStreakStop >= 1) {
-    config.proxyChannelFailoverLowValueStreakStop = Math.max(1, Math.trunc(proxyChannelFailoverLowValueStreakStop));
-  }
-
   const proxyRouteProbeRate = parseSettingFromMap<number>(settingsMap, 'proxy_route_probe_rate');
   if (typeof proxyRouteProbeRate === 'number' && Number.isFinite(proxyRouteProbeRate) && proxyRouteProbeRate >= 0 && proxyRouteProbeRate <= 1) {
     config.proxyRouteProbeRate = Math.min(1, Math.max(0, proxyRouteProbeRate));

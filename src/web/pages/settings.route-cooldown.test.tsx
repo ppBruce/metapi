@@ -58,7 +58,6 @@ describe('Settings route cooldown cap', () => {
       routingFallbackUnitCost: 1,
       proxyFirstByteTimeoutSec: 0,
       proxyChannelFailoverMaxAttempts: 30,
-      proxyChannelFailoverLowValueStreakStop: 6,
       routingWeights: {},
       tokenRouterFailureCooldownMaxSec: 30 * 24 * 60 * 60,
       routeProbabilityFloor: 0.05,
@@ -132,7 +131,6 @@ describe('Settings route cooldown cap', () => {
         routingFallbackUnitCost: 1,
         proxyFirstByteTimeoutSec: 0,
         proxyChannelFailoverMaxAttempts: 30,
-        proxyChannelFailoverLowValueStreakStop: 6,
         proxyRouteProbeRate: 0.15,
         tokenRouterFailureCooldownMaxSec: 10,
         routeProbabilityFloor: 0.05,
@@ -240,7 +238,6 @@ describe('Settings route cooldown cap', () => {
         routingFallbackUnitCost: 1,
         proxyFirstByteTimeoutSec: 7,
         proxyChannelFailoverMaxAttempts: 30,
-        proxyChannelFailoverLowValueStreakStop: 6,
         proxyRouteProbeRate: 0.15,
         tokenRouterFailureCooldownMaxSec: 30 * 24 * 60 * 60,
         routeProbabilityFloor: 0.05,
@@ -265,7 +262,6 @@ describe('Settings route cooldown cap', () => {
       routingFallbackUnitCost: 1,
       proxyFirstByteTimeoutSec: 0,
       proxyChannelFailoverMaxAttempts: 18,
-      proxyChannelFailoverLowValueStreakStop: 4,
       routingWeights: {},
       tokenRouterFailureCooldownMaxSec: 30 * 24 * 60 * 60,
       routeProbabilityFloor: 0.05,
@@ -289,15 +285,10 @@ describe('Settings route cooldown cap', () => {
       const maxAttemptsInput = root.root.find((node) => (
         node.type === 'input' && node.props['aria-label'] === '故障切换最大尝试次数'
       ));
-      const lowValueStreakInput = root.root.find((node) => (
-        node.type === 'input' && node.props['aria-label'] === '低价值失败连续停止阈值'
-      ));
       expect(maxAttemptsInput.props.value).toBe(18);
-      expect(lowValueStreakInput.props.value).toBe(4);
 
       await act(async () => {
         maxAttemptsInput.props.onChange({ target: { value: '24' } });
-        lowValueStreakInput.props.onChange({ target: { value: '5' } });
       });
 
       const saveButton = root.root.find((node) => (
@@ -312,7 +303,6 @@ describe('Settings route cooldown cap', () => {
 
       expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith(expect.objectContaining({
         proxyChannelFailoverMaxAttempts: 24,
-        proxyChannelFailoverLowValueStreakStop: 5,
       }));
     } finally {
       root?.unmount();
