@@ -44,6 +44,7 @@ async function looksLikeOpenAiCompatibleGateway(url: string): Promise<boolean> {
   const candidates = [
     `${url.replace(/\/+$/, '')}/v1/models`,
     `${url.replace(/\/+$/, '')}/models`,
+    `${url.replace(/\/+$/, '')}/api/v1/models`,
   ];
   for (const target of candidates) {
     try {
@@ -60,11 +61,50 @@ async function looksLikeOpenAiCompatibleGateway(url: string): Promise<boolean> {
       ) {
         return true;
       }
+      // Many compatible gateways (e.g. DeepSeek) reply 401 with their own
+      // wording ("Authentication Fails (governor)") that matches no known
+      // phrase. A 401 on /v1/models is itself the OpenAI-style gate signal:
+      // the route exists and demands a key.
+      if (res.status === 401 || res.status === 403) {
+        return true;
+      }
       try {
         const payload = JSON.parse(text) as { data?: unknown; object?: unknown };
         if (Array.isArray(payload.data) || payload.object === 'list') return true;
       } catch {
         // ignore non-json
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return false;
+}
+
+/** Detect an Anthropic-compatible gateway via its /v1/messages endpoint. */
+async function looksLikeAnthropicCompatibleGateway(url: string): Promise<boolean> {
+  const candidates = [
+    `${url.replace(/\/+$/, '')}/v1/messages`,
+    `${url.replace(/\/+$/, '')}/api/v1/messages`,
+  ];
+  for (const target of candidates) {
+    try {
+      const { fetch } = await import('undici');
+      const res = await fetch(target, withManagementRequestTimeout({ method: 'POST' }));
+      const text = await res.text();
+      const lowered = text.toLowerCase();
+      if (
+        lowered.includes('x-api-key')
+        || lowered.includes('anthropic')
+        || lowered.includes('invalid_api_key')
+        || (res.status === 401 && (lowered.includes('unauthorized') || lowered.includes('authentication')))
+      ) {
+        return true;
+      }
+      // An authenticated /v1/messages is also a strong Claude-compat signal,
+      // but requiring auth keeps 404-pages from matching.
+      if ((res.status === 401 || res.status === 403) && lowered.length > 0) {
+        return true;
       }
     } catch {
       // try next candidate
@@ -94,6 +134,13 @@ export async function detectPlatform(url: string): Promise<PlatformAdapter | und
 
   if (await looksLikeOpenAiCompatibleGateway(url)) {
     return getAdapter('openai');
+  }
+
+  // Anthropic-compatible gateways expose /v1/messages. Check it last so
+  // OpenAI-compatible sites (which also carry /v1/models) are not misread
+  // as Claude by a stray /v1/messages route.
+  if (await looksLikeAnthropicCompatibleGateway(url)) {
+    return getAdapter('claude');
   }
 
   return undefined;

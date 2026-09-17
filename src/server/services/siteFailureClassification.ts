@@ -144,6 +144,7 @@ export const SITE_PROTOCOL_FAILURE_PATTERNS: RegExp[] = [
 export const SITE_MODEL_FAILURE_PATTERNS: RegExp[] = [
   /unsupported\s+model/i,
   /model\s+not\s+supported/i,
+  /model\s+not\s+found/i,
   /does\s+not\s+support(?:\s+the)?\s+model/i,
   /no\s+such\s+model/i,
   /unknown\s+model/i,
@@ -370,6 +371,12 @@ function isQuotaOrCreditFailure(context: SiteRuntimeFailureContext = {}): boolea
   const status = typeof context.status === 'number' ? context.status : 0;
   if (status === 402) return true;
   return matchesAnyPattern(QUOTA_OR_CREDIT_PATTERNS, context.errorText);
+}
+
+/** 供探测服务复用：判断一段错误文本是否属于配额/余额类（provider 主动状态，
+ *  只能靠充值/人工解除，恢复探测不会改变结果）。 */
+export function isQuotaOrCreditFailureText(errorText?: string | null, status = 0): boolean {
+  return isQuotaOrCreditFailure({ status, errorText: errorText || '' });
 }
 
 /** Site/organization-level credential death: account disabled, access
@@ -703,13 +710,25 @@ export function classifyProxyFailure(context: SiteRuntimeFailureContext = {}): P
       cooldownScope: 'none',
     };
   }
+  // Unknown 404/422 fallback. Every specific pattern (model-scoped, validation,
+  // protocol, ambiguous-client, auth) has already been tried above, so reaching
+  // here means we do not recognise the upstream wording.
+  //
+  // Old behaviour was `terminal` — a whitelist stance that silently refused
+  // failover for every wording nobody had enumerated yet. Real example: 422
+  // "model not found: deepseek-v4.1-flash" was shown to the operator as
+  // "可切换其他站点通道" (retryable) while the router terminated the request
+  // after a single attempt. Default to giving another channel a chance; the
+  // low-value failover streak (ambiguous_client is a low-value class) still
+  // stops after a second consecutive failure, so a genuinely broken request
+  // cannot burn the whole failover budget.
   if (status === 404 || status === 422) {
     return {
-      class: 'request_validation',
-      retryChannel: false,
+      class: 'ambiguous_client',
+      retryChannel: true,
       cascadeEndpoint: false,
       cooldownWeight: 0.2,
-      cooldownScope: 'none',
+      cooldownScope: 'channel_model',
     };
   }
 
@@ -733,9 +752,15 @@ export function classifyProxyFailure(context: SiteRuntimeFailureContext = {}): P
     };
   }
 
+  // Final fallback. Anything that reaches here is an upstream failure we have
+  // no specific knowledge about. Fail over by default: the cost of a wasted
+  // attempt is bounded by the failover budget (max retries + wall-clock), while
+  // the cost of NOT trying is a user request that dies on one bad channel. The
+  // low-value streak still stops a cascade after two consecutive no-hope
+  // failures, so a genuinely broken request cannot loop.
   return {
     class: 'unknown',
-    retryChannel: status >= 500 || status === 0,
+    retryChannel: true,
     cascadeEndpoint: false,
     cooldownWeight: 1.0,
     cooldownScope: status >= 400 ? 'channel' : 'none',

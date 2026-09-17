@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mapUpstreamErrorForClient } from '../shared/siteProtocolProfile.js';
 import {
+
   canRetryInPlaceForRecoveringFailure,
   isNonRetryableProtocolPolicyError,
   isRecoveringTransientFailure,
@@ -29,16 +31,31 @@ describe('proxyRetryPolicy', () => {
     ).toBe(true);
   });
 
-  it('does not retry obvious request-shape errors that will fail on every channel', () => {
+  it('retries unknown request-shape wording instead of terminating (failover is default)', () => {
+    // 2026-09-17: the whitelist stance silently killed requests on wording
+    // nobody had enumerated — a 422 "model not found: deepseek-v4.1-flash" was
+    // shown to the operator as retryable while the router terminated after one
+    // attempt. Unknown 4xx now gives another channel a chance; the low-value
+    // failover streak stops a cascade after two consecutive failures.
+    expect(
+      shouldRetryProxyRequest(422, '{"error":{"message":"unprocessable"}}'),
+    ).toBe(true);
+    expect(
+      shouldRetryProxyRequest(404, '{"error":{"message":"not found"}}'),
+    ).toBe(true);
+    // Genuine request-shape errors keep failing fast: the wording is
+    // unambiguous, and switching channels cannot fix the body.
     expect(
       shouldRetryProxyRequest(400, '{"error":{"message":"invalid request body"}}'),
     ).toBe(false);
-    expect(
-      shouldRetryProxyRequest(422, '{"error":{"message":"unprocessable"}}'),
-    ).toBe(false);
-    expect(
-      shouldRetryProxyRequest(404, '{"error":{"message":"not found"}}'),
-    ).toBe(false);
+  });
+
+  it('agrees with the client-facing mapper on model-not-found wording', () => {
+    // The two classifiers must never contradict each other again: the operator
+    // message used to say "可切换其他站点通道" while the router terminated.
+    const errorText = 'Upstream returned HTTP 422: model not found: deepseek-v4.1-flash';
+    expect(shouldRetryProxyRequest(422, errorText)).toBe(true);
+    expect(mapUpstreamErrorForClient(422, errorText).retryable).toBe(true);
   });
 
   it('keeps retrying channel-local compatibility and auth failures', () => {

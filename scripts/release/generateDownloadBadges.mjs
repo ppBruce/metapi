@@ -18,7 +18,7 @@
 //   node scripts/release/generateDownloadBadges.mjs --tag v1.7.6 --dir release-assets \
 //     --registries --out release-body.md
 //   node scripts/release/generateDownloadBadges.mjs --tag v1.7.6 --dir release-assets \
-//     --format html --registries --inplace README.md --inplace README_EN.md
+//     --format html --registries
 //
 // Exit codes: 0 = links produced; 1 = usage/IO error; 2 = no asset matched.
 

@@ -1,10 +1,11 @@
-import {and, eq, gt, inArray, isNotNull} from 'drizzle-orm';
+import {and, eq, gt, inArray, isNotNull, sql} from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { config } from '../config.js';
 import { isUsableAccountToken } from './accountTokenService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { proxyChannelCoordinator } from './proxyChannelCoordinator.js';
 import { probeRuntimeModel } from './runtimeModelProbe.js';
+import { isQuotaOrCreditFailureText } from './siteFailureClassification.js';
 import { tokenRouter } from './tokenRouter.js';
 import { isExactTokenRouteModelPattern } from '../../shared/tokenRoutePatterns.js';
 
@@ -21,13 +22,70 @@ type ProbeCandidate = {
 // 配置常量（从 config 读取，保留兜底值）
 const PROBE_SWEEP_INTERVAL_MS = config.probeHeartbeatIntervalMs ?? 120_000;
 const PROBE_TIMEOUT_MS = config.probeHeartbeatTimeoutMs ?? 10_000;
-const PROBE_CONCURRENCY = 1;
+// 单轮最多 4 个探测、单个超时 30s：并发 2 时最坏 2×30s=60s，可在一个
+// sweep 周期（默认 120s）内完成，不会因串行 4×30s=120s 拖到下一轮。
+const PROBE_CONCURRENCY = 2;
 const PROBE_MAX_BATCH = 4;
 
 let probeSchedulerTimer: ReturnType<typeof setInterval> | null = null;
 let probeSweepInFlight: Promise<void> | null = null;
 const probeInFlightKeys = new Set<string>();
 const probeLastStartedAtByKey = new Map<string, number>();
+// 回填用：从 probe_logs 恢复的「账号+模型」最近一次探测时间（进程内一次性）。
+const seededProbeLastStartedAtByAccountModel = new Map<string, number>();
+let probeLastStartedAtSeeded = false;
+const PROBE_SEED_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function buildAccountModelKey(accountId: number, modelName: string): string {
+  return `${Math.trunc(accountId || 0)}:${String(modelName || '').trim().toLowerCase()}`;
+}
+
+/** probe_logs.created_at 由 SQLite datetime('now') 写入，格式为
+ *  "YYYY-MM-DD HH:MM:SS"（UTC，无时区后缀），这里显式按 UTC 解析。 */
+function parseProbeLogTimestampMs(value: unknown): number | null {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const normalized = text.includes('T') ? text : `${text.replace(' ', 'T')}Z`;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * 进程重启后内存里的「上次探测时间」会清空。若把未知键当成「早已到期」，
+ * 启动瞬间就会把所有冷却渠道集中补探一轮。这里在首次 sweep 时用
+ * probe_logs 回填最近一次探测时间，让恢复探测沿用重启前的真实节奏；
+ * 从未探测过的渠道仍按原逻辑立即进入队列（每轮至多 PROBE_MAX_BATCH 个）。
+ */
+async function seedProbeLastStartedAtFromLogs(nowMs: number): Promise<void> {
+  if (probeLastStartedAtSeeded) return;
+  probeLastStartedAtSeeded = true;
+  try {
+    const sinceSql = new Date(nowMs - PROBE_SEED_LOOKBACK_MS)
+      .toISOString()
+      .slice(0, 19)
+      .replace('T', ' ');
+    const rows = await db.select({
+      accountId: schema.probeLogs.accountId,
+      modelName: schema.probeLogs.modelName,
+      lastAt: sql<unknown>`max(${schema.probeLogs.createdAt})`,
+    })
+      .from(schema.probeLogs)
+      .where(gt(schema.probeLogs.createdAt, sinceSql))
+      .groupBy(schema.probeLogs.accountId, schema.probeLogs.modelName)
+      .all();
+
+    for (const row of rows) {
+      const lastAtMs = parseProbeLogTimestampMs(row.lastAt);
+      if (lastAtMs == null) continue;
+      seededProbeLastStartedAtByAccountModel.set(
+        buildAccountModelKey(Number(row.accountId), String(row.modelName || '')),
+        lastAtMs,
+      );
+    }
+  } catch (error) {
+    console.warn('[channel-probe] failed to seed probe timestamps from probe_logs', error);
+  }
+}
 
 function shouldUnrefTimer(timer: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>) {
   if (typeof (timer as { unref?: () => void }).unref === 'function') {
@@ -167,17 +225,35 @@ async function loadActiveProbeCandidates(activeChannelIds: number[]): Promise<Pr
 }
 
 /**
- * Probe interval backoff for a channel, driven by consecutive failures:
- * 0 failures -> base sweep interval, 1 -> 2.5x, 2+ -> 7.5x (capped).
- * A channel that keeps failing is probed less and less often, which cuts
- * the repeated "request reached upstream + client gone" pattern that made
- * upstream risk control ban accounts.
+ * 指数退避的探测间隔（探测专用，与渠道冷却互相独立）：
+ * 0 次失败 -> 基准 sweep 间隔；n 次失败 -> base * 2^(n-1)，封顶 1 小时。
+ * 每次叠加 ±25% 随机抖动，避免多渠道形成可被上游识别的规律性探测节奏
+ * （冷却时长同样带抖动，见 tokenRouter.recordProbeFailure）。
+ * 渠道恢复（探测成功）后计数清零，间隔回到基准。
  */
 function resolveProbeBackoffMs(candidate: ProbeCandidate): number {
   const fails = Math.max(0, Math.trunc(candidate.consecutiveFailCount ?? 0));
-  if (fails === 0) return PROBE_SWEEP_INTERVAL_MS;
-  if (fails === 1) return Math.round(PROBE_SWEEP_INTERVAL_MS * 2.5);
-  return Math.round(PROBE_SWEEP_INTERVAL_MS * 7.5);
+  // 与 tokenRouter.recordProbeFailure 的冷却公式同源：base * 2^n，封顶 1h。
+  // n=0（未失败）→ base；n=1 → 4min；n=2 → 8min；…；封顶 60min。
+  const exponentialMs = fails <= 0
+    ? PROBE_SWEEP_INTERVAL_MS
+    : PROBE_SWEEP_INTERVAL_MS * Math.pow(2, Math.min(fails, 9));
+  const clampedMs = Math.min(exponentialMs, PROBE_INTERVAL_CAP_MS);
+  return applyJitterMs(clampedMs);
+}
+
+// 探测间隔上限：1 小时。与失败冷却上限同量级——冷却中的渠道最多每小时
+// 被探测一次，上游视角是稀疏的单次健康检查而非持续流量。
+const PROBE_INTERVAL_CAP_MS = 60 * 60 * 1000;
+
+// ±25% 抖动：退避仍单调增长（趋势可预期），但相邻值不可精确预测。
+const PROBE_JITTER_RATIO = 0.25;
+
+function applyJitterMs(baseMs: number): number {
+  const jitter = 1 + (Math.random() * 2 - 1) * PROBE_JITTER_RATIO;
+  const jittered = Math.round(baseMs * jitter);
+  // 抖动不得突破上限，也不得短于基准间隔。
+  return Math.max(PROBE_SWEEP_INTERVAL_MS, Math.min(jittered, PROBE_INTERVAL_CAP_MS));
 }
 
 function shouldProbeCandidate(candidate: ProbeCandidate, nowMs: number): boolean {
@@ -219,24 +295,35 @@ async function runProbeCandidate(candidate: ProbeCandidate, nowMs: number): Prom
       timeoutMs: PROBE_TIMEOUT_MS,
     });
     if (result.status === 'supported') {
-      // 探活成功：仅记录成功时间，不清零冷却字段
+      // 探活成功：清冷却、清退避计数，渠道恢复
       await tokenRouter.recordProbeSuccess(
         candidate.channelId,
         result.latencyMs ?? 0,
         candidate.modelName,
       );
     } else {
-      // 探活失败：触发冷却机制（延长冷却、升级 level）
-      await tokenRouter.recordFailure(
+      // 探测失败（unsupported=上游明确拒绝 / inconclusive=超时或未完成）：
+      // 渠道仍未恢复，走探测专用失败路径——指数退避延长冷却（带随机抖动，
+      // 避免多渠道同步出价的探测节奏被上游识别），冷却期内完全不探测。
+      //
+      // 余额/配额耗尽例外：这类错误只有充值/人工解除才能改变，探测不会让它
+      // 恢复。把它标成 provider 主动冷却，渠道直接退出探测池，不再空打。
+      const quotaExhausted = isQuotaOrCreditFailureText(result.reason);
+      await tokenRouter.recordProbeFailure(
         candidate.channelId,
-        { modelName: candidate.modelName },
+        {
+          inconclusive: result.status !== 'unsupported',
+          quotaExhausted,
+        },
+        nowMs,
       );
     }
-  } catch (error) {
-    // 网络/超时等异常也视为失败，触发冷却
-    await tokenRouter.recordFailure(
+  } catch {
+    // 网络/超时异常：探测未能完成，等同 inconclusive，走同一退避路径。
+    await tokenRouter.recordProbeFailure(
       candidate.channelId,
-      { modelName: candidate.modelName, errorText: error instanceof Error ? error.message : 'probe failed' },
+      { inconclusive: true },
+      nowMs,
     );
   } finally {
     probeInFlightKeys.delete(key);
@@ -252,6 +339,8 @@ export async function runChannelProbeSweep(nowMs = Date.now()): Promise<void> {
   probeSweepInFlight = (async () => {
     const nowIso = new Date(nowMs).toISOString();
     const activeChannelIds = proxyChannelCoordinator.getActiveChannelIds();
+    // 重启后先用历史探测记录回填节奏，再决定本轮谁到期。
+    await seedProbeLastStartedAtFromLogs(nowMs);
     const [coolingCandidates, activeCandidates] = await Promise.all([
       loadCoolingProbeCandidates(nowIso),
       loadActiveProbeCandidates(activeChannelIds),
@@ -261,6 +350,17 @@ export async function runChannelProbeSweep(nowMs = Date.now()): Promise<void> {
     const merged = new Map<number, ProbeCandidate>();
     for (const candidate of [...activeCandidates, ...coolingCandidates]) {
       merged.set(candidate.channelId, candidate);
+    }
+
+    // 内存计时器没有该渠道时，用历史记录（账号+模型维度）回填一次，避免
+    // 重启后被误判为「从未探测过」而立刻补探。
+    for (const candidate of merged.values()) {
+      const key = buildProbeKey(candidate.channelId, candidate.modelName);
+      if (probeLastStartedAtByKey.has(key)) continue;
+      const seeded = seededProbeLastStartedAtByAccountModel.get(
+        buildAccountModelKey(candidate.account.id, candidate.modelName),
+      );
+      if (seeded != null) probeLastStartedAtByKey.set(key, seeded);
     }
 
     const dueCandidates = Array.from(merged.values())
@@ -309,4 +409,6 @@ export function resetChannelProbeState(): void {
   probeSweepInFlight = null;
   probeInFlightKeys.clear();
   probeLastStartedAtByKey.clear();
+  seededProbeLastStartedAtByAccountModel.clear();
+  probeLastStartedAtSeeded = false;
 }
