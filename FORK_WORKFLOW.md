@@ -71,7 +71,7 @@ git add <修改的文件>
 git commit -m "feat: 描述你的修改"
 
 # 2. 推送到你的 GitHub
-git push origin local/1.7.7-custom
+git push origin local/1.7.8-custom
 ```
 
 ### 3. 创建新版本分支
@@ -105,7 +105,8 @@ git push origin local/1.8.0-custom
 ## 分支策略
 
 - `main`：保持与上游同步（很少直接使用）
-- `local/1.7.7-custom`：基于 1.7.7 的自定义分支（当前使用）
+- `local/1.7.8-custom`：基于 1.7.8 的自定义分支（当前活跃）
+- `local/1.7.7-custom`：基于 1.7.7 的自定义分支（保留为历史快照，不再维护）
 - `local/1.7.6-custom`：基于 1.7.6 的自定义分支（历史版本）
 - 未来会有 `local/1.8.0-custom` 等
 
@@ -138,7 +139,7 @@ git push origin <当前分支名>
 git branch -a
 
 # 构建镜像
-docker build -t metapi:1.7.7-custom .
+docker build -t metapi:1.7.8-custom .
 
 # 重启容器
 docker-compose up -d
