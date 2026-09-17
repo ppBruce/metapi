@@ -16,11 +16,13 @@ import {
 const originalProxyMaxChannelAttempts = config.proxyMaxChannelAttempts;
 const originalBudget = (config as any).proxyChannelFailoverBudgetMs;
 const originalFirstByteTimeoutSec = (config as any).proxyFirstByteTimeoutSec;
+const originalFailoverMaxAttempts = (config as any).proxyChannelFailoverMaxAttempts;
 
 afterEach(() => {
   config.proxyMaxChannelAttempts = originalProxyMaxChannelAttempts;
   (config as any).proxyChannelFailoverBudgetMs = originalBudget;
   (config as any).proxyFirstByteTimeoutSec = originalFirstByteTimeoutSec;
+  (config as any).proxyChannelFailoverMaxAttempts = originalFailoverMaxAttempts;
 });
 
 describe('proxyChannelRetry', () => {
@@ -60,6 +62,9 @@ describe('proxyChannelRetry', () => {
     config.proxyMaxChannelAttempts = 5;
     (config as any).proxyChannelFailoverBudgetMs = 0;
     (config as any).proxyFirstByteTimeoutSec = 30;
+    // Pin the cap explicitly: this case asserts the min(pool, cap) shape, not
+    // whatever value ships as the default.
+    (config as any).proxyChannelFailoverMaxAttempts = 8;
 
     // 14 candidates → min(14, softCap 8) = 8
     expect(getProxyEffectiveMaxChannelAttempts(14)).toBe(8);

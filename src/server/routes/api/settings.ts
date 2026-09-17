@@ -116,6 +116,8 @@ interface RuntimeSettingsBody {
   defaultRoutingStrategy?: string;
   proxyErrorKeywords?: string[] | string;
   proxyEmptyContentFailEnabled?: boolean;
+  proxyChannelFailoverMaxAttempts?: number;
+  proxyChannelFailoverLowValueStreakStop?: number;
 }
 
 
@@ -571,6 +573,18 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.proxyFirstByteTimeoutSec = Math.max(0, Math.trunc(n));
       return;
     }
+    case 'proxy_channel_failover_max_attempts': {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 1) return;
+      config.proxyChannelFailoverMaxAttempts = Math.max(1, Math.trunc(n));
+      return;
+    }
+    case 'proxy_channel_failover_low_value_streak_stop': {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 1) return;
+      config.proxyChannelFailoverLowValueStreakStop = Math.max(1, Math.trunc(n));
+      return;
+    }
     case 'proxy_route_probe_rate': {
       const n = Number(value);
       if (!Number.isFinite(n) || n < 0 || n > 1) return;
@@ -628,6 +642,8 @@ async function getRuntimeSettingsResponse(currentAdminIp = '') {
     proxyDebugMaxBodyBytes: config.proxyDebugMaxBodyBytes,
     routingFallbackUnitCost: config.routingFallbackUnitCost,
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
+    proxyChannelFailoverMaxAttempts: config.proxyChannelFailoverMaxAttempts,
+    proxyChannelFailoverLowValueStreakStop: config.proxyChannelFailoverLowValueStreakStop,
     proxyRouteProbeRate: config.proxyRouteProbeRate,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
     routeProbabilityFloor: config.routeProbabilityFloor ?? 0.05,
@@ -1636,6 +1652,32 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.proxyFirstByteTimeoutSec = normalized;
       upsertSetting('proxy_first_byte_timeout_sec', normalized);
+    }
+
+    if (body.proxyChannelFailoverMaxAttempts !== undefined) {
+      const nextValue = Number(body.proxyChannelFailoverMaxAttempts);
+      if (!Number.isFinite(nextValue) || nextValue < 1) {
+        return reply.code(400).send({ success: false, message: '故障切换最大尝试次数必须是大于等于 1 的整数' });
+      }
+      const normalized = Math.max(1, Math.trunc(nextValue));
+      if (normalized !== config.proxyChannelFailoverMaxAttempts) {
+        changedLabels.push(`故障切换最大尝试次数（${config.proxyChannelFailoverMaxAttempts} -> ${normalized}）`);
+      }
+      config.proxyChannelFailoverMaxAttempts = normalized;
+      upsertSetting('proxy_channel_failover_max_attempts', normalized);
+    }
+
+    if (body.proxyChannelFailoverLowValueStreakStop !== undefined) {
+      const nextValue = Number(body.proxyChannelFailoverLowValueStreakStop);
+      if (!Number.isFinite(nextValue) || nextValue < 1) {
+        return reply.code(400).send({ success: false, message: '低价值失败连续停止阈值必须是大于等于 1 的整数' });
+      }
+      const normalized = Math.max(1, Math.trunc(nextValue));
+      if (normalized !== config.proxyChannelFailoverLowValueStreakStop) {
+        changedLabels.push(`低价值失败连续停止阈值（${config.proxyChannelFailoverLowValueStreakStop} -> ${normalized}）`);
+      }
+      config.proxyChannelFailoverLowValueStreakStop = normalized;
+      upsertSetting('proxy_channel_failover_low_value_streak_stop', normalized);
     }
 
     if (body.proxyRouteProbeRate !== undefined) {

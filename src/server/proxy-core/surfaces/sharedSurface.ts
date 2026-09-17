@@ -33,6 +33,7 @@ import { recordPerformanceShadowSample } from '../../services/performanceShadow.
 import { observeContextOverflowFailure, observeSuccessfulPromptUsage } from '../../services/siteContextCapabilityService.js';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { selectProxyChannelForAttempt } from '../channelSelection.js';
+import { config } from '../../config.js';
 
 type SelectedChannel = Awaited<ReturnType<typeof tokenRouter.selectChannel>>;
 type SurfaceWarningScope = 'chat' | 'responses';
@@ -739,7 +740,12 @@ export function createSurfaceFailureToolkit(input: {
     const isFreshChannelAttempt = lastFreshFailRetryCount === null
       || retryCount !== lastFreshFailRetryCount;
     lastFreshFailRetryCount = retryCount;
-    if (isFreshChannelAttempt && noteFailoverFailureAndShouldStop(failoverStreak, status, errorText)) {
+    if (isFreshChannelAttempt && noteFailoverFailureAndShouldStop(
+      failoverStreak,
+      status,
+      errorText,
+      config.proxyChannelFailoverLowValueStreakStop,
+    )) {
       return null;
     }
     const excludeSiteId = selected && shouldExcludeSiteForRequestFailure({

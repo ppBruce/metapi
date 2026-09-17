@@ -6,13 +6,13 @@ import {
 } from './siteFailureClassification.js';
 
 /** Soft ceiling so huge free-pool models (20+ channels) cannot thrash for minutes. */
-export const PROXY_CHANNEL_FAILOVER_SOFT_ATTEMPT_CAP_DEFAULT = 8;
+export const PROXY_CHANNEL_FAILOVER_SOFT_ATTEMPT_CAP_DEFAULT = 30;
 /** Probe timeout floor: avoid being too aggressive when full timeout is very small. */
 export const PROXY_CHANNEL_FAILOVER_PROBE_FIRST_BYTE_TIMEOUT_FLOOR_MS = 10_000;
 /** Probe timeout ceiling: avoid waiting too long when full timeout is very large. */
 export const PROXY_CHANNEL_FAILOVER_PROBE_FIRST_BYTE_TIMEOUT_CAP_MS = 30_000;
 /** Stop after this many consecutive low-value failure classes (WAF/model/quota/ambiguous). */
-export const PROXY_CHANNEL_FAILOVER_LOW_VALUE_STREAK_STOP_DEFAULT = 2;
+export const PROXY_CHANNEL_FAILOVER_LOW_VALUE_STREAK_STOP_DEFAULT = 6;
 
 export function getProxyMaxChannelAttempts(): number {
   const attempts = Math.trunc(config.proxyMaxChannelAttempts || 0);
@@ -21,7 +21,7 @@ export function getProxyMaxChannelAttempts(): number {
 
 /**
  * Soft cap for live multi-channel failover.
- * Env: PROXY_CHANNEL_FAILOVER_MAX_ATTEMPTS (default 8). Always at least 1.
+ * Env: PROXY_CHANNEL_FAILOVER_MAX_ATTEMPTS (default 30). Always at least 1.
  */
 export function getProxyChannelFailoverSoftAttemptCap(): number {
   const raw = Math.trunc(

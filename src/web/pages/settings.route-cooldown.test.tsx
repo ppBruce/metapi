@@ -57,6 +57,8 @@ describe('Settings route cooldown cap', () => {
       logCleanupRetentionDays: 14,
       routingFallbackUnitCost: 1,
       proxyFirstByteTimeoutSec: 0,
+      proxyChannelFailoverMaxAttempts: 30,
+      proxyChannelFailoverLowValueStreakStop: 6,
       routingWeights: {},
       tokenRouterFailureCooldownMaxSec: 30 * 24 * 60 * 60,
       routeProbabilityFloor: 0.05,
@@ -129,6 +131,8 @@ describe('Settings route cooldown cap', () => {
         defaultRoutingStrategy: 'weighted',
         routingFallbackUnitCost: 1,
         proxyFirstByteTimeoutSec: 0,
+        proxyChannelFailoverMaxAttempts: 30,
+        proxyChannelFailoverLowValueStreakStop: 6,
         proxyRouteProbeRate: 0.15,
         tokenRouterFailureCooldownMaxSec: 10,
         routeProbabilityFloor: 0.05,
@@ -235,12 +239,81 @@ describe('Settings route cooldown cap', () => {
         defaultRoutingStrategy: 'weighted',
         routingFallbackUnitCost: 1,
         proxyFirstByteTimeoutSec: 7,
+        proxyChannelFailoverMaxAttempts: 30,
+        proxyChannelFailoverLowValueStreakStop: 6,
         proxyRouteProbeRate: 0.15,
         tokenRouterFailureCooldownMaxSec: 30 * 24 * 60 * 60,
         routeProbabilityFloor: 0.05,
         routeQuotaExhaustionExclude: true,
         disableCrossProtocolFallback: false,
       });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('loads and saves channel failover limits with routing settings', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValueOnce({
+      checkinCron: '0 8 * * *',
+      checkinScheduleMode: 'interval',
+      checkinIntervalHours: 6,
+      balanceRefreshCron: '0 * * * *',
+      logCleanupCron: '15 4 * * *',
+      logCleanupUsageLogsEnabled: true,
+      logCleanupProgramLogsEnabled: true,
+      logCleanupRetentionDays: 14,
+      routingFallbackUnitCost: 1,
+      proxyFirstByteTimeoutSec: 0,
+      proxyChannelFailoverMaxAttempts: 18,
+      proxyChannelFailoverLowValueStreakStop: 4,
+      routingWeights: {},
+      tokenRouterFailureCooldownMaxSec: 30 * 24 * 60 * 60,
+      routeProbabilityFloor: 0.05,
+      routeQuotaExhaustionExclude: true,
+      adminIpAllowlist: [],
+    });
+
+    let root!: ReactTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter>
+            <ToastProvider>
+              <Settings />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const maxAttemptsInput = root.root.find((node) => (
+        node.type === 'input' && node.props['aria-label'] === '故障切换最大尝试次数'
+      ));
+      const lowValueStreakInput = root.root.find((node) => (
+        node.type === 'input' && node.props['aria-label'] === '低价值失败连续停止阈值'
+      ));
+      expect(maxAttemptsInput.props.value).toBe(18);
+      expect(lowValueStreakInput.props.value).toBe(4);
+
+      await act(async () => {
+        maxAttemptsInput.props.onChange({ target: { value: '24' } });
+        lowValueStreakInput.props.onChange({ target: { value: '5' } });
+      });
+
+      const saveButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).trim() === '保存路由策略'
+      ));
+      await act(async () => {
+        saveButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith(expect.objectContaining({
+        proxyChannelFailoverMaxAttempts: 24,
+        proxyChannelFailoverLowValueStreakStop: 5,
+      }));
     } finally {
       root?.unmount();
     }

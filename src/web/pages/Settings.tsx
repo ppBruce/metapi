@@ -77,6 +77,8 @@ type RuntimeSettings = {
   proxySessionChannelQueueWaitMs: number;
   routingFallbackUnitCost: number;
   proxyFirstByteTimeoutSec: number;
+  proxyChannelFailoverMaxAttempts: number;
+  proxyChannelFailoverLowValueStreakStop: number;
   proxyRouteProbeRate: number;
   routeFailureCooldownMaxValue: number;
   routeFailureCooldownMaxUnit: RouteCooldownUnit;
@@ -154,6 +156,8 @@ export default function Settings() {
     proxySessionChannelQueueWaitMs: 1500,
     routingFallbackUnitCost: 1,
     proxyFirstByteTimeoutSec: 15,
+    proxyChannelFailoverMaxAttempts: 30,
+    proxyChannelFailoverLowValueStreakStop: 6,
     proxyRouteProbeRate: 0.15,
     routeFailureCooldownMaxValue: 30,
     routeFailureCooldownMaxUnit: 'day',
@@ -459,6 +463,12 @@ export default function Settings() {
         proxyFirstByteTimeoutSec: Number(runtimeInfo.proxyFirstByteTimeoutSec) >= 0
           ? Math.trunc(Number(runtimeInfo.proxyFirstByteTimeoutSec))
           : 15,
+        proxyChannelFailoverMaxAttempts: Number(runtimeInfo.proxyChannelFailoverMaxAttempts) > 0
+          ? Math.trunc(Number(runtimeInfo.proxyChannelFailoverMaxAttempts))
+          : 30,
+        proxyChannelFailoverLowValueStreakStop: Number(runtimeInfo.proxyChannelFailoverLowValueStreakStop) > 0
+          ? Math.trunc(Number(runtimeInfo.proxyChannelFailoverLowValueStreakStop))
+          : 6,
         proxyRouteProbeRate: Number(runtimeInfo.proxyRouteProbeRate) >= 0 && Number(runtimeInfo.proxyRouteProbeRate) <= 1
           ? Number(runtimeInfo.proxyRouteProbeRate)
           : 0.15,
@@ -732,6 +742,12 @@ export default function Settings() {
         proxyFirstByteTimeoutSec: Number.isFinite(runtime.proxyFirstByteTimeoutSec)
           ? Math.max(0, Math.trunc(runtime.proxyFirstByteTimeoutSec))
           : 0,
+        proxyChannelFailoverMaxAttempts: Number.isFinite(runtime.proxyChannelFailoverMaxAttempts)
+          ? Math.max(1, Math.trunc(runtime.proxyChannelFailoverMaxAttempts))
+          : 30,
+        proxyChannelFailoverLowValueStreakStop: Number.isFinite(runtime.proxyChannelFailoverLowValueStreakStop)
+          ? Math.max(1, Math.trunc(runtime.proxyChannelFailoverLowValueStreakStop))
+          : 6,
         proxyRouteProbeRate: Number.isFinite(runtime.proxyRouteProbeRate)
           ? Math.min(1, Math.max(0, runtime.proxyRouteProbeRate))
           : 0.15,
@@ -1779,6 +1795,57 @@ export default function Settings() {
             />
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7, marginTop: 6 }}>
               默认 15 秒；`0` 表示关闭。只有在指定时间内完全没有任何首包 / 首 token 返回时才切换渠道，已经开始输出的请求不会被这项超时打断。
+            </div>
+          </div>
+
+          <div style={{ marginTop: 24 }}>
+            <div style={{ marginBottom: 8, fontWeight: 500 }}>
+              故障切换最大尝试次数
+            </div>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              aria-label="故障切换最大尝试次数"
+              value={runtime.proxyChannelFailoverMaxAttempts}
+              onChange={(e) => {
+                const nextValue = Number(e.target.value);
+                setRuntime((prev) => ({
+                  ...prev,
+                  proxyChannelFailoverMaxAttempts: Number.isFinite(nextValue) && nextValue >= 1
+                    ? Math.trunc(nextValue)
+                    : prev.proxyChannelFailoverMaxAttempts,
+                }));
+              }}
+              style={inputStyle}
+            />
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7, marginTop: 6 }}>
+              默认 30；群组调用失败时，最多尝试多少个候选通道。设置过小可能导致还有可用通道就提前停止；过大则延长失败响应时间。
+            </div>
+          </div>
+          <div style={{ marginTop: 24 }}>
+            <div style={{ marginBottom: 8, fontWeight: 500 }}>
+              低价值失败连续停止阈值
+            </div>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              aria-label="低价值失败连续停止阈值"
+              value={runtime.proxyChannelFailoverLowValueStreakStop}
+              onChange={(e) => {
+                const nextValue = Number(e.target.value);
+                setRuntime((prev) => ({
+                  ...prev,
+                  proxyChannelFailoverLowValueStreakStop: Number.isFinite(nextValue) && nextValue >= 1
+                    ? Math.trunc(nextValue)
+                    : prev.proxyChannelFailoverLowValueStreakStop,
+                }));
+              }}
+              style={inputStyle}
+            />
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7, marginTop: 6 }}>
+              默认 6；连续遇到 WAF、quota exhausted、model unsupported 等低价值失败时提前终止重试。避免在已知无效的通道上浪费时间。
             </div>
           </div>
           </div>
