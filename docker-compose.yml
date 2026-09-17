@@ -1,7 +1,7 @@
 # Fresh ppBruce/metapi 1.7.2 deployment; previous database remains in ./data/hub.db.
 services:
   metapi:
-    image: metapi:1.7.7-fix-delete
+    image: metapi:1.7.8-custom
     ports:
     - 4000:4000
     volumes:

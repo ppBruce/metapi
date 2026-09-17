@@ -16,12 +16,14 @@ upstream → https://github.com/wyf9661/metapi.git  (上游原始仓库，用于
 
 ## 你的自定义修改
 
-当前在分支 `local/1.7.7-custom` 上，包含以下功能修改：
+当前在分支 `local/1.7.8-custom` 上，包含以下功能修改：
 
 1. **群组路由优先显示**：commit `bcb4346b` - 群组排在前面
 2. **过滤群组内模型**：commit `36933dd1` - 已进入群组的模型不再单独显示
 3. **禁用站点自动排序**：commit `2d59ac1c` - 禁用站点自动排在末尾
-4. **Docker 镜像配置**：commit `4d623905` - 使用 `metapi:1.7.7-custom` 镜像
+4. **站点状态徽章快速切换**：commit `e9466716` - 状态徽章点击切换 enabled/disabled
+5. **代理通道故障转移设置 UI**：commit `d1639aa9` - 暴露 max attempts 与低价值 streak 阈值
+6. **Docker 镜像配置**：commit `4d623905` - 使用 `metapi:1.7.X-custom` 镜像
 
 ## 日常工作流程
 
