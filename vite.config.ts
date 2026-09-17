@@ -31,6 +31,7 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: '../../dist/web',
       emptyOutDir: true,
+      minify: false,
       rollupOptions: {
         output: {},
       },
