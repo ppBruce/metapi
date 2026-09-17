@@ -474,11 +474,16 @@ describe('channelRecoveryProbeService', () => {
     const refreshed = await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.id, channel.id))
       .get();
-    // Inconclusive = the probe itself could not run (endpoint/timeout), so the
-    // channel must keep its existing cooldown untouched instead of registering
-    // a NEW failure that extends the cooldown.
-    expect(refreshed?.consecutiveFailCount).toBe(1);
+    // Inconclusive now takes the probe-failure path: the probe could not prove
+    // the model works, so consecutiveFailCount grows (1 -> 2) and the cooldown
+    // is extended with jittered exponential backoff. failCount stays untouched
+    // (inconclusive is not proof the model is gone), and cooldownLevel stays 0.
+    expect(refreshed?.consecutiveFailCount).toBe(2);
+    expect(refreshed?.failCount).toBe(0);
     expect(refreshed?.cooldownLevel).toBe(0);
+    expect(refreshed?.cooldownUntil).not.toBeNull();
+    expect(new Date(refreshed?.cooldownUntil as string).getTime())
+      .toBeGreaterThan(Date.now());
   });
 
   it('still counts unsupported recovery probes (upstream refused the model) as channel failures', async () => {
@@ -540,5 +545,164 @@ describe('channelRecoveryProbeService', () => {
     // cooldown body itself stays in its existing skipCooldown semantics.)
     expect(refreshed?.failCount).toBeGreaterThan(0);
     expect(refreshed?.lastFailAt).not.toBeNull();
+  });
+
+  it('decays probe frequency on repeated failures but keeps probing forever', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'decay-site',
+      url: 'https://decay-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'decay-user',
+      accessToken: 'access-decay',
+      apiToken: 'sk-decay',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'token-decay',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'model-decay',
+      enabled: true,
+    }).returning().get();
+
+    const baseIntervalMs = 2 * 60 * 1000;
+    const t0 = Date.UTC(2026, 3, 1, 0, 0, 0);
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      enabled: true,
+      cooldownUntil: new Date(t0 + 6 * 60 * 60 * 1000).toISOString(),
+      lastFailAt: new Date(t0 - 60 * 1000).toISOString(),
+      failCount: 2,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).run();
+
+    // Upstream never answers: every probe is inconclusive.
+    probeRuntimeModelMock.mockResolvedValue({
+      status: 'inconclusive',
+      latencyMs: 30_000,
+      reason: 'runtime model probe timeout (30s)',
+    });
+
+    // Pin Math.random → 0.5 so jitter factor is exactly 1.0 (deterministic).
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    // Drive the real scheduler cadence: sweep every 2min, collect probe times.
+    const probeTimesMinutes: number[] = [];
+    for (let sweep = 0; sweep < 90; sweep += 1) {
+      probeRuntimeModelMock.mockClear();
+      await runChannelProbeSweep(t0 + sweep * baseIntervalMs);
+      if (probeRuntimeModelMock.mock.calls.length > 0) {
+        probeTimesMinutes.push(sweep);
+      }
+    }
+
+    randomSpy.mockRestore();
+
+    // 首轮就探测一次。
+    expect(probeTimesMinutes[0]).toBe(0);
+    // 指数退避（以 sweep=2min 为单位）：2 → 4 → 8 → 16 → 30（60min 封顶）。
+    const gaps = probeTimesMinutes.slice(1).map((t, i) => t - probeTimesMinutes[i]);
+    for (let i = 1; i < gaps.length; i += 1) {
+      expect(gaps[i]).toBeGreaterThanOrEqual(gaps[i - 1]);
+    }
+    expect(gaps[0]).toBe(2);   // 4min
+    expect(gaps[1]).toBe(4);   // 8min
+    expect(gaps[2]).toBe(8);   // 16min
+    expect(gaps[3]).toBe(16);  // 32min
+    expect(gaps[4]).toBe(30);  // 60min 封顶，之后恒定
+    // 永不停止：90 轮(180min)内多次探测，且最后一次接近窗口末端。
+    expect(probeTimesMinutes.length).toBeGreaterThanOrEqual(5);
+    expect(probeTimesMinutes[probeTimesMinutes.length - 1]).toBeGreaterThanOrEqual(60);
+  });
+
+  it('resets the probe backoff after a successful probe', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'reset-site',
+      url: 'https://reset-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'reset-user',
+      accessToken: 'access-reset',
+      apiToken: 'sk-reset',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'token-reset',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'model-reset',
+      enabled: true,
+    }).returning().get();
+
+    const baseIntervalMs = 2 * 60 * 1000;
+    const t0 = Date.UTC(2026, 4, 1, 0, 0, 0);
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      enabled: true,
+      cooldownUntil: new Date(t0 + 6 * 60 * 60 * 1000).toISOString(),
+      lastFailAt: new Date(t0 - 60 * 1000).toISOString(),
+      failCount: 2,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).returning().get();
+
+    // Pin Math.random → jitter factor 1.0 for deterministic timing.
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    // Two failed probes accumulate consecutiveFailCount 1 then 2.
+    probeRuntimeModelMock.mockResolvedValue({ status: 'inconclusive', latencyMs: 30_000, reason: 'timeout' });
+    await runChannelProbeSweep(t0);                     // cfc 0 -> 1
+    await runChannelProbeSweep(t0 + baseIntervalMs * 2); // cfc 1 -> 2 (4min backoff, due)
+
+    // After the two failures failCount must be untouched (inconclusive) and
+    // consecutiveFailCount must have grown to 2.
+    const afterFails = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    expect(afterFails?.failCount).toBe(2);
+    expect(afterFails?.consecutiveFailCount).toBe(2);
+
+    // Upstream recovers: the next due probe succeeds and clears the streak.
+    probeRuntimeModelMock.mockResolvedValue({ status: 'supported', latencyMs: 420, reason: 'probe succeeded' });
+    probeRuntimeModelMock.mockClear();
+    await runChannelProbeSweep(t0 + baseIntervalMs * 6);
+    expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
+
+    // Success must fully reset the backoff counters and clear the cooldown,
+    // returning the channel to the healthy (non-cooling) pool.
+    const refreshed = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    expect(refreshed?.consecutiveFailCount).toBe(0);
+    expect(refreshed?.cooldownUntil).toBeNull();
+    expect(refreshed?.lastFailAt).toBeNull();
+
+    randomSpy.mockRestore();
   });
 });

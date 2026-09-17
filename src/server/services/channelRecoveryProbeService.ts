@@ -167,17 +167,35 @@ async function loadActiveProbeCandidates(activeChannelIds: number[]): Promise<Pr
 }
 
 /**
- * Probe interval backoff for a channel, driven by consecutive failures:
- * 0 failures -> base sweep interval, 1 -> 2.5x, 2+ -> 7.5x (capped).
- * A channel that keeps failing is probed less and less often, which cuts
- * the repeated "request reached upstream + client gone" pattern that made
- * upstream risk control ban accounts.
+ * 指数退避的探测间隔（探测专用，与渠道冷却互相独立）：
+ * 0 次失败 -> 基准 sweep 间隔；n 次失败 -> base * 2^(n-1)，封顶 1 小时。
+ * 每次叠加 ±25% 随机抖动，避免多渠道形成可被上游识别的规律性探测节奏
+ * （冷却时长同样带抖动，见 tokenRouter.recordProbeFailure）。
+ * 渠道恢复（探测成功）后计数清零，间隔回到基准。
  */
 function resolveProbeBackoffMs(candidate: ProbeCandidate): number {
   const fails = Math.max(0, Math.trunc(candidate.consecutiveFailCount ?? 0));
-  if (fails === 0) return PROBE_SWEEP_INTERVAL_MS;
-  if (fails === 1) return Math.round(PROBE_SWEEP_INTERVAL_MS * 2.5);
-  return Math.round(PROBE_SWEEP_INTERVAL_MS * 7.5);
+  // 与 tokenRouter.recordProbeFailure 的冷却公式同源：base * 2^n，封顶 1h。
+  // n=0（未失败）→ base；n=1 → 4min；n=2 → 8min；…；封顶 60min。
+  const exponentialMs = fails <= 0
+    ? PROBE_SWEEP_INTERVAL_MS
+    : PROBE_SWEEP_INTERVAL_MS * Math.pow(2, Math.min(fails, 9));
+  const clampedMs = Math.min(exponentialMs, PROBE_INTERVAL_CAP_MS);
+  return applyJitterMs(clampedMs);
+}
+
+// 探测间隔上限：1 小时。与失败冷却上限同量级——冷却中的渠道最多每小时
+// 被探测一次，上游视角是稀疏的单次健康检查而非持续流量。
+const PROBE_INTERVAL_CAP_MS = 60 * 60 * 1000;
+
+// ±25% 抖动：退避仍单调增长（趋势可预期），但相邻值不可精确预测。
+const PROBE_JITTER_RATIO = 0.25;
+
+function applyJitterMs(baseMs: number): number {
+  const jitter = 1 + (Math.random() * 2 - 1) * PROBE_JITTER_RATIO;
+  const jittered = Math.round(baseMs * jitter);
+  // 抖动不得突破上限，也不得短于基准间隔。
+  return Math.max(PROBE_SWEEP_INTERVAL_MS, Math.min(jittered, PROBE_INTERVAL_CAP_MS));
 }
 
 function shouldProbeCandidate(candidate: ProbeCandidate, nowMs: number): boolean {
@@ -219,27 +237,29 @@ async function runProbeCandidate(candidate: ProbeCandidate, nowMs: number): Prom
       timeoutMs: PROBE_TIMEOUT_MS,
     });
     if (result.status === 'supported') {
-      // 探活成功：仅记录成功时间，不清零冷却字段
+      // 探活成功：清冷却、清退避计数，渠道恢复
       await tokenRouter.recordProbeSuccess(
         candidate.channelId,
         result.latencyMs ?? 0,
         candidate.modelName,
       );
-    } else if (result.status === 'unsupported') {
-      // 上游给出明确否定（模型不支持等）：真实渠道失败，记录失败并冷却
-      await tokenRouter.recordFailure(
-        candidate.channelId,
-        { modelName: candidate.modelName },
-      );
     } else {
-      // inconclusive / skipped：探测自身未能完成（候选解析超时、请求未出站
-      // 等），不能证明渠道状态变化。不计失败、不清冷却，只推迟下轮探测，
-      // 避免形成「冷却到期→探测失败→再冷却」的每分钟骚扰循环（上游会把这
-      // 种持续的空转请求视为恶意流量）。
+      // 探测失败（unsupported=上游明确拒绝 / inconclusive=超时或未完成）：
+      // 渠道仍未恢复，走探测专用失败路径——指数退避延长冷却（带随机抖动，
+      // 避免多渠道同步出价的探测节奏被上游识别），冷却期内完全不探测。
+      await tokenRouter.recordProbeFailure(
+        candidate.channelId,
+        { inconclusive: result.status !== 'unsupported' },
+        nowMs,
+      );
     }
-  } catch (error) {
-    // 网络/超时异常属于探测自身失败（多数情况请求未到达上游或未收到回包），
-    // 不计入渠道失败冷却，避免同样的空转循环。
+  } catch {
+    // 网络/超时异常：探测未能完成，等同 inconclusive，走同一退避路径。
+    await tokenRouter.recordProbeFailure(
+      candidate.channelId,
+      { inconclusive: true },
+      nowMs,
+    );
   } finally {
     probeInFlightKeys.delete(key);
   }

@@ -1906,6 +1906,83 @@ export class TokenRouter {
   }
 
   /**
+   * Probe-only failure path: a failed liveness probe must NOT reuse
+   * recordFailure — the probe passes no status/errorText, so classifyProxyFailure
+   * would land on 'unknown' (skipCooldown) and CLEAR the cooldown, throwing the
+   * dead channel straight back into live traffic.
+   *
+   * Instead, extend the cooldown with an exponential backoff (jittered so many
+   * channels do not form a recognizable synchronized probe rhythm upstream) and
+   * keep the channel fully out of routing AND probing until it expires:
+   *   fail #1 -> ~4min, #2 -> ~8min, #3 -> ~16min, #4 -> ~32min, #5+ -> ~1h.
+   * Success (recordProbeSuccess) resets consecutiveFailCount to 0.
+   *
+   * inconclusive (probe timed out / never reached the model) does not increment
+   * failCount — it is not proof the model is gone — but it still extends the
+   * cooldown because the channel is demonstrably not usable right now.
+   */
+  async recordProbeFailure(
+    channelId: number,
+    options: { inconclusive?: boolean } = {},
+    nowMs: number = Date.now(),
+  ) {
+    const normalizedChannelId = Math.trunc(channelId || 0);
+    if (normalizedChannelId <= 0) return;
+    await ensureSiteRuntimeHealthStateLoaded();
+
+    const row = await db.select()
+      .from(schema.routeChannels)
+      .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+      .innerJoin(schema.tokenRoutes, eq(schema.routeChannels.routeId, schema.tokenRoutes.id))
+      .where(eq(schema.routeChannels.id, normalizedChannelId))
+      .get();
+    if (!row) return;
+
+    const ch = row.route_channels;
+    const route = row.token_routes;
+    const nowIso = new Date(nowMs).toISOString();
+
+    const consecutiveFailCount = Math.max(0, ch.consecutiveFailCount ?? 0) + 1;
+    // 指数退避：base(2min) * 2^n，封顶 1h。±25% 抖动打散多渠道的同步节奏。
+    const baseIntervalMs = Math.max(60_000, Math.trunc(config.probeHeartbeatIntervalMs || 120_000));
+    const exponentialMs = Math.min(
+      baseIntervalMs * Math.pow(2, Math.min(consecutiveFailCount, 9)),
+      60 * 60 * 1000,
+    );
+    const jitteredMs = Math.round(exponentialMs * (1 + (Math.random() * 2 - 1) * 0.25));
+    const probeBackoffMs = Math.max(60_000, Math.min(jitteredMs, 60 * 60 * 1000));
+    // 冷却在探测退避基础上再延长一个 sweep 周期，确保渠道在到达下一次探测
+    // 时刻时仍处于冷却集合（cooldownUntil > now），不会因精确边界把该探测
+    // 漏掉。对路由而言多冷却一轮是保守的，代价可忽略。
+    const cooldownMs = probeBackoffMs + baseIntervalMs;
+    const cooldownUntil = new Date(nowMs + cooldownMs).toISOString();
+
+    const failCount = options.inconclusive
+      ? (ch.failCount ?? 0)
+      : ((ch.failCount ?? 0) + 1);
+
+    await db.update(schema.routeChannels).set({
+      failCount,
+      lastFailAt: nowIso,
+      consecutiveFailCount,
+      cooldownUntil,
+      cooldownLevel: 0,
+    }).where(eq(schema.routeChannels.id, normalizedChannelId)).run();
+
+    patchCachedChannel(normalizedChannelId, (channel) => {
+      channel.failCount = failCount;
+      channel.lastFailAt = nowIso;
+      channel.consecutiveFailCount = consecutiveFailCount;
+      channel.cooldownUntil = cooldownUntil;
+      channel.cooldownLevel = 0;
+    });
+
+    // 探测失败不应触发站点级 runtime health 惩罚（那是给真实流量失败用的，
+    // 会连带降权同站点其他健康渠道）；只失效路由缓存让新冷却生效。
+    invalidateRouteScopedCache(route.id);
+  }
+
+  /**
    * Clear persisted failure and cooldown state for the given channels.
    */
   async clearChannelFailureState(channelIds: number[]): Promise<number> {
