@@ -98,4 +98,51 @@ describe('getAdapter platform aliases', () => {
       expect(adapter?.platformName).toBe('new-api');
     });
   });
+
+  it('detects OpenAI-compatible gateways that reply 401 with generic auth wording', async () => {
+    await withHttpServer((req, res) => {
+      if (req.url === '/v1/models' || req.url === '/models' || req.url === '/api/v1/models') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: { message: 'Authentication Fails (governor)', type: 'authentication_error' },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    }, async (baseUrl) => {
+      const adapter = await detectPlatform(baseUrl);
+      expect(adapter?.platformName).toBe('openai');
+    });
+  });
+
+  it('detects OpenAI-compatible gateways mounted under /api/v1', async () => {
+    await withHttpServer((req, res) => {
+      // openrouter-style: real models under /api/v1/models, root paths 404
+      if (req.url === '/api/v1/models') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: 'gpt-4o', object: 'model' }] }));
+        return;
+      }
+      res.writeHead(404).end();
+    }, async (baseUrl) => {
+      const adapter = await detectPlatform(baseUrl);
+      expect(adapter?.platformName).toBe('openai');
+    });
+  });
+
+  it('detects Anthropic-compatible gateways via /v1/messages', async () => {
+    await withHttpServer((req, res) => {
+      // Only the messages endpoint exists — /v1/models 404s so the OpenAI
+      // check does not shadow the Claude detection.
+      if (req.url === '/v1/messages') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { type: 'authentication_error', message: 'invalid x-api-key' } }));
+        return;
+      }
+      res.writeHead(404).end();
+    }, async (baseUrl) => {
+      const adapter = await detectPlatform(baseUrl);
+      expect(adapter?.platformName).toBe('claude');
+    });
+  });
 });
