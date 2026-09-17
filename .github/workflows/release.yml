@@ -347,55 +347,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" --notes-file "$RUNNER_TEMP/release-body.md"
 
-  update-readme-downloads:
-    name: Refresh README download links
-    needs: publish-release
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout main
-        uses: actions/checkout@v7
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Download desktop package artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: release-assets
-          pattern: '{metapi-desktop-*,metapi-ota-bundle-*}'
-          merge-multiple: true
-
-      # README badges must point at this release's exact file names, so they are
-      # rewritten from the served artifact list between the downloads markers.
-      - name: Rewrite README download blocks
-        run: |
-          node scripts/release/generateDownloadBadges.mjs \
-            --tag "${{ github.ref_name }}" --dir release-assets --format html \
-            --registries --inplace README.md --inplace README_EN.md
-
-      - name: Commit and push
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git diff --quiet; then
-            echo 'README download links already current'
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add README.md README_EN.md
-          git commit -m "docs(readme): point download links at ${{ github.ref_name }}"
-          for attempt in 1 2 3; do
-            if git pull --rebase origin main && git push origin HEAD:main; then
-              exit 0
-            fi
-            sleep 5
-          done
-          echo 'could not push the README download refresh'
-          exit 1
-
   publish-docker-arch:
     name: Publish Docker Image (${{ matrix.arch }})
     needs: build-packages
