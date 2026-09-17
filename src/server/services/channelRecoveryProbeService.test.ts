@@ -539,11 +539,11 @@ describe('channelRecoveryProbeService', () => {
     const refreshed = await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.id, channel.id))
       .get();
-    // Unsupported = upstream gave a definitive negative answer, so the failure
-    // must be recorded: failCount increments and lastFailAt refreshes.
-    // (classifyProxyFailure sees no HTTP status for probe failures, so the
-    // cooldown body itself stays in its existing skipCooldown semantics.)
-    expect(refreshed?.failCount).toBeGreaterThan(0);
+    // Unsupported = upstream gave a definitive negative answer, so the probe
+    // streak (consecutiveFailCount) must advance and lastFailAt refresh.
+    // failCount stays untouched: it drives the fibonacci backoff of REAL
+    // traffic failures, and probe attempts must not inflate that counter.
+    expect(refreshed?.consecutiveFailCount).toBeGreaterThan(1);
     expect(refreshed?.lastFailAt).not.toBeNull();
   });
 
@@ -702,6 +702,150 @@ describe('channelRecoveryProbeService', () => {
     expect(refreshed?.consecutiveFailCount).toBe(0);
     expect(refreshed?.cooldownUntil).toBeNull();
     expect(refreshed?.lastFailAt).toBeNull();
+
+    randomSpy.mockRestore();
+  });
+
+  it('takes a quota-exhausted channel out of the probe pool instead of retrying forever', async () => {
+    // 上游余额耗尽只能靠充值/人工解除：探测不会让它恢复。第一次探测确认后，
+    // 渠道必须被写成 provider 主动冷却并退出探测池，而不是一轮轮空打。
+    const site = await db.insert(schema.sites).values({
+      name: 'quota-site',
+      url: 'https://quota-site.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'quota-user',
+      accessToken: 'access-quota',
+      apiToken: 'sk-quota',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'token-quota',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'model-quota',
+      enabled: true,
+    }).returning().get();
+
+    const baseIntervalMs = 2 * 60 * 1000;
+    const t0 = Date.UTC(2026, 3, 2, 0, 0, 0);
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      enabled: true,
+      cooldownUntil: new Date(t0 + 6 * 60 * 60 * 1000).toISOString(),
+      lastFailAt: new Date(t0 - 60 * 1000).toISOString(),
+      failCount: 2,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).returning().get();
+
+    probeRuntimeModelMock.mockResolvedValue({
+      status: 'unsupported',
+      latencyMs: 300,
+      reason: '{"error":{"message":"Insufficient Balance","type":"unknown_error","code":"invalid_request_error"}}',
+    });
+
+    await runChannelProbeSweep(t0);
+    expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
+
+    // 探测确认后：计数清零 + 固定长冷却（provider 主动冷却形态）。
+    const afterProbe = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    expect(afterProbe?.failCount).toBe(0);
+    expect(afterProbe?.consecutiveFailCount).toBe(0);
+    expect(afterProbe?.cooldownLevel).toBe(0);
+    const cooldownUntilMs = Date.parse(String(afterProbe?.cooldownUntil));
+    expect(cooldownUntilMs).toBeGreaterThanOrEqual(t0 + 30 * 60 * 1000);
+
+    // 之后的 sweep 不再探测它（provider 主动冷却不进探测池）。
+    probeRuntimeModelMock.mockClear();
+    await runChannelProbeSweep(t0 + baseIntervalMs * 10);
+    await runChannelProbeSweep(t0 + baseIntervalMs * 60);
+    expect(probeRuntimeModelMock).toHaveBeenCalledTimes(0);
+  });
+
+  it('restores the probe rhythm from probe_logs after a restart instead of re-probing everything', async () => {
+    // 重启后内存计时器清空。若不做回填，所有冷却渠道都会被当成「从未探测过」
+    // 而立刻补探一轮；用 probe_logs 回填后，刚探过的渠道要等自己的退避窗口
+    // 过去才会再探。
+    const site = await db.insert(schema.sites).values({
+      name: 'seed-site',
+      url: 'https://seed-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'seed-user',
+      accessToken: 'access-seed',
+      apiToken: 'sk-seed',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'token-seed',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'model-seed',
+      enabled: true,
+    }).returning().get();
+
+    const t0 = Date.UTC(2026, 3, 3, 0, 0, 0);
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'model-seed',
+      enabled: true,
+      cooldownUntil: new Date(t0 + 6 * 60 * 60 * 1000).toISOString(),
+      lastFailAt: new Date(t0 - 60 * 1000).toISOString(),
+      failCount: 2,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).run();
+
+    // 该渠道 1 分钟前刚被探过（probe_logs 里的真实记录）。
+    await db.insert(schema.probeLogs).values({
+      siteId: site.id,
+      accountId: account.id,
+      modelName: 'model-seed',
+      questionCategory: 'math',
+      questionText: 'probe question',
+      status: 'failed',
+      latencyMs: 300,
+      errorMessage: 'probe failed with status 0',
+      createdAt: '2026-04-02 23:59:00',
+    }).run();
+
+    // 固定抖动因子，让退避窗口可精确断言。
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    // 重启后首轮 sweep：1 分钟前刚探过，基准退避 2 分钟未到 → 不补探。
+    await runChannelProbeSweep(t0);
+    expect(probeRuntimeModelMock).toHaveBeenCalledTimes(0);
+
+    // 退避窗口过去后恢复正常探测。
+    await runChannelProbeSweep(t0 + 2 * 60 * 1000 + 1);
+    expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
 
     randomSpy.mockRestore();
   });

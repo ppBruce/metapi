@@ -104,6 +104,10 @@ interface SelectedChannel {
 }
 
 const SHORT_WINDOW_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+// 余额/配额耗尽（"Insufficient Balance" 等）的固定冷却：这类状态只能靠充值或
+// 人工解除，恢复探测对它无效。用一个小时量级的固定冷却把渠道从探测池里摘出去，
+// 同时保留路由层 1 小时后自动复检一次的机会（与「冷却上限 1 小时」的约定一致）。
+const QUOTA_EXHAUSTED_COOLDOWN_MS = 60 * 60 * 1000;
 const ROUND_ROBIN_FAILURE_THRESHOLD = 3;
 const SITE_RECENT_SUCCESS_FALLBACK_RATE = 0.5;
 const SITE_HISTORICAL_HEALTH_MIN_MULTIPLIER = 0.45;
@@ -1917,13 +1921,18 @@ export class TokenRouter {
    *   fail #1 -> ~4min, #2 -> ~8min, #3 -> ~16min, #4 -> ~32min, #5+ -> ~1h.
    * Success (recordProbeSuccess) resets consecutiveFailCount to 0.
    *
-   * inconclusive (probe timed out / never reached the model) does not increment
-   * failCount — it is not proof the model is gone — but it still extends the
-   * cooldown because the channel is demonstrably not usable right now.
+   * The probe streak only advances consecutiveFailCount. failCount belongs to
+   * REAL traffic failures (it feeds the fibonacci cooldown), so probe attempts
+   * must never inflate it.
+   *
+   * quotaExhausted (upstream balance/credit exhaustion) is a provider-side
+   * state that only a recharge can change: the channel is parked as a
+   * provider-directed cooldown (all counters zeroed) so the probe loop stops
+   * hitting an upstream that can never answer.
    */
   async recordProbeFailure(
     channelId: number,
-    options: { inconclusive?: boolean } = {},
+    options: { inconclusive?: boolean; quotaExhausted?: boolean } = {},
     nowMs: number = Date.now(),
   ) {
     const normalizedChannelId = Math.trunc(channelId || 0);
@@ -1942,7 +1951,38 @@ export class TokenRouter {
     const route = row.token_routes;
     const nowIso = new Date(nowMs).toISOString();
 
+    // 余额/配额耗尽（"Insufficient Balance"、402 等）是上游单方面状态：只有充值或
+    // 人工解除才会改变，探测永远不可能让它恢复。此时把渠道写成「provider 主动
+    // 冷却」形态（failCount/consecutiveFailCount/cooldownLevel 全部归零），
+    // isProviderDirectedCooldown 会据此把它排除出探测池——否则失败计数 >0，
+    // 探测循环会一轮轮空打一个永远不会活的渠道。
+    if (options.quotaExhausted) {
+      const providerCooldownUntil = new Date(nowMs + QUOTA_EXHAUSTED_COOLDOWN_MS).toISOString();
+      await db.update(schema.routeChannels).set({
+        failCount: 0,
+        lastFailAt: nowIso,
+        consecutiveFailCount: 0,
+        cooldownUntil: providerCooldownUntil,
+        cooldownLevel: 0,
+      }).where(eq(schema.routeChannels.id, normalizedChannelId)).run();
+
+      patchCachedChannel(normalizedChannelId, (channel) => {
+        channel.failCount = 0;
+        channel.lastFailAt = nowIso;
+        channel.consecutiveFailCount = 0;
+        channel.cooldownUntil = providerCooldownUntil;
+        channel.cooldownLevel = 0;
+      });
+
+      invalidateRouteScopedCache(route.id);
+      return;
+    }
+
     const consecutiveFailCount = Math.max(0, ch.consecutiveFailCount ?? 0) + 1;
+    // failCount 只属于真实流量失败（它驱动 fibonacci 冷却）。探测尝试不能
+    // 把它顶到上限——否则一个渠道被探测十几次后，下一次真实失败的冷却就直接
+    // 顶格 1 小时。探测自身的节奏由 consecutiveFailCount 驱动。
+    const failCount = ch.failCount ?? 0;
     // 指数退避：base(2min) * 2^n，封顶 1h。±25% 抖动打散多渠道的同步节奏。
     const baseIntervalMs = Math.max(60_000, Math.trunc(config.probeHeartbeatIntervalMs || 120_000));
     const exponentialMs = Math.min(
@@ -1956,10 +1996,6 @@ export class TokenRouter {
     // 漏掉。对路由而言多冷却一轮是保守的，代价可忽略。
     const cooldownMs = probeBackoffMs + baseIntervalMs;
     const cooldownUntil = new Date(nowMs + cooldownMs).toISOString();
-
-    const failCount = options.inconclusive
-      ? (ch.failCount ?? 0)
-      : ((ch.failCount ?? 0) + 1);
 
     await db.update(schema.routeChannels).set({
       failCount,
