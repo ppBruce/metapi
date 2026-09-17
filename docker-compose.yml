@@ -1,7 +1,7 @@
 # Fresh ppBruce/metapi 1.7.2 deployment; previous database remains in ./data/hub.db.
 services:
   metapi:
-    image: metapi:1.7.7-custom
+    image: metapi:1.7.7-fix-delete
     ports:
     - 4000:4000
     volumes:
@@ -16,6 +16,8 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       ACCOUNT_CREDENTIAL_SECRET: ${ACCOUNT_CREDENTIAL_SECRET:?ACCOUNT_CREDENTIAL_SECRET
         is required}
+      PROXY_CHANNEL_FAILOVER_MAX_ATTEMPTS: ${PROXY_CHANNEL_FAILOVER_MAX_ATTEMPTS:-30}
+      PROXY_CHANNEL_FAILOVER_LOW_VALUE_STREAK_STOP: ${PROXY_CHANNEL_FAILOVER_LOW_VALUE_STREAK_STOP:-6}
     restart: unless-stopped
     stop_grace_period: 60s
     healthcheck:
