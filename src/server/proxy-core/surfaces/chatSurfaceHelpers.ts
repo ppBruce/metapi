@@ -11,7 +11,8 @@ export function asTrimmedString(value: unknown): string {
 }
 
 export function isGeminiNativeRuntimePath(path: string): boolean {
-  return /\/v1beta\/models\/[^/]+:(?:streamGenerateContent|generateContent)(?:\?|$)/.test(path);
+  return /\/v1beta\/models\/[^/]+:(?:streamGenerateContent|generateContent)(?:\?|$)/.test(path)
+    || /\/v1internal:(?:streamGenerateContent|generateContent)(?:\?|$)/.test(path);
 }
 
 export function buildOpenAiFinalFromGeminiNativePayload(
