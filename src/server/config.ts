@@ -286,6 +286,33 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
 
 export const config = buildConfig(process.env);
 
+/**
+ * Probe timeouts track the proxy's first-byte window unless an operator pinned
+ * them with an explicit env value.
+ *
+ * A probe that gives up sooner than real traffic would marks slow-but-healthy
+ * relays dead, and their cooldown then keeps the channel out of routing even
+ * though a real request would have succeeded; a probe that waits longer only
+ * spends its own budget. Reading `proxyFirstByteTimeoutSec` per call (rather
+ * than at boot) matters because the settings API mutates it at runtime.
+ */
+function resolveProbeTimeoutMs(explicitEnvValue: string | undefined, fallbackMs: number): number {
+  const explicit = parseNumber(explicitEnvValue, NaN);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.max(3_000, Math.trunc(explicit));
+  const firstByteMs = Math.trunc(Math.max(0, config.proxyFirstByteTimeoutSec || 0) * 1000);
+  return Math.max(3_000, firstByteMs || fallbackMs);
+}
+
+/** Model-availability probe budget (see resolveProbeTimeoutMs). */
+export function resolveModelAvailabilityProbeTimeoutMs(): number {
+  return resolveProbeTimeoutMs(process.env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS, 30_000);
+}
+
+/** Channel heartbeat/recovery probe budget (see resolveProbeTimeoutMs). */
+export function resolveProbeHeartbeatTimeoutMs(): number {
+  return resolveProbeTimeoutMs(process.env.PROBE_HEARTBEAT_TIMEOUT_MS, 30_000);
+}
+
 export function buildFastifyOptions(
   appConfig: ReturnType<typeof buildConfig>,
 ): FastifyServerOptions {

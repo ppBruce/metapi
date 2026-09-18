@@ -2214,6 +2214,19 @@ describe('selectPreferredChannel low-balance yield', () => {
       .where(eq(schema.accounts.id, sessionAccount.id)).get();
     expect(sessionAfter?.balance).toBe(0);
 
+    // The channel is parked the way the PROBE path parks a provider-discovered
+    // exhaustion: fail counters zeroed plus a long cooldown, which is exactly
+    // what isProviderDirectedCooldown() reads to keep it out of the recovery
+    // probe pool. A real request used to leave an ordinary fibonacci cooldown
+    // behind, so the channel stayed probe-eligible and kept taking traffic.
+    const sessionChannelAfter = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, sessionChannel.id)).get();
+    expect(sessionChannelAfter?.failCount).toBe(0);
+    expect(sessionChannelAfter?.consecutiveFailCount).toBe(0);
+    expect(sessionChannelAfter?.cooldownLevel).toBe(0);
+    const providerCooldownMs = new Date(String(sessionChannelAfter?.cooldownUntil)).getTime() - Date.now();
+    expect(providerCooldownMs).toBeGreaterThan(55 * 60 * 1000);
+
     // API-key account: balance must stay untouched (unknown balance, default 0).
     await router.recordFailure(apiKeyChannel.id, {
       status: 402,
@@ -2223,6 +2236,54 @@ describe('selectPreferredChannel low-balance yield', () => {
     const apiKeyAfter = await db.select().from(schema.accounts)
       .where(eq(schema.accounts.id, apiKeyAccount.id)).get();
     expect(apiKeyAfter?.balance).toBe(0);
+  });
+
+  it('keeps an ordinary upstream failure on the fibonacci path so the channel stays probe-eligible', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: `transient-site-${localIdSeed += 1}`,
+      url: 'https://transient-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: `transient-user-${localIdSeed}`,
+      accessToken: 'transient-token-value',
+      apiToken: '',
+      status: 'active',
+      balance: 50,
+      lastBalanceRefresh: new Date().toISOString(),
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    }).returning().get();
+
+    const token = await createYieldToken(account.id, 'transient-token');
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'transient-model',
+      enabled: true,
+    }).returning().get();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, {
+      status: 502,
+      errorText: 'Bad gateway',
+      modelName: 'transient-model',
+    });
+
+    const channelAfter = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id)).get();
+    // failCount > 0 is the marker that keeps the channel inside the recovery
+    // probe pool; parking it as provider-directed would stop probing a channel
+    // that may well have recovered.
+    expect(channelAfter?.failCount).toBeGreaterThan(0);
   });
 });
 });

@@ -68,19 +68,138 @@ function buildUpstreamUrl(siteUrl: string, path: string): string {
   return `${normalizedBase}${normalizedPath}`;
 }
 
+/**
+ * Transport failures undici collapses into one opaque message; the actionable
+ * reason lives in `error.cause` (Node error code, undici `UND_ERR_*`, host).
+ */
+const TRANSPORT_FAILURE_MESSAGES = new Set(['fetch failed', 'terminated']);
+
+function describeErrorCause(cause: unknown, depth = 0): string[] {
+  if (!cause || typeof cause !== 'object' || depth > 3) return [];
+  const record = cause as {
+    code?: unknown;
+    message?: unknown;
+    address?: unknown;
+    port?: unknown;
+    hostname?: unknown;
+    errors?: unknown;
+    cause?: unknown;
+  };
+  const parts: string[] = [];
+  const code = typeof record.code === 'string' ? record.code.trim() : '';
+  const address = typeof record.address === 'string' ? record.address.trim() : '';
+  const port = typeof record.port === 'number' || typeof record.port === 'string' ? String(record.port).trim() : '';
+  const hostname = typeof record.hostname === 'string' ? record.hostname.trim() : '';
+  // A wrapper (AggregateError, `cause` chain) usually carries a generic message
+  // ("all addresses failed") while the useful codes live one level down — prefer
+  // the descent over the wrapper's own prose.
+  const hasNested = Array.isArray(record.errors) || Boolean(record.cause && record.cause !== cause);
+  if (code) {
+    const target = address ? `${address}${port ? `:${port}` : ''}` : hostname;
+    parts.push(target ? `${code} ${target}` : code);
+  } else if (!hasNested && typeof record.message === 'string' && record.message.trim()) {
+    parts.push(record.message.trim().slice(0, 120));
+  }
+  if (Array.isArray(record.errors)) {
+    // AggregateError: one entry per resolved address (IPv4 + IPv6).
+    for (const nested of record.errors.slice(0, 3)) parts.push(...describeErrorCause(nested, depth + 1));
+  } else if (record.cause && record.cause !== cause) {
+    parts.push(...describeErrorCause(record.cause, depth + 1));
+  }
+  return parts;
+}
+
+/**
+ * Fold undici's hidden cause into the message so proxy logs, the failure
+ * taxonomy and the operator all see WHY the connection failed
+ * (`fetch failed (ENOTFOUND api.example.com)`), instead of a bare
+ * `fetch failed` that is indistinguishable from a TLS mismatch or a reset.
+ *
+ * The original token stays the prefix so existing /fetch failed/ matchers keep
+ * working. The error object itself is preserved — name, `cause` and identity are
+ * untouched (abort detection depends on them); only the message gains detail.
+ */
+export function enrichTransportFailure<T>(error: T): T {
+  if (!(error instanceof Error)) return error;
+  if (!TRANSPORT_FAILURE_MESSAGES.has(error.message.trim().toLowerCase())) return error;
+  const details = Array.from(new Set(describeErrorCause((error as { cause?: unknown }).cause).filter(Boolean)));
+  if (details.length === 0) return error;
+  try {
+    error.message = `${error.message} (${details.join('; ')})`;
+  } catch {
+    // A frozen error keeps its generic message; the log stays coarser but intact.
+  }
+  return error;
+}
+
+/**
+ * A keep-alive socket the peer already closed: the next request that reuses it
+ * fails before any response exists. Go's net/http retries this transparently for
+ * relay clients (new-api), which is why the same upstreams show no such errors
+ * in their logs, while undici surfaces it as `fetch failed` / `terminated`.
+ */
+const STALE_CONNECTION_FAILURE_PATTERN =
+  /econnreset|epipe|econnaborted|und_err_socket|socket hang up|other side closed|\bterminated\b/i;
+
+function isStaleConnectionFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  // An abort is our own deadline firing, not the peer dropping a socket.
+  if (error.name === 'AbortError') return false;
+  const cause = (error as { cause?: { code?: unknown; message?: unknown } }).cause;
+  const code = typeof cause?.code === 'string' ? cause.code : '';
+  const causeMessage = typeof cause?.message === 'string' ? cause.message : '';
+  return STALE_CONNECTION_FAILURE_PATTERN.test(`${error.message} ${code} ${causeMessage}`);
+}
+
+/**
+ * Whether a request body can be sent a second time. Streams (and anything else
+ * single-shot) must never be replayed: the first attempt may already have
+ * consumed part of them.
+ */
+function isReplayableBody(body: unknown): boolean {
+  if (body === undefined || body === null) return true;
+  if (typeof body === 'string') return true;
+  if (body instanceof Uint8Array || body instanceof ArrayBuffer) return true;
+  if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return true;
+  return false;
+}
+
 export async function performFetch(
   input: RuntimeDispatchInput,
   request: ProxyRuntimeRequest,
   requestUrl = input.targetUrl || buildUpstreamUrl(input.siteUrl, request.path),
+  options: { disableTransportRetry?: boolean } = {},
 ): Promise<RuntimeResponse> {
   const init = await input.buildInit(requestUrl, request);
   const combinedSignal = input.signal && init.signal
     ? AbortSignal.any([input.signal, init.signal as AbortSignal])
     : (input.signal ?? init.signal);
-  return fetch(requestUrl, {
+  const dispatch = () => fetch(requestUrl, {
     ...init,
     signal: combinedSignal,
   });
+  try {
+    return await dispatch();
+  } catch (error) {
+    // One transparent retry when a dead keep-alive socket failed the request
+    // before anything was received: the body is still intact, our own deadline
+    // has not fired, so re-issuing on a fresh connection is strictly better than
+    // failing the user's request over a connection the peer had already closed.
+    // Only this narrow case retries — DNS, TLS and genuine network failures still
+    // surface immediately. Executors that own a transport retry of their own
+    // (antigravity walks a list of base URLs across this same error) opt out, so
+    // the two policies never interleave.
+    const retryable = options?.disableTransportRetry !== true
+      && isStaleConnectionFailure(error)
+      && isReplayableBody(init.body)
+      && combinedSignal?.aborted !== true;
+    if (!retryable) throw enrichTransportFailure(error);
+    try {
+      return await dispatch();
+    } catch (retryError) {
+      throw enrichTransportFailure(retryError);
+    }
+  }
 }
 
 function hasZstdContentEncoding(contentEncoding: string | null): boolean {
