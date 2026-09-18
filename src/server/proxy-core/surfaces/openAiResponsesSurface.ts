@@ -41,6 +41,7 @@ import {
   createGeminiCliStreamReader,
   unwrapGeminiCliPayload,
 } from '../../transformers/gemini/generate-content/cliBridge.js';
+import { isInternalGeminiPlatform } from '../../../shared/platformIdentity.js';
 import { isCodexResponsesSurface } from '../cliProfiles/codexProfile.js';
 import { getObservedResponseMeta } from '../firstByteTimeout.js';
 import { getRuntimeResponseReader, readRuntimeResponseText } from '../executors/types.js';
@@ -994,7 +995,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             } catch {
               upstreamData = rawText;
             }
-            if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
+            if (isInternalGeminiPlatform(selected.site.platform)) {
               upstreamData = unwrapGeminiCliPayload(upstreamData);
             }
             if (codexSessionStoreKey) {
@@ -1214,7 +1215,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           }
 
           const upstreamReader = replayReader ?? getRuntimeResponseReader(upstream);
-          const baseReader = String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli' && upstreamReader
+          const baseReader = isInternalGeminiPlatform(selected.site.platform) && upstreamReader
             ? createGeminiCliStreamReader(upstreamReader)
             : upstreamReader;
           let rawText = '';
@@ -1326,7 +1327,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             }
           }
         }
-        if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
+        if (isInternalGeminiPlatform(selected.site.platform)) {
           upstreamData = unwrapGeminiCliPayload(upstreamData);
         }
         if (codexSessionStoreKey) {

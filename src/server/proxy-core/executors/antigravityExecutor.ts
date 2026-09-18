@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Response, Headers } from 'undici';
 import { geminiGenerateContentTransformer } from '../../transformers/gemini/generate-content/index.js';
+import { antigravityUserAgent } from '../../shared/antigravityVersion.js';
+import { sanitizeAntigravityRequestSchemas } from '../../transformers/gemini/generate-content/antigravitySchema.js';
 import type { RuntimeDispatchInput, RuntimeExecutor, RuntimeResponse } from './types.js';
 import {
   asTrimmedString,
@@ -13,6 +15,7 @@ import {
 const ANTIGRAVITY_RUNTIME_BASE_URLS = [
   'https://daily-cloudcode-pa.googleapis.com',
   'https://daily-cloudcode-pa.sandbox.googleapis.com',
+  'https://cloudcode-pa.googleapis.com',
 ] as const;
 
 function antigravityRequestType(modelName: string): 'image_gen' | 'agent' {
@@ -85,13 +88,19 @@ function buildAntigravityRuntimeBody(
   originalBody: Record<string, unknown>,
   modelName: string,
   action?: NonNullable<RuntimeDispatchInput['request']['runtime']>['action'],
+  oauthProjectId?: string,
 ): Record<string, unknown> {
   const payload = renameParametersJsonSchema(structuredClone(originalBody)) as Record<string, unknown>;
   if (action === 'countTokens') {
     return payload;
   }
   const requestType = antigravityRequestType(modelName);
-  const projectId = asTrimmedString(payload.project) || generateAntigravityProjectId();
+  // Prefer the real OAuth project id. The random generator is a legacy
+  // last-resort fallback only: sending a fabricated project id makes the
+  // upstream treat the request as an unknown project.
+  const projectId = asTrimmedString(payload.project)
+    || asTrimmedString(oauthProjectId)
+    || generateAntigravityProjectId();
 
   payload.model = modelName;
   payload.project = projectId;
@@ -107,6 +116,10 @@ function buildAntigravityRuntimeBody(
     if (requestType !== 'image_gen') {
       (request as Record<string, unknown>).sessionId = generateStableAntigravitySessionId(payload);
     }
+    // Upstream rejects standard JSON Schema keywords it does not implement, so
+    // the declared tool/response schemas are reduced to the dialect this model
+    // family accepts before the request leaves. No-op when no schema is present.
+    sanitizeAntigravityRequestSchemas(payload, modelName);
     if (modelName.includes('claude')) {
       const toolConfig = (
         (request as Record<string, unknown>).toolConfig
@@ -119,6 +132,23 @@ function buildAntigravityRuntimeBody(
     } else {
       deleteNestedMaxOutputTokens(payload);
     }
+  }
+
+  // Lift top-level toolConfig into request.toolConfig when present and not already set.
+  // Mirrors CLIProxyAPI geminiToAntigravity logic that promotes toolConfig to the
+  // canonical request.toolConfig location expected by the upstream /v1internal surface.
+  const topLevelToolConfig = payload.toolConfig;
+  if (
+    topLevelToolConfig
+    && typeof topLevelToolConfig === 'object'
+    && !Array.isArray(topLevelToolConfig)
+    && request
+    && typeof request === 'object'
+    && !Array.isArray(request)
+    && !(request as Record<string, unknown>).toolConfig
+  ) {
+    (request as Record<string, unknown>).toolConfig = topLevelToolConfig;
+    delete payload.toolConfig;
   }
 
   return payload;
@@ -209,6 +239,7 @@ export const antigravityExecutor: RuntimeExecutor = {
       input.request.body,
       modelName,
       input.request.runtime?.action,
+      asTrimmedString(input.request.runtime?.oauthProjectId),
     );
     const baseAttempts = 3;
     const useStreamEndpoint = antigravityUsesStreamEndpoint(input.request);
@@ -223,7 +254,7 @@ export const antigravityExecutor: RuntimeExecutor = {
           Authorization: input.request.headers.Authorization || input.request.headers.authorization || '',
           'Content-Type': 'application/json',
           Accept: useStreamEndpoint ? 'text/event-stream' : 'application/json',
-          'User-Agent': 'antigravity/1.19.6 darwin/arm64',
+          'User-Agent': antigravityUserAgent(),
         };
         let response: RuntimeResponse;
         try {
@@ -276,7 +307,7 @@ export const antigravityExecutor: RuntimeExecutor = {
       Authorization: input.request.headers.Authorization || input.request.headers.authorization || '',
       'Content-Type': 'application/json',
       Accept: useStreamEndpoint ? 'text/event-stream' : 'application/json',
-      'User-Agent': 'antigravity/1.19.6 darwin/arm64',
+      'User-Agent': antigravityUserAgent(),
     }));
     if (fallbackResponse.ok) {
       return materializeAntigravitySuccessResponse(fallbackResponse, aggregateStreamResponse);

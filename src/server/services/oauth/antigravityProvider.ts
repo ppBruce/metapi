@@ -16,6 +16,7 @@ export const ANTIGRAVITY_DAILY_UPSTREAM_BASE_URL = 'https://daily-cloudcode-pa.g
 export const ANTIGRAVITY_SANDBOX_DAILY_UPSTREAM_BASE_URL = 'https://daily-cloudcode-pa.sandbox.googleapis.com';
 export const ANTIGRAVITY_GOOGLE_API_CLIENT = 'google-cloud-sdk vscode_cloudshelleditor/0.1';
 export const ANTIGRAVITY_USER_AGENT = 'google-api-nodejs-client/9.15.1';
+/** @deprecated Use antigravityUserAgent() from antigravityVersion.ts for dynamic version tracking */
 export const ANTIGRAVITY_MODELS_USER_AGENT = 'antigravity/1.19.6 darwin/arm64';
 export const ANTIGRAVITY_CLIENT_METADATA = '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}';
 export const ANTIGRAVITY_INTERNAL_API_VERSION = 'v1internal';

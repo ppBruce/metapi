@@ -18,6 +18,10 @@ import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration
 import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
 import { createRequestTraceId } from '../../services/requestTraceId.js';
 import {
+  isGeminiCliPlatform,
+  isInternalGeminiPlatform,
+} from '../../../shared/platformIdentity.js';
+import {
   buildUpstreamEndpointRequest,
   resolveUpstreamEndpointCandidates,
 } from '../../services/upstreamEndpointRuntime.js';
@@ -88,18 +92,6 @@ const EMPTY_PROXY_USAGE = {
   completionTokens: 0,
   totalTokens: 0,
 };
-
-function isGeminiCliPlatform(platform: unknown): boolean {
-  return String(platform || '').trim().toLowerCase() === 'gemini-cli';
-}
-
-function isAntigravityPlatform(platform: unknown): boolean {
-  return String(platform || '').trim().toLowerCase() === 'antigravity';
-}
-
-function isInternalGeminiPlatform(platform: unknown): boolean {
-  return isGeminiCliPlatform(platform) || isAntigravityPlatform(platform);
-}
 
 function buildGeminiCliActionPath(input: {
   action: 'generateContent' | 'streamGenerateContent' | 'countTokens';

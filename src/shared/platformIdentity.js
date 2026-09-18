@@ -60,6 +60,23 @@ export function normalizePlatformAlias(platform) {
   return getPlatformAlias(raw) ?? raw;
 }
 
+export function isGeminiCliPlatform(platform) {
+  return normalizePlatformAlias(platform) === 'gemini-cli';
+}
+
+export function isAntigravityPlatform(platform) {
+  return normalizePlatformAlias(platform) === 'antigravity';
+}
+
+/**
+ * Platforms served by Google's internal `/v1internal:*` Code Assist surface.
+ * Their payloads and SSE events are wrapped in an extra `{"response": ...}`
+ * envelope that must be unwrapped before downstream protocol conversion.
+ */
+export function isInternalGeminiPlatform(platform) {
+  return isGeminiCliPlatform(platform) || isAntigravityPlatform(platform);
+}
+
 export function detectPlatformByUrlHint(url) {
   const normalized = normalizeUrlCandidate(url).toLowerCase();
   if (!normalized) return undefined;

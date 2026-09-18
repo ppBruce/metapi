@@ -1,9 +1,7 @@
 import type { PreparedProviderRequest, PrepareProviderRequestInput, ProviderAction, ProviderProfile } from './types.js';
 import { resolveAntigravityProviderAction } from './antigravityRuntime.js';
 import { asTrimmedString } from '../../shared/trimString.js';
-
-
-const ANTIGRAVITY_RUNTIME_USER_AGENT = 'antigravity/1.19.6 darwin/arm64';
+import { antigravityUserAgent } from '../../shared/antigravityVersion.js';
 
 function resolvePath(action: ProviderAction): string {
   if (action === 'countTokens') return '/v1internal:countTokens';
@@ -22,7 +20,7 @@ export const antigravityProviderProfile: ProviderProfile = {
         Authorization: input.baseHeaders.Authorization,
         'Content-Type': 'application/json',
         Accept: action === 'streamGenerateContent' ? 'text/event-stream' : 'application/json',
-        'User-Agent': ANTIGRAVITY_RUNTIME_USER_AGENT,
+        'User-Agent': antigravityUserAgent(),
       },
       body: {
         project: projectId,
