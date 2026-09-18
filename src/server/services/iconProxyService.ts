@@ -4,6 +4,7 @@ import { asc, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { fetch, getSetCookies, type Cookie, type Response } from 'undici';
 import { normalizeSiteProxyUrl, withExplicitProxyRequestInit } from './siteProxy.js';
+import { withSystemProxyRequestInit } from './systemProxy.js';
 
 /**
  * Shared icon fetching + caching for the web UI.
@@ -24,7 +25,14 @@ export type IconPayload = {
 
 type CacheEntry = IconPayload & { expiresAt: number };
 
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * One hour, shared by the in-process cache and the `Cache-Control` both icon
+ * routes send, so a browser and the server can never disagree about how long an
+ * icon may be served, and a resolution-rule change here ages out within the
+ * hour instead of a full day.
+ */
+export const ICON_HTTP_MAX_AGE_SECONDS = 60 * 60;
+const CACHE_TTL_MS = ICON_HTTP_MAX_AGE_SECONDS * 1000;
 const NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 512 * 1024;
@@ -203,24 +211,35 @@ function resolveIconUrl(href: string, origin: string): URL | null {
 }
 
 /**
- * Inline `data:` icons travel inside the page and are usually a debugging
- * leftover: serving a 200KB base64 JPEG as a 16px badge costs every client the
- * whole blob (observed live: one relay inlines a 205KB JPEG). Anything larger
- * than a plausible favicon is skipped so the conventional paths can answer.
+ * Inline `data:` icons travel inside the page. A reasonable one is served as
+ * eagerly as a URL icon, but a big blob is a real cost: one relay inlines a
+ * 205KB JPEG (observed live) and every client would pay for it on a 16px badge.
+ * Blobs above the eager cap are therefore DEFERRED rather than discarded — the
+ * browser tab renders them, so they are used once the page, `/favicon.ico` and
+ * the compatibility sweep all come up empty. The ceiling keeps a pathological
+ * document from turning into a download.
  */
 const MAX_INLINE_ICON_BYTES = 64 * 1024;
+const MAX_INLINE_ICON_FALLBACK_BYTES = 512 * 1024;
 
 /** Decode an inline `data:image/...;base64,...` icon declaration. */
-export function decodeDataUriIcon(href: string): IconPayload | null {
+export function decodeDataUriIcon(
+  href: string,
+  maxBytes: number = MAX_INLINE_ICON_BYTES,
+): IconPayload | null {
   if (!href.startsWith('data:image/')) return null;
   const comma = href.indexOf(',');
   if (comma <= 0) return null;
   const meta = href.slice(0, comma);
   const contentType = /^data:([^;,]+)/i.exec(meta)?.[1] || 'image/png';
+  const encoded = href.slice(comma + 1);
+  // Estimate the decoded size before decoding: the last-resort pass re-examines
+  // a blob the eager pass already rejected, and decoding it twice is waste.
+  if (Math.floor((encoded.length * 3) / 4) > maxBytes) return null;
   try {
-    const buffer = Buffer.from(href.slice(comma + 1), 'base64');
+    const buffer = Buffer.from(encoded, 'base64');
     if (buffer.length === 0) return null;
-    if (buffer.length > MAX_INLINE_ICON_BYTES) return null;
+    if (buffer.length > maxBytes) return null;
     return { buffer, contentType, source: 'data:uri' };
   } catch {
     return null;
@@ -252,15 +271,28 @@ async function fetchIconResource(
       .sort((left, right) => right.path.length - left.path.length)
       .map((cookie) => `${cookie.name}=${cookie.value}`)
       .join('; ');
-    const response = await fetch(url, withExplicitProxyRequestInit(proxyUrl, {
+    // A site proxy wins when the operator configured one. Otherwise fall back to
+    // the first-party system proxy (HTTPS_PROXY/HTTP_PROXY…) the same way the
+    // update-center fetches do: `siteProxy` installs a FORCED-DIRECT global
+    // dispatcher, so without this an upstream that is only reachable through the
+    // host's proxy times out here, and the lookup silently degrades to a guessed
+    // path (observed: a relay whose page declares its logo inline resolved to an
+    // unrelated /logo.svg because the page fetch never completed).
+    const requestInit = {
       headers: {
         ...BROWSER_HEADERS,
         ...(referer ? { Referer: referer } : {}),
         ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
       signal,
-      redirect: 'manual',
-    }));
+      redirect: 'manual' as const,
+    };
+    const response = await fetch(
+      url,
+      proxyUrl
+        ? withExplicitProxyRequestInit(proxyUrl, requestInit)
+        : withSystemProxyRequestInit(process.env, requestInit),
+    );
     if (!REDIRECT_STATUSES.has(response.status)) return response;
 
     for (const cookie of getSetCookies(response.headers)) {
@@ -312,6 +344,13 @@ function acceptFavicon(cacheKey: string, payload: IconPayload): FaviconLookup {
   return { status: 'ok', payload, cache: 'MISS' };
 }
 
+type DeclaredIconResolution = {
+  /** The declared icon a browser would use, when we can serve it as-is. */
+  chosen: IconPayload | null;
+  /** An inline `data:` icon above the eager cap, kept as a last resort. */
+  oversizedInline: IconPayload | null;
+};
+
 /**
  * Read the page at the origin and return the first declared icon that actually
  * resolves, in browser preference order (see extractIconCandidates). Only an HTML
@@ -321,25 +360,28 @@ function acceptFavicon(cacheKey: string, payload: IconPayload): FaviconLookup {
 async function resolveDeclaredPageIcon(
   origin: string,
   proxyUrl: string | null,
-): Promise<IconPayload | null> {
+): Promise<DeclaredIconResolution> {
+  const none: DeclaredIconResolution = { chosen: null, oversizedInline: null };
   try {
     const page = await fetchIconResource(origin, origin, proxyUrl);
-    if (!page) return null;
+    if (!page) return none;
     if (!page.ok) {
       await page.body?.cancel();
-      return null;
+      return none;
     }
     const contentType = (page.headers.get('content-type') || '').toLowerCase();
     if (!contentType.includes('html')) {
       await page.body?.cancel();
-      return null;
+      return none;
     }
 
     const html = (await page.text()).slice(0, MAX_HTML_BYTES);
+    let oversizedInline: IconPayload | null = null;
     for (const candidate of extractIconCandidates(html)) {
       if (candidate.inline) {
         const inline = decodeDataUriIcon(candidate.href);
-        if (inline) return inline;
+        if (inline) return { chosen: inline, oversizedInline: null };
+        oversizedInline ??= decodeDataUriIcon(candidate.href, MAX_INLINE_ICON_FALLBACK_BYTES);
         continue;
       }
       const resolvedUrl = resolveIconUrl(candidate.href, origin);
@@ -347,12 +389,13 @@ async function resolveDeclaredPageIcon(
       // A crafted href could point at internal infrastructure; re-check.
       if (await resolvesToPrivate(resolvedUrl.hostname)) continue;
       const payload = await fetchImage(resolvedUrl, origin, proxyUrl);
-      if (payload) return payload;
+      if (payload) return { chosen: payload, oversizedInline: null };
     }
+    return { chosen: null, oversizedInline };
   } catch {
     // A page we cannot read simply declares nothing.
   }
-  return null;
+  return none;
 }
 
 /** Resolve only an administrator-configured site on the requested origin. */
@@ -375,11 +418,13 @@ export type FaviconLookup =
   | { status: 'forbidden' };
 
 /**
- * Resolve a site's favicon the way a browser does, in three ordered steps:
+ * Resolve a site's favicon the way a browser does, in four ordered steps:
  *   1. read the page and honour its declared `<link rel="icon">` (any variant,
  *      including an absolute CDN URL, an SVG or an inline data URI);
- *   2. fall back to the one conventional path, `/favicon.ico`;
- *   3. only then sweep non-standard logo paths, which browsers never probe.
+ *   2. accept an oversized inline `data:` icon — the page declared it; the
+ *      browser shows it, so guessing a legacy path would disagree;
+ *   3. fall back to the one conventional path, `/favicon.ico`;
+ *   4. only then sweep non-standard logo paths, which browsers never probe.
  *
  * Order matters for both quality and cost: the previous implementation probed
  * four guessed static paths before even looking at the document, so a site with a
@@ -410,16 +455,23 @@ export async function lookupSiteFavicon(
   // 1. What the page itself declares — the first thing a browser reads, and the
   //    only source that can point at a CDN URL, an SVG or an inline icon.
   const declared = await resolveDeclaredPageIcon(origin, proxyUrl);
-  if (declared) return acceptFavicon(cacheKey, declared);
+  if (declared.chosen) return acceptFavicon(cacheKey, declared.chosen);
 
-  // 2. The one conventional path a browser falls back to when the page declares
+  // 2. An inline `data:` icon too large to serve eagerly, but declared by the
+  //    page — the browser shows it in the tab, so using /favicon.ico or a
+  //    guess-path logo instead would disagree with the browser. Accepting it
+  //    here, before probing undeclared paths, preserves the browser's icon
+  //    preference (page declaration beats all guesswork).
+  if (declared.oversizedInline) return acceptFavicon(cacheKey, declared.oversizedInline);
+
+  // 3. The one conventional path a browser falls back to when the page declares
   //    nothing. It is intentionally requested after (not before) the document:
   //    a declared SVG logo beats a 16px legacy .ico, and guessing static paths
   //    first was what made this lookup slow and lossy.
   const conventional = await fetchImage(`${origin}${FAVICON_CONVENTIONAL_PATH}`, origin, proxyUrl);
   if (conventional) return acceptFavicon(cacheKey, conventional);
 
-  // 3. Compatibility sweep for deployments that never declare an icon and do not
+  // 4. Compatibility sweep for deployments that never declare an icon and do not
   //    ship the conventional one (self-hosted NewAPI instances typically serve a
   //    logo file at the root instead).
   for (const candidate of FAVICON_COMPAT_CANDIDATES) {

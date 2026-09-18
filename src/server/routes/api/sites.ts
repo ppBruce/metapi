@@ -51,6 +51,7 @@ function isOauthManagedSiteRow(platform: string, protocolProfile: string | null)
   }
 }
 import {
+  ICON_HTTP_MAX_AGE_SECONDS,
   lookupBrandIcon,
   lookupSiteFavicon,
   normalizeBrandIconRequest,
@@ -1390,7 +1391,7 @@ export async function sitesRoutes(app: FastifyInstance) {
 
       reply
         .header('Content-Type', result.payload.contentType)
-        .header('Cache-Control', 'public, max-age=86400')
+        .header('Cache-Control', `public, max-age=${ICON_HTTP_MAX_AGE_SECONDS}`)
         .header('X-Favicon-Source', result.payload.source)
         .header('X-Favicon-Cache', result.cache);
       return reply.send(result.payload.buffer);
@@ -1413,7 +1414,7 @@ export async function sitesRoutes(app: FastifyInstance) {
 
       reply
         .header('Content-Type', result.payload.contentType)
-        .header('Cache-Control', 'public, max-age=86400')
+        .header('Cache-Control', `public, max-age=${ICON_HTTP_MAX_AGE_SECONDS}`)
         .header('X-Icon-Source', result.payload.source)
         .header('X-Icon-Cache', result.cache);
       return reply.send(result.payload.buffer);
