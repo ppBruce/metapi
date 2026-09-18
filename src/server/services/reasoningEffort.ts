@@ -116,3 +116,119 @@ export function setCurrentReasoningEffort(effort: string | null): void {
 export function getCurrentReasoningEffort(): string | null {
   return reasoningEffortContext.getStore() ?? null;
 }
+
+/**
+ * Ascending ladder of the effort values relays accept. Index order IS the
+ * capability order: a relay that rejects one rung is normally willing to take
+ * the rung below it (a relay advertising low/medium/high rejects `max`, an
+ * Anthropic-side conversion rejects `xhigh`).
+ */
+export const REASONING_EFFORT_LADDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/** One rung down the ladder, or null at the floor / for an unknown spelling. */
+export function nextLowerReasoningEffort(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const collapsed = canonicalReasoningEffort(value) ?? value.trim().toLowerCase();
+  const index = (REASONING_EFFORT_LADDER as readonly string[]).indexOf(collapsed);
+  if (index <= 0) return null;
+  return REASONING_EFFORT_LADDER[index - 1];
+}
+
+/**
+ * Whether `candidate` sits on a higher rung than `cap`. Unknown spellings are
+ * reported as not-higher so an unrecognised value is never rewritten.
+ */
+export function isReasoningEffortAbove(candidate: unknown, cap: unknown): boolean {
+  if (typeof candidate !== 'string' || typeof cap !== 'string') return false;
+  const candidateKey = canonicalReasoningEffort(candidate) ?? candidate.trim().toLowerCase();
+  const capKey = canonicalReasoningEffort(cap) ?? cap.trim().toLowerCase();
+  const candidateIndex = (REASONING_EFFORT_LADDER as readonly string[]).indexOf(candidateKey);
+  const capIndex = (REASONING_EFFORT_LADDER as readonly string[]).indexOf(capKey);
+  if (candidateIndex < 0 || capIndex < 0) return false;
+  return candidateIndex > capIndex;
+}
+
+/**
+ * Whether an upstream body-validation error is about the effort value. The
+ * vocabulary varies by relay — `level "max" not supported, valid levels: low,
+ * medium, high`, `field ReasoningEffort invalid, should be one of: ...` — but
+ * every variant names the field or the accepted ladder, so match either.
+ */
+export function isReasoningEffortRejection(errorText: string | null | undefined): boolean {
+  if (!errorText) return false;
+  return /reasoning[_\s-]?effort|(invalid|not supported|unsupported)[^.]{0,40}effort|effort[^.]{0,40}(invalid|not supported|unsupported)|valid levels/i
+    .test(errorText);
+}
+
+/** Every effort-bearing key of a request body, with the object that holds it. */
+export function collectReasoningEffortSlots(
+  body: Record<string, unknown> | null | undefined,
+): Array<{ holder: Record<string, unknown>; key: string }> {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return [];
+  const slots: Array<{ holder: Record<string, unknown>; key: string }> = [];
+  if (typeof body.reasoning_effort === 'string') {
+    slots.push({ holder: body, key: 'reasoning_effort' });
+  }
+  const reasoning = body.reasoning;
+  if (reasoning && typeof reasoning === 'object' && !Array.isArray(reasoning)) {
+    const holder = reasoning as Record<string, unknown>;
+    if (typeof holder.effort === 'string') slots.push({ holder, key: 'effort' });
+  }
+  const outputConfig = body.output_config;
+  if (outputConfig && typeof outputConfig === 'object' && !Array.isArray(outputConfig)) {
+    const holder = outputConfig as Record<string, unknown>;
+    if (typeof holder.effort === 'string') slots.push({ holder, key: 'effort' });
+  }
+  return slots;
+}
+
+/** Read the effort out of a request body, whatever shape it uses. */
+export function readReasoningEffortFromBody(
+  body: Record<string, unknown> | null | undefined,
+): string | null {
+  const slot = collectReasoningEffortSlots(body)[0];
+  return slot ? String(slot.holder[slot.key]) : null;
+}
+
+/**
+ * Step the effort in a request body one rung down the ladder so a retry against
+ * the same upstream carries a value its validator accepts. Covers the three
+ * shapes a downstream body can use: `reasoning_effort`, `reasoning.effort`
+ * (Responses API) and `output_config.effort` (Anthropic).
+ *
+ * Returns the new value, or null when there was nothing to downgrade. Callers
+ * must gate this on an actual upstream rejection — the client's requested value
+ * is sent first, and only a rejection trades capability for a request that can
+ * complete.
+ */
+export function downgradeReasoningEffortInBody(body: Record<string, unknown> | null | undefined): string | null {
+  let downgraded: string | null = null;
+  for (const slot of collectReasoningEffortSlots(body)) {
+    const next = nextLowerReasoningEffort(slot.holder[slot.key]);
+    if (!next) continue;
+    slot.holder[slot.key] = next;
+    downgraded = next;
+  }
+  return downgraded;
+}
+
+/**
+ * Force every effort slot of a body down to at most `cap`, whatever rung it
+ * currently sits on. Used for the per-site memory of a rejection: once a relay
+ * has told us a value is not in its ladder, later requests must not open with
+ * the same rejected value again.
+ *
+ * Returns the value written, or null when nothing had to change.
+ */
+export function capReasoningEffortInBody(
+  body: Record<string, unknown> | null | undefined,
+  cap: string,
+): string | null {
+  let applied: string | null = null;
+  for (const slot of collectReasoningEffortSlots(body)) {
+    if (!isReasoningEffortAbove(slot.holder[slot.key], cap)) continue;
+    slot.holder[slot.key] = cap;
+    applied = cap;
+  }
+  return applied;
+}

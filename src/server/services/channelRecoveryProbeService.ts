@@ -1,6 +1,6 @@
 import {and, eq, gt, inArray, isNotNull, sql} from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { config } from '../config.js';
+import { config, resolveProbeHeartbeatTimeoutMs } from '../config.js';
 import { isUsableAccountToken } from './accountTokenService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { proxyChannelCoordinator } from './proxyChannelCoordinator.js';
@@ -21,9 +21,10 @@ type ProbeCandidate = {
 
 // 配置常量（从 config 读取，保留兜底值）
 const PROBE_SWEEP_INTERVAL_MS = config.probeHeartbeatIntervalMs ?? 120_000;
-const PROBE_TIMEOUT_MS = config.probeHeartbeatTimeoutMs ?? 10_000;
-// 单轮最多 4 个探测、单个超时 30s：并发 2 时最坏 2×30s=60s，可在一个
-// sweep 周期（默认 120s）内完成，不会因串行 4×30s=120s 拖到下一轮。
+// 探测预算跟随代理首字窗口（见 config.resolveProbeHeartbeatTimeoutMs）：
+// 探测比真实请求更早放弃，就会把「慢但健康」的站判死，冷冷却反过来把它挡在
+// 路由之外。单轮最多 4 个、并发 2，最坏耗时随首字窗口线性增长（首字 90s 时
+// 约 180s），跨轮重叠由 probeSweepInFlight 兜住，不会并发叠加。
 const PROBE_CONCURRENCY = 2;
 const PROBE_MAX_BATCH = 4;
 
@@ -292,7 +293,7 @@ async function runProbeCandidate(candidate: ProbeCandidate, nowMs: number): Prom
       account: candidate.account,
       modelName: candidate.modelName,
       tokenValue: candidate.tokenValue,
-      timeoutMs: PROBE_TIMEOUT_MS,
+      timeoutMs: resolveProbeHeartbeatTimeoutMs(),
     });
     if (result.status === 'supported') {
       // 探活成功：清冷却、清退避计数，渠道恢复

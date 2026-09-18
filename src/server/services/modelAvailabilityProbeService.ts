@@ -1,6 +1,6 @@
 import {and, asc, count, eq} from 'drizzle-orm';
 import { canonicalizeModelName } from '../shared/modelCanonicalization.js';
-import { config } from '../config.js';
+import { config, resolveModelAvailabilityProbeTimeoutMs } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { startBackgroundTask } from './backgroundTaskService.js';
 import { isUsableAccountToken, ACCOUNT_TOKEN_VALUE_STATUS_READY } from './accountTokenService.js';
@@ -103,7 +103,7 @@ async function probeSingleTarget(target: ProbeTarget): Promise<{
     site: target.site,
     account: target.account,
     modelName: target.modelName,
-    timeoutMs: config.modelAvailabilityProbeTimeoutMs,
+    timeoutMs: resolveModelAvailabilityProbeTimeoutMs(),
     tokenValue: target.kind === 'token' ? target.tokenValue : undefined,
   });
 }
@@ -921,7 +921,7 @@ async function probeMarketplaceTarget(
     // deepseek-v4-flash-free). Probe with that concrete spelling instead of
     // sending the canonical marketplace name and losing the alias.
     modelName: target.upstreamModelName || normalized,
-    timeoutMs: config.modelAvailabilityProbeTimeoutMs,
+    timeoutMs: resolveModelAvailabilityProbeTimeoutMs(),
     tokenValue,
   });
 
