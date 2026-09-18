@@ -91,12 +91,18 @@ async function verifyHostAllowed(hostname: string): Promise<void> {
   } catch {
     throw new Error('DNS lookup failed');
   }
-  for (const ip of ips) {
-    if (isIP(ip) === 4) {
-      if (isPrivateOrReservedIpv4(ip)) throw new Error(`Refused non-public IP ${ip}`);
-    } else if (isIP(ip) === 6) {
-      if (isPrivateOrReservedIpv6(ip)) throw new Error(`Refused non-public IP ${ip}`);
-    }
+  // Refuse only when EVERY answer is private/reserved. A public host commonly
+  // answers with a loopback hint first (`::1` ahead of its real A record, seen
+  // live on relay domains) and refusing on the first hit blocked upstreams that
+  // are perfectly reachable.
+  const blocked = ips.filter((ip) => {
+    const version = isIP(ip);
+    if (version === 4) return isPrivateOrReservedIpv4(ip);
+    if (version === 6) return isPrivateOrReservedIpv6(ip);
+    return false;
+  });
+  if (ips.length === 0 || blocked.length === ips.length) {
+    throw new Error(`Refused non-public IP ${blocked[0] ?? hostname}`);
   }
 }
 

@@ -123,8 +123,8 @@ export function isPrivateHostname(hostname: string): boolean {
 export async function resolvesToPrivate(hostname: string): Promise<boolean> {
   if (isPrivateHostname(hostname)) return true;
   try {
-    const { address } = await dns.lookup(hostname, { verbatim: true });
-    return isPrivateHostname(address);
+    const addresses = await dns.lookup(hostname, { verbatim: true, all: true });
+    return addresses.length === 0 || addresses.every((a) => isPrivateHostname(a.address));
   } catch {
     return true; // Be conservative: if DNS fails, refuse to fetch.
   }

@@ -42,7 +42,7 @@ describe('site favicon proxy routing', () => {
   beforeEach(async () => {
     for (const name of PROXY_ENV_NAMES) delete process.env[name];
     vi.restoreAllMocks();
-    vi.spyOn(dns, 'lookup').mockResolvedValue({ address: '93.184.216.34', family: 4 });
+    vi.spyOn(dns, 'lookup').mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     await db.delete(schema.sites).run();
     (await import('../../services/iconProxyService.js')).__resetIconCacheForTests();
     (await import('../../services/siteProxy.js')).invalidateSiteProxyCache();
@@ -221,6 +221,46 @@ describe('site favicon proxy routing', () => {
     } finally {
       delete process.env.HTTPS_PROXY;
     }
+  });
+
+  it('falls back to the system proxy when a site has no proxy of its own', async () => {
+    await db.insert(schema.sites).values({
+      name: 'sys-proxy-site', url: 'https://sysproxy.example.com', platform: 'new-api',
+    }).run();
+    // Without this the forced-direct global dispatcher (siteProxy) wins and an
+    // upstream only reachable through the host proxy never answers: the lookup
+    // then degrades to a guessed path instead of the declared icon.
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7897';
+    try {
+      const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fsysproxy.example.com');
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock.mock.calls[0][1].dispatcher).toBeDefined();
+    } finally {
+      delete process.env.HTTPS_PROXY;
+    }
+  });
+
+  it('does not flap on a host whose DNS returns a loopback address alongside a public one', async () => {
+    // Observed live: api.astrdark.cyou resolved to [`::1`, `221.228.32.13`];
+    // resolving only the `::1` makes the icon guard skip the declared icons and
+    // the lookup degrades to a guessed path while the fetch itself succeeds.
+    await db.insert(schema.sites).values({
+      name: 'mixed-address-site', url: 'https://lookback.example.com', platform: 'new-api',
+    }).run();
+    // Override the global mock for this test: the site's host resolves to
+    // both a loopback and a public address.
+    (dns.lookup as any).mockImplementationOnce(async (host: string, opts?: any) => {
+      if (host === 'lookback.example.com' && opts?.all) {
+        return [
+          { address: '::1', family: 6 },
+          { address: '93.184.216.34', family: 4 },
+        ];
+      }
+      return [{ address: '93.184.216.34', family: 4 }];
+    });
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Flookback.example.com');
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['x-favicon-source']).not.toBeUndefined();
   });
 
   it('does not reuse a cached direct miss after the site proxy changes', async () => {
