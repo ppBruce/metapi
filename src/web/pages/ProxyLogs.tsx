@@ -32,6 +32,7 @@ import {
 } from './helpers/proxyLogTraceDetail.js';
 import { tr } from '../i18n.js';
 import DateTimeInput from '../components/DateTimeInput.js';
+import ActualModelTrigger from '../components/ActualModelTrigger.js';
 import { usePersistedPageSize } from '../components/usePersistedPageSize.js';
 
 // Column count of the desktop usage-log table. Expanded detail rows must span
@@ -2009,7 +2010,18 @@ export default function ProxyLogs() {
               return (
                 <MobileCard
                   key={log.id}
-                  title={detailLog.modelRequested || 'unknown'}
+                  title={(
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {detailLog.modelRequested || 'unknown'}
+                      </span>
+                      <ActualModelTrigger
+                        requestedModel={detailLog.modelRequested || ''}
+                        actualModel={detailLog.modelActual}
+                        size={11}
+                      />
+                    </span>
+                  )}
                   subtitle={formatDateTimeLocal(log.createdAt)}
                   compact
                   headerActions={
@@ -2375,6 +2387,7 @@ export default function ProxyLogs() {
                       <td>
                         <ModelBadge
                           model={log.modelRequested}
+                          actualModel={log.modelActual}
                           style={{ alignSelf: 'flex-start' }}
                         />
                       </td>
