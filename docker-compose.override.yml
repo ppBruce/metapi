@@ -1,11 +1,11 @@
-# Build from the preserved, clean upstream checkout.
+# Build the local custom branch from the current repository checkout.
 services:
   metapi:
     pull_policy: never
     build:
-      context: ./docs/plans/metapi-upgrade-20260910-171321/source
+      context: .
       dockerfile: docker/Dockerfile
       labels:
         org.opencontainers.image.source: https://github.com/ppBruce/metapi
-        org.opencontainers.image.revision: 06bbc6ecec64b017abc46488c8190a37c7735b6a
-        org.opencontainers.image.version: 1.7.2
+        org.opencontainers.image.revision: 22f9af3c86dedaf25e68b6bee4d1b7431c95b579
+        org.opencontainers.image.version: 1.7.9-custom

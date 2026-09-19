@@ -16,7 +16,7 @@ upstream → https://github.com/wyf9661/metapi.git  (上游原始仓库，用于
 
 ## 你的自定义修改
 
-当前在分支 `local/1.7.8-custom` 上，包含以下功能修改：
+当前在分支 `local/1.7.9-custom` 上，包含以下功能修改：
 
 1. **群组路由优先显示**：commit `bcb4346b` - 群组排在前面
 2. **过滤群组内模型**：commit `36933dd1` - 已进入群组的模型不再单独显示
@@ -24,6 +24,16 @@ upstream → https://github.com/wyf9661/metapi.git  (上游原始仓库，用于
 4. **站点状态徽章快速切换**：commit `e9466716` - 状态徽章点击切换 enabled/disabled
 5. **代理通道故障转移设置 UI**：commit `d1639aa9` - 暴露 max attempts 与低价值 streak 阈值
 6. **Docker 镜像配置**：commit `4d623905` - 使用 `metapi:1.7.X-custom` 镜像
+
+### 已让位给上游的修改
+
+- **允许删除站点上已不存在的本地令牌**：commit `7bf0ad17`，在合并上游 v1.7.9 时放弃。
+  上游 `0a774c22` 把适配器返回值改为 `'deleted' | 'verified-absent' | 'unconfirmed'` 三态，
+  其中 `verified-absent`（完整枚举站点令牌列表、无掩码、确认该 key 不在其中）已覆盖原场景，
+  且在站点不可达或列表分页/掩码时保留本地记录，避免丢失仍然存活的凭据。
+
+- **Antigravity 系列改动**：commit `6ad83cf8`、`1b1c829b`、`6f577b9b`、`3cb022eb`、`a77909f5`，
+  已由 `547036a9`~`fa210316` 五个 revert 提交全部撤销，合并后 Antigravity 相关代码为纯上游实现。
 
 ## 日常工作流程
 
@@ -71,7 +81,7 @@ git add <修改的文件>
 git commit -m "feat: 描述你的修改"
 
 # 2. 推送到你的 GitHub
-git push origin local/1.7.8-custom
+git push origin local/1.7.9-custom
 ```
 
 ### 3. 创建新版本分支
@@ -105,7 +115,8 @@ git push origin local/1.8.0-custom
 ## 分支策略
 
 - `main`：保持与上游同步（很少直接使用）
-- `local/1.7.8-custom`：基于 1.7.8 的自定义分支（当前活跃）
+- `local/1.7.9-custom`：基于 1.7.9 的自定义分支（当前活跃）
+- `local/1.7.8-custom`：基于 1.7.8 的自定义分支（保留为历史快照，不再维护）
 - `local/1.7.7-custom`：基于 1.7.7 的自定义分支（保留为历史快照，不再维护）
 - `local/1.7.6-custom`：基于 1.7.6 的自定义分支（历史版本）
 - 未来会有 `local/1.8.0-custom` 等
@@ -139,7 +150,7 @@ git push origin <当前分支名>
 git branch -a
 
 # 构建镜像
-docker build -t metapi:1.7.8-custom .
+docker build -t metapi:1.7.9-custom -f docker/Dockerfile .
 
 # 重启容器
 docker-compose up -d
