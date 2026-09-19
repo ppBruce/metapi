@@ -3,6 +3,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
+import { ANTIGRAVITY_STABLE_MODELS } from './oauth/antigravityModels.js';
+import { antigravityUserAgent } from '../shared/antigravityVersion.js';
 
 const getApiTokenMock = vi.fn();
 const getModelsMock = vi.fn();
@@ -1904,8 +1906,8 @@ describe('refreshModelsForAccount credential discovery', () => {
       accountId: account.id,
       refreshed: true,
       status: 'success',
-      modelCount: 1,
-      modelsPreview: ['gemini-3-pro-preview'],
+      modelCount: ANTIGRAVITY_STABLE_MODELS.length,
+      modelsPreview: [...ANTIGRAVITY_STABLE_MODELS],
       discoveredByCredential: true,
     });
     expect(refreshOauthAccessTokenSingleflightMock).toHaveBeenCalledWith(account.id);
@@ -1999,8 +2001,8 @@ describe('refreshModelsForAccount credential discovery', () => {
       tokenScanned: 0,
       discoveredByCredential: true,
       discoveredApiToken: false,
-      modelCount: 2,
-      modelsPreview: ['gemini-3-pro-preview', 'claude-sonnet-4-5-20250929'],
+      modelCount: ANTIGRAVITY_STABLE_MODELS.length,
+      modelsPreview: [...ANTIGRAVITY_STABLE_MODELS],
     });
     expect(getModelsMock).not.toHaveBeenCalled();
     expect(undiciFetchMock).toHaveBeenCalledTimes(2);
@@ -2012,7 +2014,7 @@ describe('refreshModelsForAccount credential discovery', () => {
         Authorization: 'Bearer antigravity-access-token',
         Accept: 'application/json',
         'Content-Type': 'application/json',
-        'User-Agent': 'antigravity/1.19.6 darwin/arm64',
+        'User-Agent': antigravityUserAgent(),
       }),
     });
     const discoveryHeaders = undiciFetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
@@ -2025,10 +2027,72 @@ describe('refreshModelsForAccount credential discovery', () => {
     const rows = await db.select().from(schema.modelAvailability)
       .where(eq(schema.modelAvailability.accountId, account.id))
       .all();
-    expect(rows.map((row: any) => row.modelName).sort()).toEqual([
-      'claude-sonnet-4-5-20250929',
-      'gemini-3-pro-preview',
-    ]);
+    expect(rows.map((row: any) => row.modelName).sort()).toEqual(
+      [...ANTIGRAVITY_STABLE_MODELS].sort(),
+    );
+    expect(rows.map((row: any) => row.modelName)).not.toContain('claude-opus-4-6-thinking');
+    expect(rows.map((row: any) => row.modelName)).not.toContain('claude-sonnet-4-6');
+  });
+
+  it('keeps the previous antigravity catalog routable until discovery completes', async () => {
+    let markDiscoveryStarted!: () => void;
+    let releaseDiscovery!: () => void;
+    const discoveryStarted = new Promise<void>((resolve) => { markDiscoveryStarted = resolve; });
+    const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+    undiciFetchMock.mockImplementationOnce(async () => {
+      markDiscoveryStarted();
+      await discoveryGate;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ models: { internal_probe_model: {} } }),
+        text: async () => JSON.stringify({ ok: true }),
+      };
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'antigravity-atomic-refresh-site',
+      url: 'https://cloudcode-pa.googleapis.com',
+      platform: 'antigravity',
+      status: 'active',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'antigravity-atomic@example.com',
+      accessToken: 'antigravity-access-token',
+      status: 'active',
+      oauthProvider: 'antigravity',
+      oauthAccountKey: 'antigravity-atomic@example.com',
+      oauthProjectId: 'project-atomic',
+    }).returning().get();
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'previous-routable-model',
+      available: true,
+      checkedAt: '2026-09-18T00:00:00.000Z',
+    }).run();
+
+    const refreshPromise = refreshModelsForAccount(account.id);
+    await discoveryStarted;
+
+    const duringDiscovery = await db.select().from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.accountId, account.id))
+      .all();
+    expect(duringDiscovery.map((row: any) => row.modelName)).toContain('previous-routable-model');
+
+    releaseDiscovery();
+    const result = await refreshPromise;
+    expect(result).toMatchObject({
+      status: 'success',
+      modelCount: ANTIGRAVITY_STABLE_MODELS.length,
+    });
+
+    const afterDiscovery = await db.select().from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.accountId, account.id))
+      .all();
+    expect(afterDiscovery.map((row: any) => row.modelName).sort()).toEqual(
+      [...ANTIGRAVITY_STABLE_MODELS].sort(),
+    );
   });
 
   it('continues antigravity discovery after fetch errors and trims the oauth project id before posting', async () => {
@@ -2082,8 +2146,8 @@ describe('refreshModelsForAccount credential discovery', () => {
       tokenScanned: 0,
       discoveredByCredential: true,
       discoveredApiToken: false,
-      modelCount: 1,
-      modelsPreview: ['gemini-3-pro-preview'],
+      modelCount: ANTIGRAVITY_STABLE_MODELS.length,
+      modelsPreview: [...ANTIGRAVITY_STABLE_MODELS],
     });
     expect(undiciFetchMock).toHaveBeenCalledTimes(2);
     expect(String(undiciFetchMock.mock.calls[1]?.[0] || '')).toBe('https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels');
@@ -2157,8 +2221,8 @@ describe('refreshModelsForAccount credential discovery', () => {
       accountId: account.id,
       refreshed: true,
       status: 'success',
-      modelCount: 1,
-      modelsPreview: ['gemini-3-pro-preview'],
+      modelCount: ANTIGRAVITY_STABLE_MODELS.length,
+      modelsPreview: [...ANTIGRAVITY_STABLE_MODELS],
     });
     expect(undiciFetchMock).toHaveBeenCalledTimes(2);
     expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://api-antigravity-a.example.com/v1internal:fetchAvailableModels');

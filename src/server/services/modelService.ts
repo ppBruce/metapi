@@ -670,6 +670,13 @@ async function doRefreshModelsForAccount(
   const account = row.accounts;
   const site = row.sites;
   const oauth = getOauthInfoFromAccount(account);
+  const usesDedicatedOauthDiscovery = !!oauth?.provider && (
+    oauth.provider === 'codex'
+    || oauth.provider === 'claude'
+    || oauth.provider === 'gemini-cli'
+    || oauth.provider === 'antigravity'
+    || IMPORT_ONLY_OAUTH_PROVIDERS.has(oauth.provider)
+  );
   const adapter = getAdapter(site.platform);
   const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
 
@@ -730,7 +737,46 @@ async function doRefreshModelsForAccount(
     }
   };
 
-  await clearExistingAvailability();
+  const replaceOauthModelAvailability = async (
+    modelNames: string[],
+    latencyMs: number,
+    checkedAt: string,
+  ) => {
+    await db.transaction(async (tx: typeof db) => {
+      await tx.delete(schema.modelAvailability)
+        .where(and(
+          eq(schema.modelAvailability.accountId, accountId),
+          eq(schema.modelAvailability.isManual, false),
+        ))
+        .run();
+
+      const tokenIds = previousAccountTokens.map((token) => token.id);
+      if (tokenIds.length > 0) {
+        await tx.delete(schema.tokenModelAvailability)
+          .where(inArray(schema.tokenModelAvailability.tokenId, tokenIds))
+          .run();
+      }
+
+      if (modelNames.length > 0) {
+        await tx.insert(schema.modelAvailability).values(
+          modelNames.map((modelName) => ({
+            accountId,
+            modelName,
+            available: true,
+            latencyMs,
+            checkedAt,
+          })),
+        ).onConflictDoNothing().run();
+      }
+    });
+  };
+
+  // OAuth discovery is fetch-first and swap-second. Keeping the previous
+  // availability visible until the new catalog is ready prevents concurrent
+  // proxy requests from observing a temporary account with zero models.
+  if (!usesDedicatedOauthDiscovery) {
+    await clearExistingAvailability();
+  }
 
   // Collect manual model names so discovered models that collide are skipped (unique index).
   const manualModelNames = new Set(
@@ -772,17 +818,7 @@ async function doRefreshModelsForAccount(
       }
 
       const newCodexModels = codexModels.filter((m) => !manualModelNames.has(m.toLowerCase()));
-      if (newCodexModels.length > 0) {
-        await db.insert(schema.modelAvailability).values(
-          newCodexModels.map((modelName) => ({
-            accountId,
-            modelName,
-            available: true,
-            latencyMs: Date.now() - startedAt,
-            checkedAt,
-          })),
-        ).onConflictDoNothing().run();
-      }
+      await replaceOauthModelAvailability(newCodexModels, Date.now() - startedAt, checkedAt);
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -827,7 +863,6 @@ async function doRefreshModelsForAccount(
         source: 'model-discovery',
         checkedAt,
       });
-      await restorePreviousAvailability();
       return buildFailedRefreshResult({
         accountId,
         errorCode,
@@ -858,17 +893,7 @@ async function doRefreshModelsForAccount(
         throw new Error('未获取到可用模型');
       }
       const newClaudeModels = claudeModels.filter((m) => !manualModelNames.has(m.toLowerCase()));
-      if (newClaudeModels.length > 0) {
-        await db.insert(schema.modelAvailability).values(
-          newClaudeModels.map((modelName) => ({
-            accountId,
-            modelName,
-            available: true,
-            latencyMs: Date.now() - startedAt,
-            checkedAt,
-          })),
-        ).onConflictDoNothing().run();
-      }
+      await replaceOauthModelAvailability(newClaudeModels, Date.now() - startedAt, checkedAt);
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -913,7 +938,6 @@ async function doRefreshModelsForAccount(
         source: 'model-discovery',
         checkedAt,
       });
-      await restorePreviousAvailability();
       return buildFailedRefreshResult({
         accountId,
         errorCode,
@@ -958,17 +982,7 @@ async function doRefreshModelsForAccount(
         );
       }
       const newGeminiModels = GEMINI_CLI_STATIC_MODELS.filter((m) => !manualModelNames.has(m.toLowerCase()));
-      if (newGeminiModels.length > 0) {
-        await db.insert(schema.modelAvailability).values(
-          newGeminiModels.map((modelName) => ({
-            accountId,
-            modelName,
-            available: true,
-            latencyMs: Date.now() - startedAt,
-            checkedAt,
-          })),
-        ).onConflictDoNothing().run();
-      }
+      await replaceOauthModelAvailability(newGeminiModels, Date.now() - startedAt, checkedAt);
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -1012,7 +1026,6 @@ async function doRefreshModelsForAccount(
         source: 'model-discovery',
         checkedAt,
       });
-      await restorePreviousAvailability();
       return buildFailedRefreshResult({
         accountId,
         errorCode,
@@ -1044,17 +1057,7 @@ async function doRefreshModelsForAccount(
       }
 
       const newAntigravityModels = antigravityModels.filter((m) => !manualModelNames.has(m.toLowerCase()));
-      if (newAntigravityModels.length > 0) {
-        await db.insert(schema.modelAvailability).values(
-          newAntigravityModels.map((modelName) => ({
-            accountId,
-            modelName,
-            available: true,
-            latencyMs: Date.now() - startedAt,
-            checkedAt,
-          })),
-        ).onConflictDoNothing().run();
-      }
+      await replaceOauthModelAvailability(newAntigravityModels, Date.now() - startedAt, checkedAt);
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -1099,7 +1102,6 @@ async function doRefreshModelsForAccount(
         source: 'model-discovery',
         checkedAt,
       });
-      await restorePreviousAvailability();
       return buildFailedRefreshResult({
         accountId,
         errorCode,
@@ -1137,17 +1139,7 @@ async function doRefreshModelsForAccount(
       }
 
       const newImportOnlyModels = importOnlyModels.filter((m) => !manualModelNames.has(m.toLowerCase()));
-      if (newImportOnlyModels.length > 0) {
-        await db.insert(schema.modelAvailability).values(
-          newImportOnlyModels.map((modelName) => ({
-            accountId,
-            modelName,
-            available: true,
-            latencyMs: Date.now() - startedAt,
-            checkedAt,
-          })),
-        ).onConflictDoNothing().run();
-      }
+      await replaceOauthModelAvailability(newImportOnlyModels, Date.now() - startedAt, checkedAt);
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -1192,7 +1184,6 @@ async function doRefreshModelsForAccount(
         source: 'model-discovery',
         checkedAt,
       });
-      await restorePreviousAvailability();
       return buildFailedRefreshResult({
         accountId,
         errorCode,

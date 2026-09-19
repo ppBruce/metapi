@@ -16,6 +16,7 @@ import {
   GEMINI_CLI_USER_AGENT,
 } from './oauth/geminiCliProvider.js';
 import { antigravityUserAgent } from '../shared/antigravityVersion.js';
+import { getAntigravityStableModels } from './oauth/antigravityModels.js';
 
 type PlatformDiscoverySite = typeof schema.sites.$inferSelect;
 type PlatformDiscoveryAccount = typeof schema.accounts.$inferSelect;
@@ -257,9 +258,12 @@ export async function discoverAntigravityModelsFromCloud(input: {
         }
 
         const payload = await response.json();
-        const models = normalizeDiscoveredModels(extractAntigravityModelIds(payload));
-        if (models.length > 0) {
-          return models;
+        const upstreamModels = normalizeDiscoveredModels(extractAntigravityModelIds(payload));
+        if (upstreamModels.length > 0) {
+          // Match CLIProxyAPI: fetchAvailableModels validates the credential and
+          // upstream reachability, while the routable public catalog comes from
+          // the stable Antigravity registry rather than experimental raw keys.
+          return getAntigravityStableModels();
         }
         lastError = '未获取到可用模型';
       } catch (error) {

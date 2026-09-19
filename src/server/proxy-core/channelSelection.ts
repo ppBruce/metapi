@@ -155,12 +155,12 @@ export async function selectProxyChannelForAttempt(input: {
   const refreshRoutesForFirstAttempt = async (): Promise<boolean> => {
     if (input.retryCount > 0 || refreshedRoutes) return false;
     refreshedRoutes = true;
-    // Bounded on purpose: in the request path a wedged refresh pass must
-    // never hold client traffic; on timeout we fall through with the existing
-    // route state instead of hanging (see refreshModelsAndRebuildRoutesBounded).
-    const refreshed = await routeRefreshWorkflow.refreshModelsAndRebuildRoutesBounded();
+    // Request traffic may repair stale in-memory routes, but must not launch
+    // remote model discovery. OAuth discovery can take seconds and used to
+    // create an empty-availability window while replacing account models.
+    const refreshed = await routeRefreshWorkflow.rebuildRoutesBestEffort();
     if (!refreshed) {
-      console.warn('[proxy/surface] route refresh did not complete (bounded) after empty selection');
+      console.warn('[proxy/surface] local route rebuild failed after empty selection');
     }
     return refreshed;
   };
