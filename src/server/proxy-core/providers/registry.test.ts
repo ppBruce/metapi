@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import { resolveProviderProfile } from './registry.js';
+import { resolveAntigravityUpstreamModelName } from './antigravityProviderProfile.js';
 
 describe('resolveProviderProfile', () => {
+  it('maps Antigravity thinking-tier aliases to the accepted upstream Gemini model', () => {
+    expect(resolveAntigravityUpstreamModelName('gemini-3.8-flash-high')).toBe('gemini-3.8-flash');
+    expect(resolveAntigravityUpstreamModelName('gemini-3.6-flash-low')).toBe('gemini-3.6-flash');
+    expect(resolveAntigravityUpstreamModelName('gemini-3.1-pro-low')).toBe('gemini-3.1-pro-low');
+  });
   it('builds codex provider requests with codex-specific path, headers, and runtime metadata', () => {
     const profile = resolveProviderProfile('codex');
     expect(profile?.id).toBe('codex');
@@ -227,13 +233,13 @@ describe('resolveProviderProfile', () => {
     expect(result.headers.Accept).toBe('text/event-stream');
     expect(result.runtime).toMatchObject({
       executor: 'antigravity',
-      modelName: 'gemini-3.8-flash-high',
+      modelName: 'gemini-3.8-flash',
       oauthProjectId: 'project-demo',
       action: 'streamGenerateContent',
     });
     expect(result.body).toEqual({
       project: 'project-demo',
-      model: 'gemini-3.8-flash-high',
+      model: 'gemini-3.8-flash',
       request: protocolBody,
     });
     expect((result.body as Record<string, unknown>).request).toBe(protocolBody);
