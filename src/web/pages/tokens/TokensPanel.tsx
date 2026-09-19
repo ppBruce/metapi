@@ -466,9 +466,15 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange, siteId:
 
     setDeleteConfirm(null);
     await withRowLoading(`token-${target.tokenId}-delete`, async () => {
-      await api.deleteAccountToken(target.tokenId!);
-      toast.success('令牌已删除');
-      await load();
+      try {
+        await api.deleteAccountToken(target.tokenId!);
+        toast.success('令牌已删除');
+        await load();
+      } catch (error) {
+        // The site could not confirm that the token is gone; the local row is
+        // kept on purpose, so surface the server's reason instead of silence.
+        toast.error(error instanceof Error ? error.message : '删除失败');
+      }
     });
   };
 

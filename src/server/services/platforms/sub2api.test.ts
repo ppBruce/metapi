@@ -687,7 +687,7 @@ describe('Sub2ApiAdapter', () => {
     });
 
     const deleted = await adapter.deleteApiToken(baseUrl, 'jwt-token', 'sk-delete-me');
-    expect(deleted).toBe(true);
+    expect(deleted).toBe('deleted');
   });
 
   it('normalizes announcements from /api/v1/announcements', async () => {

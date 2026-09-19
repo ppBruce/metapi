@@ -101,6 +101,11 @@ export interface ModelDiscoveryOptions {
   requireCodexClient?: boolean;
 }
 
+export type DeleteApiTokenResult =
+  | 'deleted'
+  | 'verified-absent'
+  | 'unconfirmed';
+
 export interface PlatformAdapter {
   readonly platformName: string;
   detect(url: string): Promise<boolean>;
@@ -116,7 +121,7 @@ export interface PlatformAdapter {
   getSiteAnnouncements(baseUrl: string, accessToken: string, platformUserId?: number): Promise<SiteAnnouncement[]>;
   getUserGroups(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string[]>;
   createApiToken(baseUrl: string, accessToken: string, platformUserId?: number, options?: CreateApiTokenOptions): Promise<boolean>;
-  deleteApiToken(baseUrl: string, accessToken: string, tokenKey: string, platformUserId?: number): Promise<boolean>;
+  deleteApiToken(baseUrl: string, accessToken: string, tokenKey: string, platformUserId?: number): Promise<DeleteApiTokenResult>;
 }
 
 export abstract class BasePlatformAdapter implements PlatformAdapter {
@@ -231,8 +236,8 @@ export abstract class BasePlatformAdapter implements PlatformAdapter {
     _accessToken: string,
     _tokenKey: string,
     _platformUserId?: number,
-  ): Promise<boolean> {
-    return false;
+  ): Promise<DeleteApiTokenResult> {
+    return 'unconfirmed';
   }
 
   protected async fetchJson<T>(url: string, options?: UndiciRequestInit): Promise<T> {

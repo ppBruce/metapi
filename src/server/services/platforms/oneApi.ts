@@ -1,4 +1,4 @@
-import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, CreateApiTokenOptions } from './base.js';
+import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, CreateApiTokenOptions, type DeleteApiTokenResult } from './base.js';
 
 type CreateApiTokenPayload = {
   name: string;
@@ -201,12 +201,13 @@ export class OneApiAdapter extends BasePlatformAdapter {
     baseUrl: string,
     accessToken: string,
     tokenKey: string,
-  ): Promise<boolean> {
+  ): Promise<DeleteApiTokenResult> {
     const targetKey = this.normalizeTokenKeyForCompare(tokenKey);
-    if (!targetKey) return false;
+    if (!targetKey) return 'unconfirmed';
 
     const headers = { Authorization: `Bearer ${accessToken}` };
     let tokenId: number | null = null;
+    let listVerified = false;
     try {
       const res = await this.fetchJson<any>(`${baseUrl}/api/token/?p=0&size=100`, { headers });
       const items = (() => {
@@ -215,6 +216,14 @@ export class OneApiAdapter extends BasePlatformAdapter {
         if (Array.isArray(res?.items)) return res.items;
         return [];
       })();
+      const total = res?.data?.total ?? res?.total;
+      // Absence is only provable when the whole list was enumerated and no key
+      // is masked; a single partial page or a hidden key could still contain it.
+      const complete = total !== undefined
+        ? Number.isFinite(Number(total)) && Number(total) >= 0 && Number(total) <= items.length
+        : items.length < 100;
+      const keysVisible = items.every((item) => typeof item?.key === 'string' && !item.key.includes('*'));
+      if (complete && keysVisible) listVerified = true;
       for (const item of items) {
         const key = this.normalizeTokenKeyForCompare(item?.key);
         const id = Number.parseInt(String(item?.id), 10);
@@ -224,17 +233,17 @@ export class OneApiAdapter extends BasePlatformAdapter {
         }
       }
     } catch {
-      return false;
+      return 'unconfirmed';
     }
 
-    if (!tokenId) return true;
+    if (!tokenId) return listVerified ? 'verified-absent' : 'unconfirmed';
 
     try {
       const res = await this.fetchJson<any>(`${baseUrl}/api/token/${tokenId}`, {
         method: 'DELETE',
         headers,
       });
-      if (res?.success) return true;
+      if (res?.success) return 'deleted';
     } catch {}
 
     try {
@@ -242,9 +251,9 @@ export class OneApiAdapter extends BasePlatformAdapter {
         method: 'DELETE',
         headers,
       });
-      return !!res?.success;
+      return res?.success ? 'deleted' : 'unconfirmed';
     } catch {
-      return false;
+      return 'unconfirmed';
     }
   }
 }

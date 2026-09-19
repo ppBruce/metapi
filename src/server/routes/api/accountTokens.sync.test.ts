@@ -908,7 +908,7 @@ it('does not reuse a different ready token when another logical token shares the
       enabled: true,
       isDefault: false,
     }).returning().get();
-    deleteApiTokenMock.mockResolvedValue(true);
+    deleteApiTokenMock.mockResolvedValue('deleted');
 
     const response = await app.inject({
       method: 'DELETE',
@@ -935,7 +935,7 @@ it('does not reuse a different ready token when another logical token shares the
       enabled: true,
       isDefault: false,
     }).returning().get();
-    deleteApiTokenMock.mockResolvedValue(false);
+    deleteApiTokenMock.mockResolvedValue('unconfirmed');
 
     const response = await app.inject({
       method: 'DELETE',
@@ -945,7 +945,9 @@ it('does not reuse a different ready token when another logical token shares the
     expect(response.statusCode).toBe(502);
     expect(response.json()).toMatchObject({
       success: false,
-      message: '站点删除令牌失败，本地未删除',
+      // The site could not prove the token is gone, so the local row is kept
+      // rather than removed on a guess.
+      message: '站点未确认该令牌是否已删除（可能仍然存在）；本地记录未删除',
     });
 
     const existing = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).get();

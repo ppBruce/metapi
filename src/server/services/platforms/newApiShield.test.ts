@@ -138,7 +138,7 @@ describe('shield retry transport', () => {
       response.writeHead(401, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ success: false, message: 'unauthorized' }));
     };
-    expect(await new NewApiAdapter().deleteApiToken(url, 'offline-test', 'target-key', 42)).toBe(false);
+    expect(await new NewApiAdapter().deleteApiToken(url, 'offline-test', 'target-key', 42)).toBe('unconfirmed');
   });
 
   it.each([{ success: true }, { success: true, data: { items: [], total: 1 } }])('does not infer token absence from an unverified or incomplete list: %j', async (payload) => {
@@ -146,7 +146,7 @@ describe('shield retry transport', () => {
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify(payload));
     };
-    expect(await new NewApiAdapter().deleteApiToken(url, 'offline-test', 'target-key', 42)).toBe(false);
+    expect(await new NewApiAdapter().deleteApiToken(url, 'offline-test', 'target-key', 42)).toBe('unconfirmed');
   });
 
   it('does not invent a default group when all responses are non-JSON errors', async () => {
@@ -162,7 +162,7 @@ describe('shield retry transport', () => {
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ success: true, data: [] }));
     };
-    expect(await new NewApiAdapter().deleteApiToken(url, 'offline-test', 'target-key', 42)).toBe(true);
+    expect(await new NewApiAdapter().deleteApiToken(url, 'offline-test', 'target-key', 42)).toBe('verified-absent');
   });
 
   it('does not replace a rate-limited group response with a default group', async () => {

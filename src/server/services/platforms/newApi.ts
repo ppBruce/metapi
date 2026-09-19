@@ -1,4 +1,4 @@
-import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type ModelDiscoveryOptions, type SiteAnnouncement } from './base.js';
+import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type DeleteApiTokenResult, type ModelDiscoveryOptions, type SiteAnnouncement } from './base.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { fetchJsonWithShieldCookieRetry, classifyShieldGateFailureText, NewApiShieldError } from './newApiShield.js';
 import { CODEX_CLI_USER_AGENT } from '../../shared/codexClientFamily.js';
@@ -1456,9 +1456,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
     accessToken: string,
     tokenKey: string,
     platformUserId?: number,
-  ): Promise<boolean> {
+  ): Promise<DeleteApiTokenResult> {
     const targetKey = this.normalizeTokenKeyForCompare(tokenKey);
-    if (!targetKey) return false;
+    if (!targetKey) return 'unconfirmed';
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
 
     const pickTokenId = (items: any[]): number | null => {
@@ -1500,7 +1500,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
           method: 'DELETE',
           headers: this.authHeaders(accessToken, resolvedUserId || undefined),
         });
-        return !!res?.success;
+        return res?.success ? 'deleted' : 'unconfirmed';
       }
     } catch (error) {
       if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
@@ -1523,18 +1523,20 @@ export class NewApiAdapter extends BasePlatformAdapter {
           method: 'DELETE',
           headers,
         });
-        if (res?.success) return true;
+        if (res?.success) return 'deleted';
       } catch (error) {
-      if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
-    }
+        if (error instanceof NewApiShieldError && error.failure.terminal) throw error;
+      }
     }
 
-    // Upstream key already absent means local deletion is safe.
-    if (!tokenId) return tokenListVerified;
+    // The upstream list was fully enumerated and the target key is not among
+    // it, so the token is already gone there and local deletion is safe.
+    if (!tokenId && tokenListVerified) return 'verified-absent';
+    if (!tokenId) return 'unconfirmed';
     // Every credential/endpoint variant failed: leave a trace instead of a bare
     // null, otherwise the caller only sees "nothing worked".
     console.warn('[new-api] deleteApiToken: all variants failed');
-    return false;
+    return 'unconfirmed';
   }
 
   private async getApiTokensWithUser(baseUrl: string, accessToken: string, userId: number | null): Promise<ApiTokenInfo[]> {
