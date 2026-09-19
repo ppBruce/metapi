@@ -1,11 +1,6 @@
 import { type DownstreamFormat } from '../../transformers/shared/normalized.js';
 import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
 import { geminiGenerateContentTransformer } from '../../transformers/gemini/generate-content/index.js';
-import {
-  anthropicMessagesTransformer,
-  serializeAnthropicFinalAsStream,
-} from '../../transformers/anthropic/messages/index.js';
-import { unwrapGeminiCliPayload } from '../../transformers/gemini/generate-content/cliBridge.js';
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -27,62 +22,30 @@ export function buildOpenAiFinalFromGeminiNativePayload(
 ) {
   const aggregate = geminiGenerateContentTransformer.aggregator.createState();
   for (const item of geminiGenerateContentTransformer.stream.parseJsonArrayPayload(payload)) {
-    geminiGenerateContentTransformer.aggregator.apply(aggregate, unwrapGeminiCliPayload(item));
+    geminiGenerateContentTransformer.aggregator.apply(aggregate, item);
   }
   const geminiFinal = geminiGenerateContentTransformer.outbound.serializeAggregateResponse(aggregate);
-  return {
-    ...openAiChatTransformer.transformFinalResponse(geminiFinal, modelName, fallbackText),
-    // Keep the public, routable alias requested by the client. Antigravity's
-    // modelVersion is an implementation revision and may not itself be a
-    // valid model name for the next request.
-    model: modelName,
-  };
+  return openAiChatTransformer.transformFinalResponse(geminiFinal, modelName, fallbackText);
 }
 
-export function buildDownstreamStreamLinesFromGeminiNativeSse(
+export function buildOpenAiStreamLinesFromGeminiNativeSse(
   rawText: string,
   modelName: string,
-  downstreamFormat: DownstreamFormat,
-): { lines: string[]; finalPayload: Record<string, unknown>; hasSemanticOutput: boolean } {
+): { lines: string[]; finalPayload: Record<string, unknown> } {
   const aggregate = geminiGenerateContentTransformer.stream.createAggregateState();
   const parsed = geminiGenerateContentTransformer.stream.parseSsePayloads(rawText);
   for (const payload of parsed.events) {
-    geminiGenerateContentTransformer.stream.applyAggregate(aggregate, unwrapGeminiCliPayload(payload));
+    geminiGenerateContentTransformer.stream.applyAggregate(aggregate, payload);
   }
 
   const geminiFinal = geminiGenerateContentTransformer.outbound.serializeAggregateResponse(aggregate);
-  // Do not use the raw SSE transcript as fallback assistant text. A terminal
-  // stream with no Gemini candidates is a failed upstream response, not a
-  // successful answer containing its own wire payload.
-  const normalizedFinal = {
-    ...openAiChatTransformer.transformFinalResponse(geminiFinal, modelName, ''),
-    model: modelName,
-  };
-  const hasSemanticOutput = !!(
-    normalizedFinal.content
-    || normalizedFinal.reasoningContent
-    || normalizedFinal.redactedReasoningContent
-    || (Array.isArray(normalizedFinal.toolCalls) && normalizedFinal.toolCalls.length > 0)
-  );
-  if (downstreamFormat === 'claude') {
-    const streamContext = anthropicMessagesTransformer.createStreamContext(modelName);
-    streamContext.id = normalizedFinal.id;
-    streamContext.model = normalizedFinal.model;
-    streamContext.created = normalizedFinal.created;
-    const claudeContext = anthropicMessagesTransformer.createDownstreamContext();
-    return {
-      finalPayload: geminiFinal,
-      hasSemanticOutput,
-      lines: serializeAnthropicFinalAsStream(normalizedFinal, streamContext, claudeContext),
-    };
-  }
+  const normalizedFinal = openAiChatTransformer.transformFinalResponse(geminiFinal, modelName, rawText);
   const streamContext = openAiChatTransformer.createStreamContext(modelName);
   streamContext.id = normalizedFinal.id;
   streamContext.model = normalizedFinal.model;
   streamContext.created = normalizedFinal.created;
   return {
     finalPayload: geminiFinal,
-    hasSemanticOutput,
     lines: [
       ...openAiChatTransformer.buildSyntheticChunks(normalizedFinal)
         .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`),

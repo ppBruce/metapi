@@ -91,7 +91,7 @@ import {
   getTesterForcedChannelId,
   resolveProxyFailoverLimits,
 } from '../channelSelection.js';
-import {buildDownstreamStreamLinesFromGeminiNativeSse, buildOpenAiFinalFromGeminiNativePayload, deriveCodexSessionCacheKey, finalizeRetryAsExecutionFailure, finalizeRetryAsUpstreamFailure, isGeminiNativeRuntimePath} from './chatSurfaceHelpers.js';
+import {buildOpenAiFinalFromGeminiNativePayload, buildOpenAiStreamLinesFromGeminiNativeSse, deriveCodexSessionCacheKey, finalizeRetryAsExecutionFailure, finalizeRetryAsUpstreamFailure, isGeminiNativeRuntimePath} from './chatSurfaceHelpers.js';
 import { canFailoverToNextChannel, isClientDisconnectError, isDownstreamReplyGone, isFastifyReplyCommitted, sendReplyIfWritable } from '../replySafety.js';
 import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.js';
 
@@ -740,30 +740,10 @@ export async function handleChatSurfaceRequest(
         let rawText = '';
         if (isGeminiNativeRuntimePath(successfulUpstreamPath)) {
           rawText = await readRuntimeResponseText(upstream);
-          const bridged = buildDownstreamStreamLinesFromGeminiNativeSse(
+          const bridged = buildOpenAiStreamLinesFromGeminiNativeSse(
             rawText,
             modelName,
-            downstreamFormat,
           );
-          if (!bridged.hasSemanticOutput) {
-            const errorMessage = 'Antigravity stream completed without content, reasoning, or tools';
-            await failureToolkit.recordStreamFailure({
-              selected,
-              requestedModel,
-              modelName,
-              errorMessage,
-              latencyMs: Date.now() - startTime,
-              retryCount,
-              promptTokens: 0,
-              completionTokens: 0,
-              totalTokens: 0,
-              upstreamPath: successfulUpstreamPath,
-              runtimeFailureStatus: 502,
-            });
-            const payload = { error: { message: errorMessage, type: 'upstream_error' as const } };
-            await finalizeDebugFailure(502, payload, successfulUpstreamPath);
-            return reply.code(502).send(payload);
-          }
           upstreamUsagePresent = upstreamUsagePresent || hasProxyUsagePayload(bridged.finalPayload);
           parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(bridged.finalPayload));
           writeLines(bridged.lines);

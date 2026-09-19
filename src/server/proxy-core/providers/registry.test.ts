@@ -205,7 +205,7 @@ describe('resolveProviderProfile', () => {
 
     const result = profile!.prepareRequest({
       endpoint: 'chat',
-      modelName: 'gemini-3.8-flash-high',
+      modelName: 'gemini-3-pro-preview',
       stream: true,
       tokenValue: 'oauth-access-token',
       oauthProjectId: 'project-demo',
@@ -227,13 +227,13 @@ describe('resolveProviderProfile', () => {
     expect(result.headers.Accept).toBe('text/event-stream');
     expect(result.runtime).toMatchObject({
       executor: 'antigravity',
-      modelName: 'gemini-3.8-flash-high',
+      modelName: 'gemini-3-pro-preview',
       oauthProjectId: 'project-demo',
       action: 'streamGenerateContent',
     });
     expect(result.body).toEqual({
       project: 'project-demo',
-      model: 'gemini-3.8-flash-high',
+      model: 'gemini-3-pro-preview',
       request: protocolBody,
     });
     expect((result.body as Record<string, unknown>).request).toBe(protocolBody);
