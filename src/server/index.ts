@@ -106,6 +106,7 @@ import { tunnelRoutes } from './routes/api/tunnel.js';
 import {
   isLikelyTunnelRequest,
   isTunnelApiPath,
+  isTunnelBrandAssetPath,
   isTunnelDashboardPath,
   restoreCloudflareTunnelFromSettings,
 } from './services/cloudflareTunnelService.js';
@@ -272,11 +273,15 @@ await app.register(compress, { global: true });
 app.addHook('onRequest', async (request, reply) => {
   const urlPath = (request.url || '').split('?')[0] || '/';
   if (isLikelyTunnelRequest(request as any)) {
-    // Default: only OpenAI-compatible API paths are reachable via public tunnel.
-    // Optional: allow dashboard/control UI + management APIs when enabled in settings.
+    // Default: only OpenAI-compatible API paths + public brand assets are
+    // reachable via the tunnel. Brand assets ship independently of the console
+    // so a cascading instance can fetch this one's favicon while the control
+    // page stays gated. Optional: allow dashboard/control UI + management APIs
+    // when enabled in settings.
     const apiOk = isTunnelApiPath(urlPath);
+    const brandAssetOk = isTunnelBrandAssetPath(urlPath);
     const dashboardOk = config.tunnelDashboardAccess && isTunnelDashboardPath(urlPath);
-    if (!apiOk && !dashboardOk) {
+    if (!apiOk && !brandAssetOk && !dashboardOk) {
       reply.code(403).send({
         error: 'Tunnel access denied',
         message: '当前隧道仅允许 API 访问。如需公网打开控制页，请在设置中开启「允许通过隧道访问控制台」。',

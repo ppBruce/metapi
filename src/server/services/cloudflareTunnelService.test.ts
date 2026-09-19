@@ -16,6 +16,7 @@ process.env.TUNNEL_WORKER_URL = 'http://127.0.0.1:9';
 import {
   buildCloudflaredDownloadUrl,
   isTunnelApiPath,
+  isTunnelBrandAssetPath,
   isTunnelDashboardPath,
   isLikelyTunnelRequest,
   registerStableTunnelMapping,
@@ -37,6 +38,19 @@ describe('cloudflare tunnel access helpers', () => {
     expect(isTunnelDashboardPath('/logo.svg')).toBe(true);
     expect(isTunnelDashboardPath('/favicon.png')).toBe(true);
     expect(isTunnelDashboardPath('/v1/models')).toBe(false);
+  });
+
+  it('serves brand assets through an API-only tunnel', () => {
+    // Independent of `tunnelDashboardAccess`: a cascading metapi must be able to
+    // fetch this instance's favicon while the control page stays closed.
+    for (const path of ['/favicon.ico', '/favicon.png', '/favicon.svg', '/logo.svg', '/robots.txt', '/manifest.webmanifest']) {
+      expect(isTunnelBrandAssetPath(path)).toBe(true);
+      expect(isTunnelDashboardPath(path)).toBe(true);
+    }
+    // The console stays gated: no shell, no bundle, no management API.
+    for (const path of ['/', '/index.html', '/assets/index-abc.js', '/settings', '/api/settings/runtime', '/api/site-favicon', '/v1/models']) {
+      expect(isTunnelBrandAssetPath(path)).toBe(false);
+    }
   });
 
   it('detects cloudflare tunnel requests by headers/host', () => {

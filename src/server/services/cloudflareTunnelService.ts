@@ -922,6 +922,27 @@ export function isTunnelApiPath(urlPath: string): boolean {
   return false;
 }
 
+/**
+ * Public brand/static shell assets (see `tunnelDashboardAccess`: these are NOT
+ * console surface — no dashboard HTML, no management API, no app bundle). They
+ * are allowed through an API-only tunnel so a cascading metapi (or any client)
+ * can still pick up this instance's favicon/logo while the control page stays
+ * closed.
+ */
+const TUNNEL_BRAND_ASSET_PATHS = new Set([
+  '/favicon.ico',
+  '/favicon.png',
+  '/favicon.svg',
+  '/logo.svg',
+  '/robots.txt',
+  '/manifest.webmanifest',
+]);
+
+export function isTunnelBrandAssetPath(urlPath: string): boolean {
+  const path = (urlPath || '').split('?')[0] || '';
+  return TUNNEL_BRAND_ASSET_PATHS.has(path);
+}
+
 export function isTunnelDashboardPath(urlPath: string): boolean {
   const path = (urlPath || '').split('?')[0] || '';
   // API proxy paths are never "dashboard surface"
@@ -931,15 +952,7 @@ export function isTunnelDashboardPath(urlPath: string): boolean {
   if (path === '/index.html') return true;
   // Frontend shell static files at web root (logo/favicon/etc).
   // Previously only extension-less SPA routes were allowed, so static files 403'd on public tunnel.
-  if (
-    path === '/logo.svg'
-    || path === '/favicon.png'
-    || path === '/favicon.ico'
-    || path === '/robots.txt'
-    || path === '/manifest.webmanifest'
-  ) {
-    return true;
-  }
+  if (isTunnelBrandAssetPath(path)) return true;
   if (path.startsWith('/api/')) {
     // management APIs are dashboard surface
     return true;
