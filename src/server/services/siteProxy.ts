@@ -14,11 +14,18 @@ import { parseSiteProtocolProfile } from '../shared/siteProtocolProfile.js';
 // Global keep-alive Agent for direct (non-proxy) upstream requests.
 // This enables HTTP/1.1 keep-alive across all upstream fetches that don't
 // go through a proxy dispatcher, reducing TLS handshake overhead.
+//
+// pipelining stays at 1 (undici's default) on purpose: with pipelining > 1 a
+// single socket carries several concurrent requests, so one upstream closing
+// that socket fails every request queued on it at once ("fetch failed" /
+// "terminated" in bursts). Go-based relay clients (new-api) never pipeline, which
+// is why the same upstreams show no such errors in their logs. Keep-alive alone
+// still gives the handshake savings without the shared-fate failure mode.
 const globalNonProxyAgent = new Agent({
   keepAliveTimeout: 30_000,
   keepAliveMaxTimeout: 300_000,
   connections: 128,
-  pipelining: 5,
+  pipelining: 1,
   connect: { rejectUnauthorized: true },
 });
 

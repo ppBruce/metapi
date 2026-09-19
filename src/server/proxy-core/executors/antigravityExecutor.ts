@@ -231,6 +231,10 @@ export const antigravityExecutor: RuntimeExecutor = {
             input,
             withRequestBody(input.request, runtimeBody, minimalHeaders),
             requestUrl,
+            // This executor already retries transport errors by walking the base
+            // URL list below; the generic stale-socket retry would interpose an
+            // extra same-URL attempt and hide that fallback.
+            { disableTransportRetry: true },
           );
         } catch (error) {
           if (baseUrl !== ANTIGRAVITY_RUNTIME_BASE_URLS[ANTIGRAVITY_RUNTIME_BASE_URLS.length - 1]) {

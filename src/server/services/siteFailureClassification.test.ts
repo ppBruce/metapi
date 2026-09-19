@@ -283,4 +283,61 @@ describe('siteFailureClassification', () => {
     expect(shouldExcludeSiteForRequestFailure({ status: 400, errorText: 'please use /v1/responses' })).toBe(false);
     expect(shouldExcludeSiteForRequestFailure({ status: 400, errorText: 'invalid json' })).toBe(false);
   });
+
+  it('keeps sibling channels usable when one channel answers with empty content', async () => {
+    const { shouldExcludeSiteForRequestFailure } = await import('./siteFailureClassification.js');
+    // Empty content is a per-channel defect (the relay answers instantly with
+    // nothing). Excluding the whole site would drop healthy siblings on the same
+    // site, so the failover this failure needs could never happen.
+    expect(shouldExcludeSiteForRequestFailure({
+      status: 502,
+      errorText: 'Upstream returned empty content',
+    })).toBe(false);
+    // A real origin 5xx still takes the whole site out.
+    expect(shouldExcludeSiteForRequestFailure({
+      status: 502,
+      errorText: 'bad gateway',
+    })).toBe(true);
+  });
+
+  it('classifies bare transport failures as retryable and low-value', async () => {
+    const { classifyProxyFailure, isLowValueFailoverFailureClass } =
+      await import('./siteFailureClassification.js');
+
+    // undici's opaque messages must not fall through to 'unknown': that class is
+    // not low-value, so a local outage (every outbound connection failing at
+    // once) walked the entire candidate pool before giving up.
+    for (const errorText of ['fetch failed', 'terminated', 'socket hang up', 'fetch failed (ECONNRESET)']) {
+      const decision = classifyProxyFailure({ status: 0, errorText });
+      expect(decision.class).toBe('transient_upstream');
+      expect(decision.retryChannel).toBe(true);
+      expect(isLowValueFailoverFailureClass(decision.class)).toBe(true);
+    }
+  });
+
+  it('scopes a host-level transport failure to the whole site', async () => {
+    const { classifyProxyFailure } = await import('./siteFailureClassification.js');
+
+    // Refused / unresolvable / TLS-broken: broken for every model on that site.
+    for (const errorText of [
+      'fetch failed (ECONNREFUSED 10.0.0.7:443)',
+      'fetch failed (ENOTFOUND api.example.com)',
+      'fetch failed (UNABLE_TO_VERIFY_LEAF_SIGNATURE)',
+      'fetch failed (UND_ERR_CONNECT_TIMEOUT)',
+    ]) {
+      expect(classifyProxyFailure({ status: 0, errorText }).cooldownScope).toBe('site');
+    }
+
+    // A mid-flight reset is a channel blip, not a site verdict.
+    expect(classifyProxyFailure({ status: 0, errorText: 'fetch failed (ECONNRESET)' }).cooldownScope)
+      .toBe('channel');
+  });
+
+  it('stops the failover cascade after two consecutive transport failures', async () => {
+    const { noteFailoverFailureAndShouldStop } = await import('./proxyChannelRetry.js');
+    const state = { lowValueStreak: 0, lastClass: null as string | null };
+
+    expect(noteFailoverFailureAndShouldStop(state, 0, 'fetch failed')).toBe(false);
+    expect(noteFailoverFailureAndShouldStop(state, 0, 'fetch failed')).toBe(true);
+  });
 });

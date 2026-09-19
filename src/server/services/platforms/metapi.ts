@@ -2,6 +2,7 @@ import {
   BasePlatformAdapter,
   type BalanceInfo,
   type CheckinResult,
+  type DeleteApiTokenResult,
   type TokenVerifyResult,
   type UserInfo,
 } from './base.js';
@@ -137,12 +138,12 @@ export class MetApiAdapter extends BasePlatformAdapter {
     _accessToken: string,
     _tokenKey: string,
     _platformUserId?: number,
-  ): Promise<boolean> {
+  ): Promise<DeleteApiTokenResult> {
     // The cascade key is shared by every cascading peer on the upstream, so a
     // local delete must never revoke it upstream — peers would lose their
     // shared credential. Deleting the local row is enough; actual revocation
     // happens on the peer's own dashboard.
-    return true;
+    return 'deleted';
   }
 
   private mapOverviewToBalance(overview: PeerOverviewPayload): BalanceInfo {

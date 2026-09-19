@@ -25,6 +25,19 @@ export const RETRYABLE_TIMEOUT_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Failure text emitted by the proxy failure judge / stream transformers when an
+ * upstream completes with no usable output. A text predicate (not an enum) is
+ * deliberate: the same message crosses the judge, stream terminal results and
+ * the retry policy without a shared failure-code type.
+ *
+ * Owned here (not in the retry policy) so the retry classification and the
+ * routing-health classification read the same definition.
+ */
+export function isEmptyContentFailureText(upstreamErrorText?: string | null): boolean {
+  return /empty content/i.test(upstreamErrorText || '');
+}
+
+/**
  * Unified failure classes for cascade / channel failover / cooldown.
  * Prefer this over ad-hoc status checks at call sites.
  */
@@ -192,6 +205,46 @@ export const SITE_TRANSIENT_FAILURE_PATTERNS: RegExp[] = [
   /endpoint\s+pool\s+exhausted/i,
   /all\s+(?:api\s+)?endpoints?\s+(?:are\s+)?unavailable/i,
 ];
+
+/**
+ * Transport-level connection failures. undici reports every one of them with a
+ * single opaque message (`fetch failed`, `terminated`) and keeps the real reason
+ * in `error.cause`; the proxy's fetch choke point folds that cause into the text
+ * (see enrichTransportFailure), and these patterns cover both spellings.
+ *
+ * Without them a bare `fetch failed` classified as `unknown` — not a low-value
+ * failure class — so the failover streak never advanced and one local network
+ * blip (VPN drop, DNS hiccup: every outbound connection failing at once) burned
+ * the whole candidate pool on instant failures before giving up.
+ */
+export const NETWORK_TRANSPORT_FAILURE_PATTERNS: RegExp[] = [
+  /fetch\s+failed/i,
+  /\bterminated\b/i,
+  /socket\s+hang\s+up/i,
+  /other\s+side\s+closed/i,
+  /und_err_\w+/i,
+  /econnreset|econnrefused|econnaborted|econnnotsupported|enotfound|eai_again|ehostunreach|enetunreach|enetdown|ehostdown|epipe|eproto|ecanceled/i,
+];
+
+/**
+ * Host-level unreachability: name resolution, routing, a missing listener or a
+ * rejected TLS handshake. Broken for every model on that site, not just for the
+ * channel that happened to try first.
+ */
+export const NETWORK_HOST_UNREACHABLE_PATTERNS: RegExp[] = [
+  /enotfound|eai_again/i,
+  /econnrefused|ehostunreach|enetunreach|enetdown|ehostdown/i,
+  /cert_|unable_to_verify|certificate|self.signed|err_tls|ssl_|eproto/i,
+  /und_err_connect_timeout/i,
+];
+
+export function isNetworkTransportFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  return matchesAnyPattern(NETWORK_TRANSPORT_FAILURE_PATTERNS, (context.errorText || '').trim());
+}
+
+export function isHostUnreachableNetworkFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  return matchesAnyPattern(NETWORK_HOST_UNREACHABLE_PATTERNS, (context.errorText || '').trim());
+}
 
 /** Cloudflare / edge WAF blocks — short model-scoped cooldown, not permanent auth failure. */
 export const SITE_WAF_BLOCK_FAILURE_PATTERNS: RegExp[] = [
@@ -614,6 +667,27 @@ export function classifyProxyFailure(context: SiteRuntimeFailureContext = {}): P
     };
   }
 
+  // Transport-level connection failure (`fetch failed` / `terminated` and the
+  // cause codes folded into them). Retryable — another channel or another site
+  // may be perfectly reachable — but deliberately classed as a low-value
+  // failure so the failover streak stops the cascade: when the LOCAL network is
+  // the problem (VPN drop, DNS hiccup), every channel fails instantly and
+  // walking the whole pool only delays the error the client is going to get.
+  if (isNetworkTransportFailure(ctx)) {
+    const hostUnreachable = isHostUnreachableNetworkFailure(ctx);
+    return {
+      class: 'transient_upstream',
+      retryChannel: true,
+      cascadeEndpoint: false,
+      cooldownWeight: hostUnreachable ? 2.6 : 1.8,
+      // A refused / unresolvable / TLS-broken host is broken for every model on
+      // that site, so cool the site down as a whole instead of letting each
+      // channel-model pair burn its own attempt discovering the same thing. A
+      // mid-flight reset stays channel-scoped.
+      cooldownScope: hostUnreachable ? 'site' : 'channel',
+    };
+  }
+
   if (status >= 500 || matchesAnyPattern(SITE_TRANSIENT_FAILURE_PATTERNS, errorText)) {
     return {
       class: 'transient_upstream',
@@ -842,6 +916,13 @@ export function isLowValueFailoverFailureClass(failureClass: ProxyFailureClass):
  * same site are unlikely to help and should be excluded for the rest of the request.
  */
 export function shouldExcludeSiteForRequestFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  // A 200 with an empty body is a per-CHANNEL defect — the relay answers
+  // instantly with nothing — not a site-wide outage. Excluding the whole site
+  // for it drops every healthy sibling channel on that site for the rest of the
+  // request, which is exactly the failover this failure needs: the retry finds
+  // no channel and the client gets a 502 instead. Classify it as channel-scoped
+  // and let the router move to the next channel of the same site.
+  if (isEmptyContentFailureText(context.errorText)) return false;
   const decision = classifyProxyFailure(context);
   if (decision.class === 'waf_blocked'
     || decision.class === 'credential_invalid'

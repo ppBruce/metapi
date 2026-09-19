@@ -23,6 +23,14 @@ import {
 } from '../../services/downstreamPolicyRequest.js';
 import {executeEndpointFlow} from '../orchestration/endpointFlow.js';
 import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
+import {
+  downgradeReasoningEffortInBody,
+  isReasoningEffortRejection,
+} from '../../services/reasoningEffort.js';
+import {
+  clampRequestBodyToSiteEffortCeiling,
+  learnReasoningEffortCeilingFromFailure,
+} from '../../services/siteReasoningEffortCapabilityService.js';
 import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
 import { anthropicMessagesTransformer } from '../../transformers/anthropic/messages/index.js';
 import { shouldPreferResponsesForAnthropicContinuation } from '../../transformers/anthropic/messages/compatibility.js';
@@ -272,6 +280,76 @@ export async function handleChatSurfaceRequest(
       current: null as ReturnType<typeof finalizeRetryAsUpstreamFailure> | null,
     };
 
+    /**
+     * Decide what to do after a failed attempt — one place for every failure
+     * shape, including failures the stream session itself detected after the
+     * upstream answered 200 (`Upstream returned empty content`, mid-stream
+     * protocol errors).
+     *
+     * Stream failures used to be terminal for the whole request:
+     * `recordStreamFailure` logged the row (carrying the upstream's 200),
+     * replied 502, and the remaining channels on the route were never tried —
+     * observed on a route with three eligible channels that burned exactly one
+     * and failed with retry_count=0. Nothing had been written downstream in that
+     * case, so the request can fail over exactly like a transport-level failure;
+     * `canFailoverToNextChannel` still refuses once SSE headers are committed,
+     * which is the only case where the failure genuinely cannot be retried.
+     *
+     * Returns 'retried' when the caller should `continue` the attempt loop (all
+     * bookkeeping, including retryCount, happens here) and 'terminal' when the
+     * failure was final — the error response has already been sent.
+     */
+    const continueAttemptOrTerminate = async (args: {
+      selected: NonNullable<Awaited<ReturnType<typeof tokenRouter.selectChannel>>>;
+      failureOutcome: Awaited<ReturnType<typeof failureToolkit.handleDetectedFailure>>;
+      status: number;
+      reason: string;
+      finalizeTerminalRetry: () => ReturnType<typeof finalizeRetryAsUpstreamFailure>;
+      upstreamPath: string | null;
+    }): Promise<'retried' | 'terminal'> => {
+      const inPlaceRecoveringRetry = !canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs })
+        && canRetryInPlaceForRecoveringFailure(retryCount, args.status, args.reason, config.proxyFailoverBackoffMs);
+      const terminalFailureOutcome = args.failureOutcome.action === 'retry'
+        ? (
+          canFailoverToNextChannel(reply)
+          && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+            ? null
+            : args.finalizeTerminalRetry()
+        )
+        : args.failureOutcome;
+      if (!terminalFailureOutcome) {
+        if (!isRecoveringTransientFailure(args.status, args.reason)) {
+          allFailuresRecovering = false;
+        }
+        // Grace window: transient-recovering failures (WAF/429/5xx) often clear
+        // within seconds. Stay on the same channel for a configurable grace
+        // period before switching, so recovery is observed instead of burning
+        // the failover budget on a cascade. Bounded to ONE in-place retry.
+        if (shouldGraceRetryInPlaceOnce(graceRetriedOnce, Date.now() - requestStartedAtMs, config.proxyRecoveringGraceMs, args.status, args.reason)) {
+          graceRetriedOnce = true;
+          inPlaceRetryChannel = args.selected;
+          await sleepMs(resolveFailoverBackoffMs(args.status, args.reason, config.proxyFailoverBackoffMs));
+          return 'retried';
+        }
+        if (inPlaceRecoveringRetry) {
+          inPlaceRetryChannel = args.selected;
+          await sleepMs(resolveFailoverBackoffMs(args.status, args.reason, config.proxyFailoverBackoffMs));
+          retryCount += 1;
+          return 'retried';
+        }
+        if (args.failureOutcome.action === 'retry') {
+          lastRetryFailure.current = finalizeRetryAsUpstreamFailure(args.status, args.reason);
+          await appendExcludedSiteChannels(args.failureOutcome.excludeSiteId);
+        }
+        await sleepMs(resolveFailoverBackoffMs(args.status, args.reason, config.proxyFailoverBackoffMs));
+        retryCount += 1;
+        return 'retried';
+      }
+      await finalizeDebugFailure(terminalFailureOutcome.status, terminalFailureOutcome.payload, args.upstreamPath);
+      sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
+      return 'terminal';
+    };
+
   while (true) {
     if (++loopGuard > LOOP_GUARD_MAX) break;
     if (retryCount > maxRetries && !recoveryPass) {
@@ -463,11 +541,16 @@ export async function handleChatSurfaceRequest(
           providerHeaders: buildProviderHeaders(),
           codexSessionCacheKey,
         });
+        const builtBody = endpointRequest.body as Record<string, unknown>;
+        // A relay that already told us a value is not in its ladder must not be
+        // sent that value again — clamp the built body to the ceiling learned
+        // for this site + protocol (see siteReasoningEffortCapabilityService).
+        clampRequestBodyToSiteEffortCeiling(builtBody, selected.site.id, endpoint);
         return {
           endpoint,
           path: endpointRequest.path,
           headers: endpointRequest.headers,
-          body: endpointRequest.body as Record<string, unknown>,
+          body: builtBody,
           runtime: endpointRequest.runtime,
         };
       };
@@ -518,6 +601,26 @@ export async function handleChatSurfaceRequest(
           ctx.rawErrText || ctx.errText,
         ),
         onAttemptFailure: async (ctx) => {
+          // A 400 that names the effort means the value we forwarded is not in
+          // this upstream's accepted ladder: relays that only take
+          // low/medium/high reject `max`, and the Anthropic messages conversion
+          // rejects `xhigh`. Step the value down one rung so the NEXT attempt
+          // (the failover retry) can actually complete, instead of replaying the
+          // same rejected body against every channel on the route. Only a
+          // rejection downgrades — the first attempt always sends exactly what
+          // the client asked for.
+          if (ctx.response.status === 400 && isReasoningEffortRejection(ctx.rawErrText || ctx.errText)) {
+            // Remember the verdict for this site+protocol so later requests stop
+            // opening with a value this relay refuses, and step this request's
+            // own body down one rung for the failover retry.
+            learnReasoningEffortCeilingFromFailure({
+              siteId: selected.site.id,
+              endpoint: ctx.request.endpoint,
+              errorText: ctx.rawErrText || ctx.errText,
+              body: resolvedOpenAiBody,
+            });
+            downgradeReasoningEffortInBody(resolvedOpenAiBody);
+          }
           const memoryWrite = recordUpstreamEndpointFailure({
             ...endpointRuntimeContext,
             endpoint: ctx.request.endpoint,
@@ -785,11 +888,14 @@ export async function handleChatSurfaceRequest(
             requestedModel,
             downstreamApiKeyId,
           });
-              await failureToolkit.recordStreamFailure({
+              const failureReason = streamResult.errorMessage || 'stream processing failed';
+              const failureOutcome = await failureToolkit.handleDetectedFailure({
                 selected,
             requestedModel,
                 modelName,
-                errorMessage: streamResult.errorMessage,
+                failure: { status: 502, reason: failureReason },
+                isStream: true,
+                firstByteLatencyMs,
                 latencyMs: latency,
                 retryCount,
                 promptTokens: parsedUsage.promptTokens,
@@ -797,20 +903,14 @@ export async function handleChatSurfaceRequest(
                 totalTokens: parsedUsage.totalTokens,
                 upstreamPath: successfulUpstreamPath,
               });
-              await finalizeDebugFailure(502, {
-                error: {
-                  message: streamResult.errorMessage,
-                  type: 'stream_error',
-                },
-              }, successfulUpstreamPath);
-              if (!streamStarted) {
-                return reply.code(502).send({
-                  error: {
-                    message: streamResult.errorMessage,
-                    type: 'upstream_error',
-                  },
-                });
-              }
+              if (await continueAttemptOrTerminate({
+                selected,
+                failureOutcome,
+                status: 502,
+                reason: failureReason,
+                finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(502, failureReason),
+                upstreamPath: successfulUpstreamPath,
+              }) === 'retried') continue;
               return;
             }
             await recordStreamSuccess(latency);
@@ -938,33 +1038,29 @@ export async function handleChatSurfaceRequest(
               downstreamApiKeyId,
               channelId: selected.channel.id,
             });
-            await failureToolkit.recordStreamFailure({
+            const failureReason = streamResult.errorMessage || 'stream processing failed';
+            const failureOutcome = await failureToolkit.handleDetectedFailure({
               selected,
             requestedModel,
               modelName,
-              errorMessage: streamResult.errorMessage,
+              failure: { status: 502, reason: failureReason },
+              isStream: true,
+              firstByteLatencyMs,
               latencyMs: latency,
               retryCount,
               promptTokens: parsedUsage.promptTokens,
               completionTokens: parsedUsage.completionTokens,
               totalTokens: parsedUsage.totalTokens,
               upstreamPath: successfulUpstreamPath,
-              runtimeFailureStatus: 502,
             });
-            await finalizeDebugFailure(502, {
-              error: {
-                message: streamResult.errorMessage,
-                type: 'stream_error',
-              },
-            }, successfulUpstreamPath);
-            if (!streamStarted) {
-              return reply.code(502).send({
-                error: {
-                  message: streamResult.errorMessage,
-                  type: 'upstream_error',
-                },
-              });
-            }
+            if (await continueAttemptOrTerminate({
+              selected,
+              failureOutcome,
+              status: 502,
+              reason: failureReason,
+              finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(502, failureReason),
+              upstreamPath: successfulUpstreamPath,
+            }) === 'retried') continue;
             return;
           }
           await recordStreamSuccess(latency);
@@ -1025,33 +1121,36 @@ export async function handleChatSurfaceRequest(
             requestedModel,
             downstreamApiKeyId,
           });
-            await failureToolkit.recordStreamFailure({
+            // Same failure-invalidates-last-success rule as the non-stream path:
+            // a channel whose stream just died must not stay the preferred hop.
+            proxyChannelCoordinator.clearLastSuccessChannel({
+              requestedModel,
+              downstreamApiKeyId,
+              channelId: selected.channel.id,
+            });
+            const failureReason = streamResult.errorMessage || 'stream processing failed';
+            const failureOutcome = await failureToolkit.handleDetectedFailure({
               selected,
             requestedModel,
               modelName,
-              errorMessage: streamResult.errorMessage,
+              failure: { status: 502, reason: failureReason },
+              isStream: true,
+              firstByteLatencyMs,
               latencyMs: latency,
               retryCount,
               promptTokens: parsedUsage.promptTokens,
               completionTokens: parsedUsage.completionTokens,
               totalTokens: parsedUsage.totalTokens,
               upstreamPath: successfulUpstreamPath,
-              runtimeFailureStatus: 502,
             });
-            await finalizeDebugFailure(502, {
-              error: {
-                message: streamResult.errorMessage,
-                type: 'stream_error',
-              },
-            }, successfulUpstreamPath);
-            if (!streamStarted) {
-              return reply.code(502).send({
-                error: {
-                  message: streamResult.errorMessage,
-                  type: 'upstream_error',
-                },
-              });
-            }
+            if (await continueAttemptOrTerminate({
+              selected,
+              failureOutcome,
+              status: 502,
+              reason: failureReason,
+              finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(502, failureReason),
+              upstreamPath: successfulUpstreamPath,
+            }) === 'retried') continue;
             return;
           }
 

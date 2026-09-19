@@ -1,9 +1,11 @@
 import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
 import {
+  downgradeReasoningEffortInBody,
   extractReasoningEffort,
   getCurrentReasoningEffort,
   inferReasoningEffortFromModelName,
+  isReasoningEffortRejection,
   normalizeReasoningEffort,
   resolveRequestReasoningEffort,
   resolveWebsocketReasoningEffort,
@@ -168,5 +170,67 @@ describe('request-scoped reasoning effort', () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe('isReasoningEffortRejection', () => {
+  it('recognises the responses-side ladder message', () => {
+    expect(isReasoningEffortRejection(
+      'Upstream returned HTTP 400: level "max" not supported, valid levels: low, medium, high',
+    )).toBe(true);
+  });
+
+  it('recognises the chat-side field message', () => {
+    expect(isReasoningEffortRejection(
+      'Upstream returned HTTP 400: field ReasoningEffort invalid, should be one of: low, medium, high, xhigh, none',
+    )).toBe(true);
+  });
+
+  it('ignores unrelated body errors and empty text', () => {
+    expect(isReasoningEffortRejection('Upstream returned HTTP 400: invalid request body')).toBe(false);
+    expect(isReasoningEffortRejection('Upstream returned HTTP 400: credit insufficient balance: balance=0')).toBe(false);
+    expect(isReasoningEffortRejection('')).toBe(false);
+    expect(isReasoningEffortRejection(null)).toBe(false);
+  });
+});
+
+describe('downgradeReasoningEffortInBody', () => {
+  it('steps the flat chat field down one rung', () => {
+    const body: Record<string, unknown> = { model: 'gpt-5', reasoning_effort: 'max' };
+
+    expect(downgradeReasoningEffortInBody(body)).toBe('xhigh');
+    expect(body.reasoning_effort).toBe('xhigh');
+
+    expect(downgradeReasoningEffortInBody(body)).toBe('high');
+    expect(body.reasoning_effort).toBe('high');
+  });
+
+  it('steps the nested responses and anthropic shapes', () => {
+    const responsesBody: Record<string, unknown> = { reasoning: { effort: 'xhigh' } };
+    expect(downgradeReasoningEffortInBody(responsesBody)).toBe('high');
+    expect(responsesBody.reasoning).toEqual({ effort: 'high' });
+
+    const anthropicBody: Record<string, unknown> = { output_config: { effort: 'MAX' } };
+    expect(downgradeReasoningEffortInBody(anthropicBody)).toBe('xhigh');
+    expect(anthropicBody.output_config).toEqual({ effort: 'xhigh' });
+  });
+
+  it('keeps stepping down the ladder until it reaches the floor', () => {
+    const body: Record<string, unknown> = { reasoning_effort: 'high' };
+
+    expect(downgradeReasoningEffortInBody(body)).toBe('medium');
+    expect(downgradeReasoningEffortInBody(body)).toBe('low');
+    expect(downgradeReasoningEffortInBody(body)).toBe('minimal');
+    // `minimal` is the floor: nothing left to trade away.
+    expect(downgradeReasoningEffortInBody(body)).toBeNull();
+    expect(body.reasoning_effort).toBe('minimal');
+  });
+
+  it('leaves bodies without an effort untouched', () => {
+    const body: Record<string, unknown> = { model: 'gpt-5', temperature: 0.2 };
+    expect(downgradeReasoningEffortInBody(body)).toBeNull();
+    expect(body).toEqual({ model: 'gpt-5', temperature: 0.2 });
+    expect(downgradeReasoningEffortInBody(null)).toBeNull();
+    expect(downgradeReasoningEffortInBody(undefined)).toBeNull();
   });
 });

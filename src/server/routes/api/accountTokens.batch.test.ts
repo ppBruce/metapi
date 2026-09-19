@@ -39,7 +39,7 @@ describe('account token batch routes', () => {
 
   beforeEach(async () => {
     deleteApiTokenMock.mockReset();
-    deleteApiTokenMock.mockResolvedValue(true);
+    deleteApiTokenMock.mockResolvedValue('deleted');
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();

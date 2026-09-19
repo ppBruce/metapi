@@ -4,6 +4,7 @@ import { asc, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { fetch, getSetCookies, type Cookie, type Response } from 'undici';
 import { normalizeSiteProxyUrl, withExplicitProxyRequestInit } from './siteProxy.js';
+import { withSystemProxyRequestInit } from './systemProxy.js';
 
 /**
  * Shared icon fetching + caching for the web UI.
@@ -24,7 +25,18 @@ export type IconPayload = {
 
 type CacheEntry = IconPayload & { expiresAt: number };
 
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * Two layers, deliberately different:
+ * - the BROWSER header stays short (1h): a client's stale-icon window remains
+ *   small and self-heals without a hard refresh, and the hourly re-request is
+ *   answered from the in-process cache in ~ms.
+ * - the SERVER cache is long (12h): a miss costs a full page fetch of the
+ *   upstream (observed: a 575KB document taking ~6s through the host proxy),
+ *   while favicon content almost never changes. The cache is in-memory, so any
+ *   restart/deploy ages every entry out anyway — rule changes apply then.
+ */
+export const ICON_HTTP_MAX_AGE_SECONDS = 60 * 60;
+const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 512 * 1024;
@@ -40,7 +52,15 @@ const BROWSER_HEADERS = {
   Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
 };
 
-const FAVICON_CANDIDATES = ['/favicon.ico', '/favicon.png', '/logo.svg', '/logo.png'];
+const FAVICON_CONVENTIONAL_PATH = '/favicon.ico';
+
+/**
+ * Compatibility sweep for self-hosted deployments that serve a logo file but
+ * never declare it. Browsers do NOT probe these; they run only after the page's
+ * own declaration and `/favicon.ico` both failed, which is what makes this proxy
+ * more forgiving than a browser without being slower for the common case.
+ */
+const FAVICON_COMPAT_CANDIDATES = ['/favicon.png', '/favicon.svg', '/logo.svg', '/logo.png'];
 
 const BRAND_ICON_VERSION = '1.83.0';
 const BRAND_ICON_CDN_BASE = `https://registry.npmmirror.com/@lobehub/icons-static-png/${BRAND_ICON_VERSION}/files`;
@@ -107,29 +127,81 @@ export function isPrivateHostname(hostname: string): boolean {
 export async function resolvesToPrivate(hostname: string): Promise<boolean> {
   if (isPrivateHostname(hostname)) return true;
   try {
-    const { address } = await dns.lookup(hostname, { verbatim: true });
-    return isPrivateHostname(address);
+    const addresses = await dns.lookup(hostname, { verbatim: true, all: true });
+    return addresses.length === 0 || addresses.every((a) => isPrivateHostname(a.address));
   } catch {
     return true; // Be conservative: if DNS fails, refuse to fetch.
   }
 }
 
-/** Extract <link rel="...icon..."> hrefs, most logo-like first. */
-export function extractIconHrefs(html: string): string[] {
-  const hrefs: string[] = [];
-  const relPattern = /<link[^>]+rel=["']([^"']*icon[^"']*)["'][^>]*>/gi;
+/**
+ * Declared icon links, ranked the way a browser picks a tab icon:
+ * a declared `<link rel="icon">` beats anything at a conventional path, a large
+ * or SVG icon beats a small raster one, and Apple's touch icons beat a legacy
+ * 16px favicon. Inline `data:` icons rank last — browsers render them, but a real
+ * URL is preferable whenever one works, and this keeps the decoded-blob cases to
+ * sites that truly declare nothing else.
+ */
+const ICON_REL_RANK: Record<string, number> = {
+  icon: 300,
+  'shortcut icon': 290,
+  'apple-touch-icon': 200,
+  'apple-touch-icon-precomposed': 190,
+  'mask-icon': 100,
+};
+
+export type IconLinkCandidate = {
+  href: string;
+  rank: number;
+  inline: boolean;
+};
+
+function readTagAttributes(tag: string): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  const pattern = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g;
   let match: RegExpExecArray | null;
-  while ((match = relPattern.exec(html)) !== null) {
-    const tag = match[0];
-    const rel = (match[1] || '').toLowerCase();
-    const hrefMatch = /\bhref=["']([^"']+)["']/i.exec(tag);
-    if (!hrefMatch) continue;
-    const href = hrefMatch[1]!.trim();
-    if (!href || href.startsWith('#')) continue;
-    if (rel.includes('apple-touch-icon') || rel.includes('shortcut')) hrefs.unshift(href);
-    else hrefs.push(href);
+  while ((match = pattern.exec(tag)) !== null) {
+    attributes[match[1]!.toLowerCase()] = match[2] ?? match[3] ?? match[4] ?? '';
   }
-  return hrefs;
+  return attributes;
+}
+
+/** Largest declared square size: `sizes="32x32 16x16"` → 32, `sizes="any"` → 0. */
+function readDeclaredIconSize(sizes: string): number {
+  let largest = 0;
+  for (const match of sizes.matchAll(/(\d+)\s*[xX]\s*(\d+)/g)) {
+    largest = Math.max(largest, Number(match[1]), Number(match[2]));
+  }
+  return largest;
+}
+
+export function extractIconCandidates(html: string): IconLinkCandidate[] {
+  const candidates: IconLinkCandidate[] = [];
+  const linkPattern = /<link\b[^>]*>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = linkPattern.exec(html)) !== null) {
+    const attributes = readTagAttributes(match[0]);
+    const rel = (attributes.rel || '').trim().toLowerCase();
+    if (!rel.includes('icon')) continue;
+    const href = (attributes.href || '').trim();
+    if (!href || href.startsWith('#')) continue;
+
+    const inline = href.startsWith('data:');
+    let rank = ICON_REL_RANK[rel]
+      ?? (rel.includes('shortcut') ? 280 : (rel.includes('apple') ? 180 : 150));
+    if (inline) rank -= 100;
+    const type = (attributes.type || '').toLowerCase();
+    if (type.includes('svg') || /\.svg(?:[?#]|$)/i.test(href)) rank += 40;
+    rank += (Math.min(readDeclaredIconSize(attributes.sizes || ''), 512) / 512) * 30;
+
+    candidates.push({ href, rank, inline });
+  }
+  return candidates.sort((left, right) => right.rank - left.rank);
+}
+
+/** Extract `<link rel="...icon...">` hrefs, most logo-like first. */
+export function extractIconHrefs(html: string): string[] {
+  return extractIconCandidates(html).map((candidate) => candidate.href);
 }
 
 function resolveIconUrl(href: string, origin: string): URL | null {
@@ -142,16 +214,36 @@ function resolveIconUrl(href: string, origin: string): URL | null {
   }
 }
 
+/**
+ * Inline `data:` icons travel inside the page. A reasonable one is served as
+ * eagerly as a URL icon, but a big blob is a real cost: one relay inlines a
+ * 205KB JPEG (observed live) and every client would pay for it on a 16px badge.
+ * Blobs above the eager cap are therefore DEFERRED rather than discarded — the
+ * browser tab renders them, so they are used once the page, `/favicon.ico` and
+ * the compatibility sweep all come up empty. The ceiling keeps a pathological
+ * document from turning into a download.
+ */
+const MAX_INLINE_ICON_BYTES = 64 * 1024;
+const MAX_INLINE_ICON_FALLBACK_BYTES = 512 * 1024;
+
 /** Decode an inline `data:image/...;base64,...` icon declaration. */
-export function decodeDataUriIcon(href: string): IconPayload | null {
+export function decodeDataUriIcon(
+  href: string,
+  maxBytes: number = MAX_INLINE_ICON_BYTES,
+): IconPayload | null {
   if (!href.startsWith('data:image/')) return null;
   const comma = href.indexOf(',');
   if (comma <= 0) return null;
   const meta = href.slice(0, comma);
   const contentType = /^data:([^;,]+)/i.exec(meta)?.[1] || 'image/png';
+  const encoded = href.slice(comma + 1);
+  // Estimate the decoded size before decoding: the last-resort pass re-examines
+  // a blob the eager pass already rejected, and decoding it twice is waste.
+  if (Math.floor((encoded.length * 3) / 4) > maxBytes) return null;
   try {
-    const buffer = Buffer.from(href.slice(comma + 1), 'base64');
+    const buffer = Buffer.from(encoded, 'base64');
     if (buffer.length === 0) return null;
+    if (buffer.length > maxBytes) return null;
     return { buffer, contentType, source: 'data:uri' };
   } catch {
     return null;
@@ -183,15 +275,28 @@ async function fetchIconResource(
       .sort((left, right) => right.path.length - left.path.length)
       .map((cookie) => `${cookie.name}=${cookie.value}`)
       .join('; ');
-    const response = await fetch(url, withExplicitProxyRequestInit(proxyUrl, {
+    // A site proxy wins when the operator configured one. Otherwise fall back to
+    // the first-party system proxy (HTTPS_PROXY/HTTP_PROXY…) the same way the
+    // update-center fetches do: `siteProxy` installs a FORCED-DIRECT global
+    // dispatcher, so without this an upstream that is only reachable through the
+    // host's proxy times out here, and the lookup silently degrades to a guessed
+    // path (observed: a relay whose page declares its logo inline resolved to an
+    // unrelated /logo.svg because the page fetch never completed).
+    const requestInit = {
       headers: {
         ...BROWSER_HEADERS,
         ...(referer ? { Referer: referer } : {}),
         ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
       signal,
-      redirect: 'manual',
-    }));
+      redirect: 'manual' as const,
+    };
+    const response = await fetch(
+      url,
+      proxyUrl
+        ? withExplicitProxyRequestInit(proxyUrl, requestInit)
+        : withSystemProxyRequestInit(process.env, requestInit),
+    );
     if (!REDIRECT_STATUSES.has(response.status)) return response;
 
     for (const cookie of getSetCookies(response.headers)) {
@@ -237,6 +342,66 @@ async function fetchImage(
   }
 }
 
+/** Cache a resolved icon and shape the success result. */
+function acceptFavicon(cacheKey: string, payload: IconPayload): FaviconLookup {
+  writeCache(cacheKey, payload);
+  return { status: 'ok', payload, cache: 'MISS' };
+}
+
+type DeclaredIconResolution = {
+  /** The declared icon a browser would use, when we can serve it as-is. */
+  chosen: IconPayload | null;
+  /** An inline `data:` icon above the eager cap, kept as a last resort. */
+  oversizedInline: IconPayload | null;
+};
+
+/**
+ * Read the page at the origin and return the first declared icon that actually
+ * resolves, in browser preference order (see extractIconCandidates). Only an HTML
+ * document can declare icons, so an image or JSON response at the root is ignored
+ * instead of being scanned for `<link>` tags that cannot be there.
+ */
+async function resolveDeclaredPageIcon(
+  origin: string,
+  proxyUrl: string | null,
+): Promise<DeclaredIconResolution> {
+  const none: DeclaredIconResolution = { chosen: null, oversizedInline: null };
+  try {
+    const page = await fetchIconResource(origin, origin, proxyUrl);
+    if (!page) return none;
+    if (!page.ok) {
+      await page.body?.cancel();
+      return none;
+    }
+    const contentType = (page.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('html')) {
+      await page.body?.cancel();
+      return none;
+    }
+
+    const html = (await page.text()).slice(0, MAX_HTML_BYTES);
+    let oversizedInline: IconPayload | null = null;
+    for (const candidate of extractIconCandidates(html)) {
+      if (candidate.inline) {
+        const inline = decodeDataUriIcon(candidate.href);
+        if (inline) return { chosen: inline, oversizedInline: null };
+        oversizedInline ??= decodeDataUriIcon(candidate.href, MAX_INLINE_ICON_FALLBACK_BYTES);
+        continue;
+      }
+      const resolvedUrl = resolveIconUrl(candidate.href, origin);
+      if (!resolvedUrl) continue;
+      // A crafted href could point at internal infrastructure; re-check.
+      if (await resolvesToPrivate(resolvedUrl.hostname)) continue;
+      const payload = await fetchImage(resolvedUrl, origin, proxyUrl);
+      if (payload) return { chosen: payload, oversizedInline: null };
+    }
+    return { chosen: null, oversizedInline };
+  } catch {
+    // A page we cannot read simply declares nothing.
+  }
+  return none;
+}
+
 /** Resolve only an administrator-configured site on the requested origin. */
 export async function resolveFaviconSite(origin: string, siteId?: number) {
   const rows = await db
@@ -257,9 +422,18 @@ export type FaviconLookup =
   | { status: 'forbidden' };
 
 /**
- * Resolve a site's favicon, mirroring what a browser does: try the conventional
- * static paths first, then honour the page's own `<link rel="icon">` (which may
- * be an absolute CDN URL or an inline data URI).
+ * Resolve a site's favicon the way a browser does, in four ordered steps:
+ *   1. read the page and honour its declared `<link rel="icon">` (any variant,
+ *      including an absolute CDN URL, an SVG or an inline data URI);
+ *   2. accept an oversized inline `data:` icon — the page declared it; the
+ *      browser shows it, so guessing a legacy path would disagree;
+ *   3. fall back to the one conventional path, `/favicon.ico`;
+ *   4. only then sweep non-standard logo paths, which browsers never probe.
+ *
+ * Order matters for both quality and cost: the previous implementation probed
+ * four guessed static paths before even looking at the document, so a site with a
+ * declared SVG logo could still be served a 16px `.ico`, and a site without one
+ * paid four timed-out requests before the page was ever read.
  */
 export async function lookupSiteFavicon(
   origin: string,
@@ -282,38 +456,31 @@ export async function lookupSiteFavicon(
 
   if (isNegativelyCached(cacheKey)) return { status: 'not-found' };
 
-  for (const candidate of FAVICON_CANDIDATES) {
-    const payload = await fetchImage(`${origin}${candidate}`, origin, proxyUrl);
-    if (payload) {
-      const resolved = { ...payload, source: candidate };
-      writeCache(cacheKey, resolved);
-      return { status: 'ok', payload: resolved, cache: 'MISS' };
-    }
-  }
+  // 1. What the page itself declares — the first thing a browser reads, and the
+  //    only source that can point at a CDN URL, an SVG or an inline icon.
+  const declared = await resolveDeclaredPageIcon(origin, proxyUrl);
+  if (declared.chosen) return acceptFavicon(cacheKey, declared.chosen);
 
-  try {
-    const page = await fetchIconResource(origin, origin, proxyUrl);
-    if (page?.ok) {
-      const html = (await page.text()).slice(0, MAX_HTML_BYTES);
-      for (const href of extractIconHrefs(html)) {
-        const inline = decodeDataUriIcon(href);
-        if (inline) {
-          writeCache(cacheKey, inline);
-          return { status: 'ok', payload: inline, cache: 'MISS' };
-        }
-        const resolvedUrl = resolveIconUrl(href, origin);
-        if (!resolvedUrl) continue;
-        // A crafted href could point at internal infrastructure; re-check.
-        if (await resolvesToPrivate(resolvedUrl.hostname)) continue;
-        const payload = await fetchImage(resolvedUrl, origin, proxyUrl);
-        if (payload) {
-          writeCache(cacheKey, payload);
-          return { status: 'ok', payload, cache: 'MISS' };
-        }
-      }
-    }
-  } catch {
-    // Fall through to a miss.
+  // 2. An inline `data:` icon too large to serve eagerly, but declared by the
+  //    page — the browser shows it in the tab, so using /favicon.ico or a
+  //    guess-path logo instead would disagree with the browser. Accepting it
+  //    here, before probing undeclared paths, preserves the browser's icon
+  //    preference (page declaration beats all guesswork).
+  if (declared.oversizedInline) return acceptFavicon(cacheKey, declared.oversizedInline);
+
+  // 3. The one conventional path a browser falls back to when the page declares
+  //    nothing. It is intentionally requested after (not before) the document:
+  //    a declared SVG logo beats a 16px legacy .ico, and guessing static paths
+  //    first was what made this lookup slow and lossy.
+  const conventional = await fetchImage(`${origin}${FAVICON_CONVENTIONAL_PATH}`, origin, proxyUrl);
+  if (conventional) return acceptFavicon(cacheKey, conventional);
+
+  // 4. Compatibility sweep for deployments that never declare an icon and do not
+  //    ship the conventional one (self-hosted NewAPI instances typically serve a
+  //    logo file at the root instead).
+  for (const candidate of FAVICON_COMPAT_CANDIDATES) {
+    const payload = await fetchImage(`${origin}${candidate}`, origin, proxyUrl);
+    if (payload) return acceptFavicon(cacheKey, { ...payload, source: candidate });
   }
 
   markMiss(cacheKey);

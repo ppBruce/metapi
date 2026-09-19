@@ -11,7 +11,7 @@ import {
 } from './accountTokenService.js';
 import {mergeAccountExtraConfig, resolveProxyUrlFromExtraConfig, requiresManagedAccountTokens, resolvePlatformUserId, supportsDirectAccountRoutingConnection} from './accountExtraConfig.js';
 import { invalidateTokenRouterCache } from './tokenRouter.js';
-import { config } from '../config.js';
+import { resolveModelAvailabilityProbeTimeoutMs } from '../config.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { clearAllRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js';
 import { rebuildAllPatternRouteChannels } from './patternRouteChannelSyncService.js';
@@ -479,7 +479,7 @@ export async function probeSiteModels(
       const modelName = modelsToProbe[cursor++];
       try {
         const result = await probeRuntimeModel({
-          site, account, modelName, timeoutMs: config.modelAvailabilityProbeTimeoutMs,
+          site, account, modelName, timeoutMs: resolveModelAvailabilityProbeTimeoutMs(),
         });
         const threshold = options?.latencyThresholdMs ?? 0;
         const latencyExceeded = (
@@ -574,7 +574,7 @@ async function runPostRefreshProbeIfEnabled(params: {
         site: params.site,
         account: params.account,
         modelName,
-        timeoutMs: config.modelAvailabilityProbeTimeoutMs,
+        timeoutMs: resolveModelAvailabilityProbeTimeoutMs(),
       });
       const latencyExceeded = (
         result.status === 'supported'

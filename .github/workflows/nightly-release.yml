@@ -350,11 +350,57 @@ jobs:
           head -20 "$RUNNER_TEMP/nightly-body.md"
 
       - name: Upload Nightly Release Assets
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: 'Nightly (${{ steps.tag.outputs.tag }})'
-          prerelease: true
-          generate_release_notes: false
-          body_path: ${{ runner.temp }}/nightly-body.md
-          files: release-assets/*
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Create the release first, then upload assets ONE AT A TIME.
+          # The previous softprops/action-gh-release step uploaded everything
+          # concurrently, which intermittently fails the larger files with
+          # "Error creating asset temp dir" (GitHub upload-endpoint flake) and
+          # leaves a half-populated release behind. Sequential uploads with
+          # explicit retries plus the count check in the next step make a
+          # partial publish impossible to mistake for a good one.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Nightly ($TAG)" \
+              --prerelease \
+              --notes-file "$RUNNER_TEMP/nightly-body.md"
+          fi
+
+          upload_with_retry() {
+            local file="$1" attempt
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "$TAG" "$file" --clobber; then
+                echo "✅ uploaded $(basename "$file")"
+                return 0
+              fi
+              echo "⚠️  upload attempt $attempt failed for $(basename "$file"); retrying in 15s"
+              sleep 15
+            done
+            echo "::error::giving up on $(basename "$file") after 5 attempts"
+            return 1
+          }
+
+          for f in release-assets/*; do
+            [ -f "$f" ] || continue
+            upload_with_retry "$f"
+          done
+
+      - name: Verify nightly release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          expected="$(find release-assets -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          actual="$(gh release view "$TAG" --json assets --jq '.assets | length')"
+          echo "expected=$expected actual=$actual"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::nightly release is incomplete: $actual/$expected assets uploaded"
+            gh release view "$TAG" --json assets --jq '.assets[].name' || true
+            exit 1
+          fi

@@ -1,6 +1,58 @@
 import Fastify from 'fastify';
-import { describe, expect, it } from 'vitest';
-import { assertProductionSecurity, buildConfig, buildFastifyOptions, isInsecureDefaultSecret } from './config.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  assertProductionSecurity,
+  buildConfig,
+  buildFastifyOptions,
+  config,
+  isInsecureDefaultSecret,
+  resolveModelAvailabilityProbeTimeoutMs,
+  resolveProbeHeartbeatTimeoutMs,
+} from './config.js';
+
+describe('probe timeout resolution', () => {
+  const originalFirstByteTimeoutSec = config.proxyFirstByteTimeoutSec;
+  const originalModelProbeEnv = process.env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS;
+  const originalHeartbeatProbeEnv = process.env.PROBE_HEARTBEAT_TIMEOUT_MS;
+
+  afterEach(() => {
+    config.proxyFirstByteTimeoutSec = originalFirstByteTimeoutSec;
+    if (originalModelProbeEnv === undefined) delete process.env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS;
+    else process.env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS = originalModelProbeEnv;
+    if (originalHeartbeatProbeEnv === undefined) delete process.env.PROBE_HEARTBEAT_TIMEOUT_MS;
+    else process.env.PROBE_HEARTBEAT_TIMEOUT_MS = originalHeartbeatProbeEnv;
+  });
+
+  it('follows the runtime first-byte window instead of a fixed 30s', () => {
+    delete process.env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS;
+    delete process.env.PROBE_HEARTBEAT_TIMEOUT_MS;
+    config.proxyFirstByteTimeoutSec = 90;
+
+    expect(resolveModelAvailabilityProbeTimeoutMs()).toBe(90_000);
+    expect(resolveProbeHeartbeatTimeoutMs()).toBe(90_000);
+  });
+
+  it('tracks a later settings change without a restart', () => {
+    delete process.env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS;
+    config.proxyFirstByteTimeoutSec = 150;
+
+    expect(resolveModelAvailabilityProbeTimeoutMs()).toBe(150_000);
+  });
+
+  it('keeps an explicit env override authoritative', () => {
+    config.proxyFirstByteTimeoutSec = 90;
+    process.env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS = '15000';
+
+    expect(resolveModelAvailabilityProbeTimeoutMs()).toBe(15_000);
+  });
+
+  it('never resolves below the 3s floor', () => {
+    delete process.env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS;
+    config.proxyFirstByteTimeoutSec = 0;
+
+    expect(resolveModelAvailabilityProbeTimeoutMs()).toBe(30_000);
+  });
+});
 
 describe('buildConfig', () => {
   it('defaults to external listen host for server deployments', () => {

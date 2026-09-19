@@ -1,4 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
+import ActualModelTrigger from './ActualModelTrigger.js';
 import {
   avatarLetters,
   brandBadgeColors,
@@ -154,7 +155,15 @@ export function InlineBrandIcon({ model, size = 16 }: { model: string; size?: nu
   return <BrandGlyph brand={brand} size={size} fallbackText={brand.name} />;
 }
 
-export function ModelBadge({ model, style }: { model: string; style?: CSSProperties }) {
+export function ModelBadge({
+  model,
+  actualModel,
+  style,
+}: {
+  model: string;
+  actualModel?: string | null;
+  style?: CSSProperties;
+}) {
   const brand = getBrand(model);
   const cdn = useIconCdn();
   // Pass the model name as the perturbation seed so models sharing a brand
@@ -162,23 +171,29 @@ export function ModelBadge({ model, style }: { model: string; style?: CSSPropert
   const colors = brandBadgeColors(brand?.color, cdn as 'dark' | 'light', model);
 
   return (
-    <span style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 5,
-      padding: '2px 10px 2px 6px',
-      borderRadius: 'var(--radius-sm)',
-      fontSize: 12,
-      fontWeight: 500,
-      background: 'transparent',
-      color: colors.text,
-      border: `1px solid ${colors.border}`,
-      whiteSpace: 'nowrap',
-      ...style,
-    }}
-    >
-      <InlineBrandIcon model={model} size={14} />
-      {model}
+    // The route glyph lives OUTSIDE the chip: the chip keeps the geometry it has
+    // everywhere else (its asymmetric padding is tuned for the brand icon plus
+    // the label), and the glyph reads as an annotation about the model rather
+    // than part of its name.
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, ...style }}>
+      <span style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        padding: '2px 10px 2px 6px',
+        borderRadius: 'var(--radius-sm)',
+        fontSize: 12,
+        fontWeight: 500,
+        background: 'transparent',
+        color: colors.text,
+        border: `1px solid ${colors.border}`,
+        whiteSpace: 'nowrap',
+      }}
+      >
+        <InlineBrandIcon model={model} size={14} />
+        {model}
+      </span>
+      <ActualModelTrigger requestedModel={model} actualModel={actualModel} />
     </span>
   );
 }

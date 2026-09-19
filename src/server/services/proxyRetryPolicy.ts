@@ -1,5 +1,6 @@
 import {
   classifyProxyFailure,
+  isEmptyContentFailureText,
   shouldAbortSameSiteEndpointForFailure,
   shouldRetryChannelForFailure,
   RETRYABLE_TIMEOUT_PATTERNS as SHARED_RETRYABLE_TIMEOUT_PATTERNS,
@@ -8,15 +9,9 @@ import {
 // Re-export shared timeout patterns for existing importers.
 export const RETRYABLE_TIMEOUT_PATTERNS = SHARED_RETRYABLE_TIMEOUT_PATTERNS;
 
-/**
- * Failure text emitted by the proxy failure judge / stream transformers when an
- * upstream completes with no usable output. A text predicate (not an enum) is
- * deliberate: the same message crosses the judge, stream terminal results and
- * the retry policy without a shared failure-code type.
- */
-export function isEmptyContentFailureText(upstreamErrorText?: string | null): boolean {
-  return /empty content/i.test(upstreamErrorText || '');
-}
+// Re-export the empty-content predicate: it is defined next to the failure
+// taxonomy so the retry policy and the site-exclusion rule cannot drift apart.
+export { isEmptyContentFailureText };
 
 /**
  * Protocol / policy failures that will not improve by switching channel with the

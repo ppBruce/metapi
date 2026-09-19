@@ -6,6 +6,7 @@ import {
   CreateApiTokenOptions,
   SubscriptionPlanSummary,
   SubscriptionSummary,
+  type DeleteApiTokenResult,
   type SiteAnnouncement,
   UserInfo,
 } from './base.js';
@@ -875,9 +876,9 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     baseUrl: string,
     accessToken: string,
     tokenKey: string,
-  ): Promise<boolean> {
+  ): Promise<DeleteApiTokenResult> {
     const targetKey = this.normalizeTokenKeyForCompare(tokenKey);
-    if (!targetKey) return false;
+    if (!targetKey) return 'unconfirmed';
 
     const normalizedBase = normalizeBaseUrl(baseUrl);
     let tokenId: number | null = null;
@@ -885,11 +886,13 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       const items = await this.listApiKeys(normalizedBase, accessToken);
       tokenId = items.find((item) => this.normalizeTokenKeyForCompare(item.key) === targetKey)?.id || null;
     } catch {
-      return false;
+      return 'unconfirmed';
     }
 
-    // Upstream key already absent means local deletion is safe.
-    if (!tokenId) return true;
+    // `listApiKeys` is a single page (page_size=100), so it cannot prove that a
+    // missing key does not exist on a later page — keep the local row unless
+    // the key was actually found and revoked.
+    if (!tokenId) return 'unconfirmed';
 
     const endpoints = [
       `/api/v1/keys/${tokenId}`,
@@ -903,13 +906,13 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
           headers,
         });
         this.parseSub2ApiEnvelope<any>(res, endpoint);
-        return true;
+        return 'deleted';
       } catch {}
     }
 
     // Every credential/endpoint variant failed: leave a trace instead of a bare
     // null, otherwise the caller only sees "nothing worked".
     console.warn('[sub2api] deleteApiToken: all variants failed');
-    return false;
+    return 'unconfirmed';
   }
 }

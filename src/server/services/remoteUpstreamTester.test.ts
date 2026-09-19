@@ -24,6 +24,16 @@ describe('remoteUpstreamTester helpers', () => {
     }
   });
 
+  it('allows a host whose DNS answers mix a loopback hint with a public address', async () => {
+    // Live relay domains answer [`::1`, public] from the local resolver; the
+    // first-hit refusal blocked upstreams that are reachable just fine.
+    lookupMock.mockResolvedValueOnce([
+      { address: '::1', family: 6 },
+      { address: '203.0.113.10', family: 4 },
+    ]);
+    await expect(normalizeRemoteBaseUrl('https://mixed.example.com')).resolves.toBe('https://mixed.example.com');
+  });
+
   it('normalizes pasted leaf endpoints back to an API root', async () => {
     await expect(normalizeRemoteBaseUrl('https://api.example.com/v1/models')).resolves.toBe('https://api.example.com');
     await expect(normalizeRemoteBaseUrl('https://api.example.com/v1/chat/completions')).resolves.toBe('https://api.example.com');

@@ -657,7 +657,12 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     };
   });
 
-  const deleteAccountTokenById = async (tokenId: number): Promise<{ success: boolean; message?: string }> => {
+  type DeleteAccountTokenResult = {
+    success: boolean;
+    message?: string;
+  };
+
+  const deleteAccountTokenById = async (tokenId: number): Promise<DeleteAccountTokenResult> => {
     const row = await db.select()
       .from(schema.accountTokens)
       .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
@@ -683,13 +688,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
 
     if (shouldDeleteUpstream) {
       const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
-      console.log('[deleteAccountTokenById] Attempting upstream delete:', {
-        tokenId,
-        tokenName: existing.name,
-        siteUrl: site.url,
-        platform: site.platform,
-      });
-      const upstreamDeleted = await withAccountProxyOverride(
+      const upstreamResult = await withAccountProxyOverride(
         getProxyUrlFromExtraConfig(account.extraConfig),
         () => adapter!.deleteApiToken(
           site.url,
@@ -698,10 +697,20 @@ export async function accountTokensRoutes(app: FastifyInstance) {
           platformUserId,
         ),
       );
-      console.log('[deleteAccountTokenById] Upstream delete result:', { tokenId, upstreamDeleted });
-      if (!upstreamDeleted) {
-        console.warn('[deleteAccountTokenById] Upstream delete failed, but continuing with local delete for tokenId:', tokenId);
-        // 站点删除失败也继续删除本地记录（可能是令牌在站点上已不存在）
+      // 'deleted'         — the site revoked it.
+      // 'verified-absent' — the site's token list was fully enumerated and this
+      //                     key is not in it, so removing the local row cannot
+      //                     orphan a live credential.
+      // Anything else is 'unconfirmed': the site never told us either way
+      // (unreachable, or a masked/paginated list). Keep the row — deleting it
+      // while the token may still exist upstream silently loses track of a live
+      // credential — and fail closed for any value the adapter did not
+      // explicitly stand behind.
+      if (upstreamResult !== 'deleted' && upstreamResult !== 'verified-absent') {
+        return {
+          success: false,
+          message: '站点未确认该令牌是否已删除（可能仍然存在）；本地记录未删除',
+        };
       }
     }
 

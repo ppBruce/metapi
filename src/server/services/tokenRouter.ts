@@ -2284,6 +2284,34 @@ export class TokenRouter {
         // Re-verify in the background; never throw into the request path.
         void refreshBalance(account.id).catch(() => {});
       }
+      // Park the channel the same way recordProbeFailure does for a probe that
+      // discovers exhaustion: failCount/consecutiveFailCount/cooldownLevel all
+      // zero plus a long cooldownUntil, which isProviderDirectedCooldown reads
+      // as "the provider parked this, probing cannot heal it". Only the probe
+      // path used to write that shape, so a REAL request that hit exhaustion
+      // left behind an ordinary fibonacci cooldown: the channel stayed in the
+      // recovery-probe pool and kept taking traffic until a probe happened to
+      // rediscover the same exhaustion. Exhaustion is upstream-side state — a
+      // recharge or an operator is the only thing that clears it — so both
+      // paths must reach the same verdict.
+      const providerCooldownUntil = new Date(nowMs + QUOTA_EXHAUSTED_COOLDOWN_MS).toISOString();
+      await db.update(schema.routeChannels).set({
+        failCount: 0,
+        lastFailAt: nowIso,
+        consecutiveFailCount: 0,
+        cooldownUntil: providerCooldownUntil,
+        cooldownLevel: 0,
+      }).where(inArray(schema.routeChannels.id, affectedChannelIds)).run();
+      for (const affectedChannelId of affectedChannelIds) {
+        patchCachedChannel(affectedChannelId, (channel) => {
+          channel.failCount = 0;
+          channel.lastFailAt = nowIso;
+          channel.consecutiveFailCount = 0;
+          channel.cooldownUntil = providerCooldownUntil;
+          channel.cooldownLevel = 0;
+        });
+      }
+      invalidateRouteScopedCache(route.id);
     }
   }
 

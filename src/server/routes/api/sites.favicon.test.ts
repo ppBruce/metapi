@@ -21,8 +21,17 @@ describe('site favicon proxy routing', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   const oldDataDir = process.env.DATA_DIR;
+  // The icon fetch falls back to the SYSTEM proxy when a site has none, so a
+  // developer shell that exports `https_proxy` (for curl/git) would otherwise
+  // decide which branch these cases exercise. Clear every spelling for the whole
+  // file and restore it afterwards.
+  const PROXY_ENV_NAMES = [
+    'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy',
+  ] as const;
+  const originalProxyEnv = new Map<string, string | undefined>();
 
   beforeAll(async () => {
+    for (const name of PROXY_ENV_NAMES) originalProxyEnv.set(name, process.env[name]);
     process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'metapi-favicon-routing-'));
     await import('../../db/migrate.js');
     ({ db, schema } = await import('../../db/index.js'));
@@ -31,8 +40,9 @@ describe('site favicon proxy routing', () => {
   });
 
   beforeEach(async () => {
+    for (const name of PROXY_ENV_NAMES) delete process.env[name];
     vi.restoreAllMocks();
-    vi.spyOn(dns, 'lookup').mockResolvedValue({ address: '93.184.216.34', family: 4 });
+    vi.spyOn(dns, 'lookup').mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     await db.delete(schema.sites).run();
     (await import('../../services/iconProxyService.js')).__resetIconCacheForTests();
     (await import('../../services/siteProxy.js')).invalidateSiteProxyCache();
@@ -48,6 +58,11 @@ describe('site favicon proxy routing', () => {
     vi.unstubAllGlobals();
     await app.close();
     (await import('../../services/siteProxy.js')).stopDispatcherCacheSweep();
+    for (const name of PROXY_ENV_NAMES) {
+      const original = originalProxyEnv.get(name);
+      if (original === undefined) delete process.env[name];
+      else process.env[name] = original;
+    }
     if (oldDataDir === undefined) delete process.env.DATA_DIR;
     else process.env.DATA_DIR = oldDataDir;
   });
@@ -68,7 +83,9 @@ describe('site favicon proxy routing', () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toBe(svg);
     const { ProxyAgent } = await import('undici');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Page first (the mock answers every URL with an image, so the document is
+    // not HTML and declares nothing), then the conventional /favicon.ico.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[0][1].dispatcher).toBeInstanceOf(ProxyAgent);
   });
 
@@ -103,7 +120,8 @@ describe('site favicon proxy routing', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.body).toBe(svg);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // page (404) -> /favicon.ico (307) -> /favicon.ico?ready=1 (200)
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     const { ProxyAgent } = await import('undici');
     for (const [, init] of fetchMock.mock.calls) {
       expect(init.dispatcher).toBeInstanceOf(ProxyAgent);
@@ -126,7 +144,9 @@ describe('site favicon proxy routing', () => {
 
     const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fsite.example.com');
     expect(response.statusCode).toBe(200);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // page (302 -> cdn) then /favicon.ico (302 -> cdn); the page hop returns an
+    // image, so nothing is parsed out of it.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     const { ProxyAgent } = await import('undici');
     const [, cdnInit] = fetchMock.mock.calls[1];
     expect(cdnInit.dispatcher).toBeInstanceOf(ProxyAgent);
@@ -155,7 +175,9 @@ describe('site favicon proxy routing', () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers['x-favicon-source']).toBe('https://cdn.example.com/logo.svg');
     const { ProxyAgent } = await import('undici');
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    // Exactly two requests: the document, then the icon it declares. No static
+    // path is guessed first, and none is guessed afterwards either.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     for (const [, init] of fetchMock.mock.calls) expect(init.dispatcher).toBeInstanceOf(ProxyAgent);
   });
 
@@ -168,7 +190,8 @@ describe('site favicon proxy routing', () => {
 
     const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fsite.example.com');
     expect(response.statusCode).toBe(404);
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    // page + /favicon.ico + the four non-standard compatibility paths
+    expect(fetchMock).toHaveBeenCalledTimes(6);
     const { ProxyAgent } = await import('undici');
     for (const [, init] of fetchMock.mock.calls) expect(init.dispatcher).toBeInstanceOf(ProxyAgent);
   });
@@ -179,8 +202,65 @@ describe('site favicon proxy routing', () => {
     }).run();
     const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fsite.example.com');
     expect(response.statusCode).toBe(200);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[0][1].dispatcher).toBeUndefined();
+  });
+
+  it('falls back to the system proxy when a site has no proxy of its own', async () => {
+    await db.insert(schema.sites).values({
+      name: 'sys-proxy-site', url: 'https://sysproxy.example.com', platform: 'new-api',
+    }).run();
+    // Without this the forced-direct global dispatcher (siteProxy) wins and an
+    // upstream only reachable through the host proxy never answers: the lookup
+    // then degrades to a guessed path instead of the declared icon.
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7897';
+    try {
+      const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fsysproxy.example.com');
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock.mock.calls[0][1].dispatcher).toBeDefined();
+    } finally {
+      delete process.env.HTTPS_PROXY;
+    }
+  });
+
+  it('falls back to the system proxy when a site has no proxy of its own', async () => {
+    await db.insert(schema.sites).values({
+      name: 'sys-proxy-site', url: 'https://sysproxy.example.com', platform: 'new-api',
+    }).run();
+    // Without this the forced-direct global dispatcher (siteProxy) wins and an
+    // upstream only reachable through the host proxy never answers: the lookup
+    // then degrades to a guessed path instead of the declared icon.
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7897';
+    try {
+      const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fsysproxy.example.com');
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock.mock.calls[0][1].dispatcher).toBeDefined();
+    } finally {
+      delete process.env.HTTPS_PROXY;
+    }
+  });
+
+  it('does not flap on a host whose DNS returns a loopback address alongside a public one', async () => {
+    // Observed live: api.astrdark.cyou resolved to [`::1`, `221.228.32.13`];
+    // resolving only the `::1` makes the icon guard skip the declared icons and
+    // the lookup degrades to a guessed path while the fetch itself succeeds.
+    await db.insert(schema.sites).values({
+      name: 'mixed-address-site', url: 'https://lookback.example.com', platform: 'new-api',
+    }).run();
+    // Override the global mock for this test: the site's host resolves to
+    // both a loopback and a public address.
+    (dns.lookup as any).mockImplementationOnce(async (host: string, opts?: any) => {
+      if (host === 'lookback.example.com' && opts?.all) {
+        return [
+          { address: '::1', family: 6 },
+          { address: '93.184.216.34', family: 4 },
+        ];
+      }
+      return [{ address: '93.184.216.34', family: 4 }];
+    });
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Flookback.example.com');
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['x-favicon-source']).not.toBeUndefined();
   });
 
   it('does not reuse a cached direct miss after the site proxy changes', async () => {
@@ -198,7 +278,8 @@ describe('site favicon proxy routing', () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers['x-favicon-cache']).toBe('MISS');
     expect((await app.inject(requestUrl)).headers['x-favicon-cache']).toBe('HIT');
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    // 6 misses while direct, then page + .ico through the proxy
+    expect(fetchMock).toHaveBeenCalledTimes(8);
   });
 
   it('rejects a private redirect target even for a configured public site', async () => {
@@ -253,5 +334,157 @@ describe('site favicon proxy routing', () => {
     const response = await app.inject(`/api/site-favicon?url=https%3A%2F%2Fother.example.com&siteId=${site.id}`);
     expect(response.statusCode).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it('prefers the icon the page declares over a conventional /favicon.ico', async () => {
+    await db.insert(schema.sites).values({
+      name: 'declared-site', url: 'https://declared.example.com', platform: 'new-api',
+      proxyUrl: 'http://127.0.0.1:9876',
+    }).run();
+    fetchMock.mockImplementation(async (url) => {
+      if (String(url) === 'https://declared.example.com/') {
+        return new Response(
+          '<link rel="icon" sizes="16x16" href="/small.png">'
+          + '<link rel="icon" type="image/svg+xml" sizes="any" href="/brand.svg">',
+          { headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+      // A perfectly usable legacy icon that must NOT win over the declared SVG.
+      if (String(url) === 'https://declared.example.com/favicon.ico') {
+        return new Response('ico', { headers: { 'content-type': 'image/x-icon' } });
+      }
+      if (String(url) === 'https://declared.example.com/brand.svg') {
+        return new Response(svg, { headers: { 'content-type': 'image/svg+xml' } });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fdeclared.example.com');
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe(svg);
+    expect(response.headers['x-favicon-source']).toBe('https://declared.example.com/brand.svg');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses an inline declared icon instead of probing paths', async () => {
+    await db.insert(schema.sites).values({
+      name: 'inline-site', url: 'https://inline.example.com', platform: 'new-api',
+      proxyUrl: 'http://127.0.0.1:9876',
+    }).run();
+    const inline = 'data:image/png;base64,' + Buffer.from('inline-bytes').toString('base64');
+    fetchMock.mockImplementation(async (url) => String(url) === 'https://inline.example.com/'
+      ? new Response(`<link rel="icon" href="${inline}">`, {
+        headers: { 'content-type': 'text/html' },
+      })
+      : new Response('', { status: 404 }));
+
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Finline.example.com');
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe('inline-bytes');
+    expect(response.headers['x-favicon-source']).toBe('data:uri');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('probes non-standard logo paths only after the page and /favicon.ico fail', async () => {
+    await db.insert(schema.sites).values({
+      name: 'legacy-site', url: 'https://legacy.example.com', platform: 'new-api',
+      proxyUrl: 'http://127.0.0.1:9876',
+    }).run();
+    fetchMock.mockImplementation(async (url) => String(url) === 'https://legacy.example.com/favicon.png'
+      ? new Response(svg, { headers: { 'content-type': 'image/svg+xml' } })
+      : new Response('', { status: 404 }));
+
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Flegacy.example.com');
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['x-favicon-source']).toBe('/favicon.png');
+    // page, /favicon.ico, then the first compatibility candidate
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('serves a declared oversized inline icon instead of an undeclared /favicon.ico', async () => {
+    await db.insert(schema.sites).values({
+      name: 'huge-inline-site', url: 'https://huge.example.com', platform: 'new-api',
+      proxyUrl: 'http://127.0.0.1:9876',
+    }).run();
+    // 200KB of base64 is a plausible-looking upstream mistake (observed live).
+    const bytes = Buffer.alloc(200 * 1024, 7);
+    const huge = 'data:image/jpeg;base64,' + bytes.toString('base64');
+    fetchMock.mockImplementation(async (url) => {
+      if (String(url) === 'https://huge.example.com/') {
+        return new Response(`<link rel="icon" href="${huge}">`, {
+          headers: { 'content-type': 'text/html' },
+        });
+      }
+      // A legacy icon at the conventional path that must NOT outrank what the
+      // page actually declares — the browser shows the declared one too.
+      if (String(url) === 'https://huge.example.com/favicon.ico') {
+        return new Response('ico', { headers: { 'content-type': 'image/x-icon' } });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fhuge.example.com');
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['x-favicon-source']).toBe('data:uri');
+    expect(response.rawPayload.equals(bytes)).toBe(true);
+    // page only: a declared icon never falls through to path guessing.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The deferral must not lengthen the browser cache: one hour, like any
+    // other icon this proxy serves.
+    expect(response.headers['cache-control']).toBe('public, max-age=3600');
+  });
+
+  it('lets a declared URL icon win over an oversized inline one', async () => {
+    await db.insert(schema.sites).values({
+      name: 'inline-only-site', url: 'https://inline-only.example.com', platform: 'new-api',
+      proxyUrl: 'http://127.0.0.1:9876',
+    }).run();
+    const huge = 'data:image/jpeg;base64,' + Buffer.alloc(120 * 1024, 9).toString('base64');
+    fetchMock.mockImplementation(async (url) => {
+      if (String(url) === 'https://inline-only.example.com/') {
+        return new Response(
+          `<link rel="icon" href="${huge}"><link rel="icon" type="image/svg+xml" href="/brand.svg">`,
+          { headers: { 'content-type': 'text/html' } },
+        );
+      }
+      if (String(url) === 'https://inline-only.example.com/brand.svg') {
+        return new Response(svg, { headers: { 'content-type': 'image/svg+xml' } });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Finline-only.example.com');
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe(svg);
+    expect(response.headers['x-favicon-source']).toBe('https://inline-only.example.com/brand.svg');
+    // page + the declared URL icon; the deferred blob is never decoded into a
+    // response while a real URL icon is available.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('caps how large a deferred inline icon may be', async () => {
+    await db.insert(schema.sites).values({
+      name: 'absurd-inline-site', url: 'https://absurd.example.com', platform: 'new-api',
+      proxyUrl: 'http://127.0.0.1:9876',
+    }).run();
+    // Above the 512KB ceiling: a page that inlines a whole screenshot as its icon.
+    const absurd = 'data:image/png;base64,' + Buffer.alloc(600 * 1024, 3).toString('base64');
+    fetchMock.mockImplementation(async (url) => {
+      if (String(url) === 'https://absurd.example.com/') {
+        return new Response(`<link rel="icon" href="${absurd}">`, {
+          headers: { 'content-type': 'text/html' },
+        });
+      }
+      if (String(url) === 'https://absurd.example.com/favicon.ico') {
+        return new Response('ico', { headers: { 'content-type': 'image/x-icon' } });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fabsurd.example.com');
+    expect(response.statusCode).toBe(200);
+    // Over the ceiling the blob is refused outright and the lookup keeps going
+    // instead of streaming a screenshot to every client.
+    expect(response.body).toBe('ico');
+    expect(response.headers['x-favicon-source']).toBe('https://absurd.example.com/favicon.ico');
   });
 });
