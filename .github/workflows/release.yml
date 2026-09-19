@@ -237,6 +237,11 @@ jobs:
             sleep 90
           done
 
+      - name: Disable Spotlight indexing (keeps hdiutil detach from failing with "Resource busy")
+        if: startsWith(matrix.platform, 'mac-')
+        shell: bash
+        run: sudo mdutil -a -i off
+
       - name: Build desktop artifacts (macOS)
         if: startsWith(matrix.platform, 'mac-')
         shell: bash
