@@ -7,6 +7,7 @@ import { getOAuthProviderDefinition } from './oauth/providers.js';
 import { CLAUDE_DEFAULT_ANTHROPIC_VERSION } from './oauth/claudeProvider.js';
 import {
   ANTIGRAVITY_DAILY_UPSTREAM_BASE_URL,
+  ANTIGRAVITY_MODELS_USER_AGENT,
   ANTIGRAVITY_SANDBOX_DAILY_UPSTREAM_BASE_URL,
   ANTIGRAVITY_UPSTREAM_BASE_URL,
 } from './oauth/antigravityProvider.js';
@@ -15,7 +16,6 @@ import {
   GEMINI_CLI_REQUIRED_SERVICE,
   GEMINI_CLI_USER_AGENT,
 } from './oauth/geminiCliProvider.js';
-import { antigravityUserAgent } from '../shared/antigravityVersion.js';
 
 type PlatformDiscoverySite = typeof schema.sites.$inferSelect;
 type PlatformDiscoveryAccount = typeof schema.accounts.$inferSelect;
@@ -245,7 +245,7 @@ export async function discoverAntigravityModelsFromCloud(input: {
               Authorization: `Bearer ${accessToken}`,
               Accept: 'application/json',
               'Content-Type': 'application/json',
-              'User-Agent': antigravityUserAgent(),
+              'User-Agent': ANTIGRAVITY_MODELS_USER_AGENT,
             },
             body: JSON.stringify(requestBody),
           }),

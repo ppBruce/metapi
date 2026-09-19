@@ -73,34 +73,9 @@ function partComparableShape(value: GeminiRecord & { text: string }): string {
   return stableSerialize(rest);
 }
 
-/**
- * Upstream `/v1internal:*` streams mix snake_case and camelCase spellings of
- * the same part fields. Normalize to the camelCase form the Gemini API
- * documents, so downstream converters see one spelling and so that two chunks
- * differing only in spelling still coalesce in `appendPart`.
- */
-function normalizePartFieldCasing(part: GeminiRecord): GeminiRecord {
-  const aliases: Array<[snakeCase: string, camelCase: string]> = [
-    ['thought_signature', 'thoughtSignature'],
-    ['inline_data', 'inlineData'],
-  ];
-
-  let normalized = part;
-  for (const [snakeCase, camelCase] of aliases) {
-    if (!(snakeCase in normalized)) continue;
-    const { [snakeCase]: aliased, ...rest } = normalized;
-    normalized = rest;
-    // An explicit camelCase value already present wins over the alias.
-    if (normalized[camelCase] === undefined && aliased !== undefined) {
-      normalized[camelCase] = aliased;
-    }
-  }
-  return normalized;
-}
-
 function appendPart(target: GeminiRecord[], incoming: unknown): void {
   if (!isRecord(incoming)) return;
-  const next = normalizePartFieldCasing(cloneJsonValue(incoming));
+  const next = cloneJsonValue(incoming);
   if (isTextPart(next)) {
     for (let index = target.length - 1; index >= 0; index -= 1) {
       const existing = target[index];

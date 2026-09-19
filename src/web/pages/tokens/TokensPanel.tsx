@@ -462,9 +462,9 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange, siteId:
 
   const confirmDelete = async () => {
     const target = deleteConfirm;
-    console.log('confirmDelete called, deleteConfirm state:', deleteConfirm);
+    console.log("confirmDelete called, deleteConfirm state:", deleteConfirm);
     if (!target?.tokenId) {
-      console.log('confirmDelete: target.tokenId is missing, returning early');
+      console.log("confirmDelete: target.tokenId is missing, returning early");
       return;
     }
 
@@ -1333,7 +1333,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange, siteId:
                           ) : null}
                           <button
                             onClick={() => {
-                              console.log('Delete button clicked, token:', { id: token.id, name: token.name });
+                              console.log("Delete button clicked, token:", { id: token.id, name: token.name });
                               setDeleteConfirm({ mode: 'single', tokenId: token.id, tokenName: token.name || '' });
                             }}
                             disabled={!!rowLoading[`${loadingPrefix}-delete`]}
@@ -1462,7 +1462,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange, siteId:
                         ) : null}
                         <button
                           onClick={() => {
-                              console.log('Delete button clicked, token:', { id: token.id, name: token.name });
+                              console.log("Delete button clicked, token:", { id: token.id, name: token.name });
                               setDeleteConfirm({ mode: 'single', tokenId: token.id, tokenName: token.name || '' });
                             }}
                           disabled={!!rowLoading[`${loadingPrefix}-delete`]}
