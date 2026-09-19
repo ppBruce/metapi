@@ -26,13 +26,17 @@ export type IconPayload = {
 type CacheEntry = IconPayload & { expiresAt: number };
 
 /**
- * One hour, shared by the in-process cache and the `Cache-Control` both icon
- * routes send, so a browser and the server can never disagree about how long an
- * icon may be served, and a resolution-rule change here ages out within the
- * hour instead of a full day.
+ * Two layers, deliberately different:
+ * - the BROWSER header stays short (1h): a client's stale-icon window remains
+ *   small and self-heals without a hard refresh, and the hourly re-request is
+ *   answered from the in-process cache in ~ms.
+ * - the SERVER cache is long (12h): a miss costs a full page fetch of the
+ *   upstream (observed: a 575KB document taking ~6s through the host proxy),
+ *   while favicon content almost never changes. The cache is in-memory, so any
+ *   restart/deploy ages every entry out anyway — rule changes apply then.
  */
 export const ICON_HTTP_MAX_AGE_SECONDS = 60 * 60;
-const CACHE_TTL_MS = ICON_HTTP_MAX_AGE_SECONDS * 1000;
+const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 512 * 1024;
