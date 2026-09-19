@@ -16,14 +16,8 @@ function resolvePath(action: ProviderAction): string {
  */
 export function resolveAntigravityUpstreamModelName(modelName: string): string {
   const normalized = asTrimmedString(modelName);
-  const tieredFlash = normalized.match(/^(gemini-[0-9]+(?:\.[0-9]+)?-flash)-(high|medium|low|extra-low|tiered)$/i);
-  if (!tieredFlash) return normalized;
-  // AG's newer high-thinking aliases are backed by the dynamic `tiered`
-  // entities (for example gemini-3.8-flash-tiered), while older low/medium
-  // names are accepted as their base model IDs.
-  return tieredFlash[2].toLowerCase() === 'high'
-    ? `${tieredFlash[1]}-tiered`
-    : tieredFlash[1];
+  const tieredFlash = normalized.match(/^(gemini-[0-9]+(?:\.[0-9]+)?-flash)-(?:high|medium|low|extra-low|tiered)$/i);
+  return tieredFlash?.[1] || normalized;
 }
 
 export const antigravityProviderProfile: ProviderProfile = {
