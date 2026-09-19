@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { BrandGlyph, brandBadgeColors, clampBadgeColor, getBrand, hashColor, perturbBadgeColor, useIconCdn } from './BrandIcon.js';
 
@@ -92,6 +92,20 @@ export function SiteIcon({
   const theme = useIconCdn() as 'dark' | 'light';
   const [faviconLum, setFaviconLum] = useState<number | null>(null);
 
+  // When a site's own favicon is unreachable (e.g. a relay that only exposes
+  // its API through a tunnel), derive a brand icon from the site name: the last
+  // meaningful token ("CAIC-NewAPI" -> "newapi"). The brand-icon route validates
+  // the key and 404s unknown brands, so a miss just falls through to the glyph.
+  const brandFallbackKey = useMemo(() => {
+    if (!faviconFailed) return null;
+    const tokens = String(name || '')
+      .split(/[^a-zA-Z0-9]+/)
+      .filter((token) => token.length >= 3)
+      .map((token) => token.toLowerCase());
+    const candidate = tokens[tokens.length - 1];
+    return candidate && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(candidate) ? candidate : null;
+  }, [faviconFailed, name]);
+
   // Dark logo on a dark theme: wrap the img in a light background circle so it
   // doesn't vanish (like DeepSeek's website does for its black whale logo).
   const needsLightBg = theme === 'dark' && faviconLum !== null && faviconLum < 0.15;
@@ -144,6 +158,18 @@ export function SiteIcon({
   const brand = getBrand(name);
   if (brand) {
     return <BrandGlyph brand={brand} size={size} fallbackText={brand.name} />;
+  }
+  if (brandFallbackKey) {
+    return (
+      <img
+        src={`/api/brand-icon?icon=${encodeURIComponent(brandFallbackKey)}&theme=${theme}`}
+        width={size}
+        height={size}
+        alt=""
+        aria-hidden="true"
+        style={{ width: size, height: size, borderRadius: 4, objectFit: 'contain', flexShrink: 0, display: 'inline-block', opacity: 1 }}
+      />
+    );
   }
   const fallback = String(name || '').trim();
   const letter = fallback ? fallback.replace(/[-_/.\s]/g, '').charAt(0).toUpperCase() || '?' : '?';
