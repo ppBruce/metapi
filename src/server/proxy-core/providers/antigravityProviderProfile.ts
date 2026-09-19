@@ -9,23 +9,11 @@ function resolvePath(action: ProviderAction): string {
   return '/v1internal:generateContent';
 }
 
-/**
- * Antigravity exposes thinking tiers as client-facing aliases, while its
- * runtime endpoint accepts the base Gemini model id. Keep the alias in the
- * route/request context and translate only the upstream envelope field.
- */
-export function resolveAntigravityUpstreamModelName(modelName: string): string {
-  const normalized = asTrimmedString(modelName);
-  const tieredFlash = normalized.match(/^(gemini-[0-9]+(?:\.[0-9]+)?-flash)-(?:high|medium|low|extra-low|tiered)$/i);
-  return tieredFlash?.[1] || normalized;
-}
-
 export const antigravityProviderProfile: ProviderProfile = {
   id: 'antigravity',
   prepareRequest(input: PrepareProviderRequestInput): PreparedProviderRequest {
     const action = resolveAntigravityProviderAction(input.action, input.stream, input.modelName);
     const projectId = asTrimmedString(input.oauthProjectId);
-    const upstreamModelName = resolveAntigravityUpstreamModelName(input.modelName);
     return {
       path: resolvePath(action),
       headers: {
@@ -36,12 +24,12 @@ export const antigravityProviderProfile: ProviderProfile = {
       },
       body: {
         project: projectId,
-        model: upstreamModelName,
+        model: input.modelName,
         request: input.body,
       },
       runtime: {
         executor: 'antigravity',
-        modelName: upstreamModelName,
+        modelName: input.modelName,
         stream: input.stream,
         oauthProjectId: projectId,
         action,
