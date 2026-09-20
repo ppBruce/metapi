@@ -3,8 +3,26 @@
  * @Project_description: Metapi 站点管理页
  * @Description: 代码是我抄的，不会也是真的
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { api, type OAuthProviderInfo } from '../api.js';
 import { getAuthToken } from '../authSession.js';
 import { getBrand } from '../components/BrandIcon.js';
@@ -25,7 +43,7 @@ import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
 import {SITE_PLATFORM_OPTIONS, SiteBalanceDisplay, buildSiteConnectionSearchParams, getConfiguredSiteApiEndpoints, platformBadgeClass, resolveSiteCreatedSessionLabel} from './sites/sitePresentation.js';
 import { tr } from '../i18n.js';
-import { buildCustomReorderUpdates, buildUnpinMoveToFrontUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
+import { buildCustomDragReorderUpdates, buildUnpinMoveToFrontUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
 import {
   applyBrowserUaMode,
@@ -105,6 +123,110 @@ type SiteRow = {
   }>;
 };
 
+type SiteDropPosition = 'before' | 'after' | null;
+
+const SiteSortHandleContext = createContext<Pick<ReturnType<typeof useSortable>, 'attributes' | 'listeners' | 'setActivatorNodeRef'> | null>(null);
+
+function SiteDragHandle({ disabled = false }: { disabled?: boolean }) {
+  const sortable = useContext(SiteSortHandleContext);
+  if (!sortable) return null;
+
+  return (
+    <button
+      ref={sortable.setActivatorNodeRef}
+      type="button"
+      className="site-drag-handle"
+      disabled={disabled}
+      aria-label="拖拽调整站点顺序"
+      title="按住拖拽调整站点顺序"
+      {...sortable.attributes}
+      {...sortable.listeners}
+    >
+      <svg aria-hidden viewBox="0 0 16 16" width="14" height="14">
+        <circle cx="5" cy="3" r="1.2" />
+        <circle cx="11" cy="3" r="1.2" />
+        <circle cx="5" cy="8" r="1.2" />
+        <circle cx="11" cy="8" r="1.2" />
+        <circle cx="5" cy="13" r="1.2" />
+        <circle cx="11" cy="13" r="1.2" />
+      </svg>
+      <span>拖拽</span>
+    </button>
+  );
+}
+
+function SortableSiteTableRow({
+  id,
+  disabled,
+  dropPosition,
+  className,
+  rowRef,
+  children,
+}: {
+  id: number;
+  disabled: boolean;
+  dropPosition: SiteDropPosition;
+  className: string;
+  rowRef: (node: HTMLTableRowElement | null) => void;
+  children: ReactNode;
+}) {
+  const sortable = useSortable({ id, disabled });
+  const translatedTransform = sortable.transform
+    ? { ...sortable.transform, scaleX: 1, scaleY: 1 }
+    : null;
+
+  return (
+    <SiteSortHandleContext.Provider value={sortable}>
+      <tr
+        ref={(node) => {
+          sortable.setNodeRef(node);
+          rowRef(node);
+        }}
+        data-testid={`site-row-${id}`}
+        className={`${className} ${sortable.isDragging ? 'site-sort-dragging' : ''} ${dropPosition ? `site-sort-drop-${dropPosition}` : ''}`.trim()}
+        style={{
+          transform: CSS.Translate.toString(translatedTransform),
+          transition: sortable.transition || undefined,
+          position: 'relative',
+          zIndex: sortable.isDragging ? 2 : undefined,
+        }}
+      >
+        {children}
+      </tr>
+    </SiteSortHandleContext.Provider>
+  );
+}
+
+function SortableSiteMobileItem({
+  id,
+  disabled,
+  dropPosition,
+  children,
+}: {
+  id: number;
+  disabled: boolean;
+  dropPosition: SiteDropPosition;
+  children: ReactNode;
+}) {
+  const sortable = useSortable({ id, disabled });
+  return (
+    <SiteSortHandleContext.Provider value={sortable}>
+      <div
+        ref={sortable.setNodeRef}
+        className={`${sortable.isDragging ? 'site-sort-dragging' : ''} ${dropPosition ? `site-sort-drop-${dropPosition}` : ''}`.trim()}
+        style={{
+          transform: CSS.Translate.toString(sortable.transform),
+          transition: sortable.transition || undefined,
+          position: 'relative',
+          zIndex: sortable.isDragging ? 2 : undefined,
+        }}
+      >
+        {children}
+      </div>
+    </SiteSortHandleContext.Provider>
+  );
+}
+
 
 export default function Sites() {
   const location = useLocation();
@@ -140,6 +262,8 @@ export default function Sites() {
   const [deleting, setDeleting] = useState<number | null>(null);
   const [togglingSiteId, setTogglingSiteId] = useState<number | null>(null);
   const [orderingSiteId, setOrderingSiteId] = useState<number | null>(null);
+  const [activeDragSiteId, setActiveDragSiteId] = useState<number | null>(null);
+  const [overDragSiteId, setOverDragSiteId] = useState<number | null>(null);
   const [pinningSiteId, setPinningSiteId] = useState<number | null>(null);
   const [expandedSiteIds, setExpandedSiteIds] = useState<number[]>([]);
   const [createdSiteForChoice, setCreatedSiteForChoice] = useState<{
@@ -163,6 +287,10 @@ export default function Sites() {
   const sitesTableWrapRef = useRef<HTMLDivElement | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
   const toast = useToast();
+  const siteSortSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
   const [disabledModels, setDisabledModels] = useState<string[]>([]);
   const [disabledModelInput, setDisabledModelInput] = useState('');
   const [disabledModelsLoading, setDisabledModelsLoading] = useState(false);
@@ -289,6 +417,29 @@ export default function Sites() {
     pagedItems: pagedSites,
     showControls: showSitePagination,
   } = useClientPagination(sortedSites, `${sortMode}:${sites.length}`, effectivePageSize);
+  const activeDragIndex = activeDragSiteId == null
+    ? -1
+    : pagedSites.findIndex((site) => site.id === activeDragSiteId);
+  const overDragIndex = overDragSiteId == null
+    ? -1
+    : pagedSites.findIndex((site) => site.id === overDragSiteId);
+
+  const getSiteDropPosition = (siteId: number): SiteDropPosition => {
+    if (activeDragIndex < 0 || overDragIndex < 0 || siteId !== overDragSiteId || siteId === activeDragSiteId) {
+      return null;
+    }
+    const activeSite = pagedSites[activeDragIndex];
+    const overSite = pagedSites[overDragIndex];
+    if (
+      !activeSite
+      || !overSite
+      || !!activeSite.isPinned !== !!overSite.isPinned
+      || (activeSite.status === 'disabled') !== (overSite.status === 'disabled')
+    ) {
+      return null;
+    }
+    return activeDragIndex < overDragIndex ? 'after' : 'before';
+  };
 
   // 页码持久化到 URL（?page=N），跳详情页返回后仍停留在原页。
   useEffect(() => {
@@ -948,17 +1099,54 @@ export default function Sites() {
     }
   };
 
-  const handleMoveCustomOrder = async (site: SiteRow, direction: 'up' | 'down') => {
-    const updates = buildCustomReorderUpdates(sites, site.id, direction);
+  const clearSiteDragState = () => {
+    setActiveDragSiteId(null);
+    setOverDragSiteId(null);
+  };
+
+  const handleSiteDragStart = (event: DragStartEvent) => {
+    const siteId = Number(event.active.id);
+    setActiveDragSiteId(Number.isFinite(siteId) ? siteId : null);
+    setOverDragSiteId(Number.isFinite(siteId) ? siteId : null);
+  };
+
+  const handleSiteDragOver = (event: DragOverEvent) => {
+    const siteId = event.over ? Number(event.over.id) : null;
+    setOverDragSiteId(siteId != null && Number.isFinite(siteId) ? siteId : null);
+  };
+
+  const handleSiteDragEnd = async (event: DragEndEvent) => {
+    const activeId = Number(event.active.id);
+    const overId = event.over ? Number(event.over.id) : null;
+    clearSiteDragState();
+    if (!Number.isFinite(activeId) || overId == null || !Number.isFinite(overId) || activeId === overId) return;
+
+    const activeSite = sites.find((site) => site.id === activeId);
+    const overSite = sites.find((site) => site.id === overId);
+    if (!activeSite || !overSite) return;
+    if (
+      !!activeSite.isPinned !== !!overSite.isPinned
+      || (activeSite.status === 'disabled') !== (overSite.status === 'disabled')
+    ) {
+      toast.info('置顶、普通和禁用站点需在各自分组内排序');
+      return;
+    }
+
+    const updates = buildCustomDragReorderUpdates(sites, activeId, overId);
     if (updates.length === 0) return;
 
-    setOrderingSiteId(site.id);
+    const orderById = new Map(updates.map((update) => [update.id, update.sortOrder]));
+    setOrderingSiteId(activeId);
+    setSites((current) => current.map((site) => (
+      orderById.has(site.id) ? { ...site, sortOrder: orderById.get(site.id) } : site
+    )));
     try {
       await Promise.all(updates.map((update) => api.updateSite(update.id, { sortOrder: update.sortOrder })));
       await load();
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
       toast.error(eMessage || '更新排序失败');
+      await load();
     } finally {
       setOrderingSiteId(null);
     }
@@ -1887,13 +2075,28 @@ export default function Sites() {
 
       <div className="card" style={{ overflowX: 'auto', paddingBottom: 12 }}>
         {sites.length > 0 ? (
-          isMobile ? (
+          <DndContext
+            sensors={siteSortSensors}
+            collisionDetection={closestCenter}
+            onDragStart={handleSiteDragStart}
+            onDragOver={handleSiteDragOver}
+            onDragCancel={clearSiteDragState}
+            onDragEnd={handleSiteDragEnd}
+          >
+            <SortableContext items={pagedSites.map((site) => site.id)} strategy={verticalListSortingStrategy}>
+          {isMobile ? (
             <div className="mobile-card-list">
               {pagedSites.map((site) => {
                 const isExpanded = expandedSiteIds.includes(site.id);
                 return (
-                  <MobileCard
+                  <SortableSiteMobileItem
                     key={site.id}
+                    id={site.id}
+                    disabled={sortMode !== 'custom' || orderingSiteId !== null}
+                    dropPosition={getSiteDropPosition(site.id)}
+                  >
+                  <MobileCard
+                    headerActions={sortMode === 'custom' ? <SiteDragHandle disabled={orderingSiteId !== null} /> : null}
                     title={(
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                         <span>{site.name || '-'}</span>
@@ -2081,24 +2284,6 @@ export default function Sites() {
                           >
                             {pinningSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.isPinned ? '取消置顶' : '置顶')}
                           </button>
-                          {sortMode === 'custom' && (
-                            <>
-                              <button
-                                onClick={() => handleMoveCustomOrder(site, 'up')}
-                                disabled={orderingSiteId === site.id}
-                                className="btn btn-link btn-link-muted"
-                              >
-                                ↑ 上移
-                              </button>
-                              <button
-                                onClick={() => handleMoveCustomOrder(site, 'down')}
-                                disabled={orderingSiteId === site.id}
-                                className="btn btn-link btn-link-muted"
-                              >
-                                ↓ 下移
-                              </button>
-                            </>
-                          )}
                           <button
                             onClick={() => handleDelete(site)}
                             disabled={deleting === site.id}
@@ -2111,6 +2296,7 @@ export default function Sites() {
                       </div>
                     ) : null}
                   </MobileCard>
+                  </SortableSiteMobileItem>
                 );
               })}
             </div>
@@ -2132,10 +2318,12 @@ export default function Sites() {
               </thead>
               <tbody>
                 {pagedSites.map((site, i) => (
-                  <tr
+                  <SortableSiteTableRow
                     key={site.id}
-                    data-testid={`site-row-${site.id}`}
-                    ref={(node) => {
+                    id={site.id}
+                    disabled={sortMode !== 'custom' || orderingSiteId !== null}
+                    dropPosition={getSiteDropPosition(site.id)}
+                    rowRef={(node) => {
                       if (node) rowRefs.current.set(site.id, node);
                       else rowRefs.current.delete(site.id);
                     }}
@@ -2276,22 +2464,7 @@ export default function Sites() {
                           {pinningSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.isPinned ? '取消置顶' : '置顶')}
                         </button>
                         {sortMode === 'custom' && (
-                          <>
-                            <button
-                              onClick={() => handleMoveCustomOrder(site, 'up')}
-                              disabled={orderingSiteId === site.id}
-                              className="btn btn-link btn-link-muted"
-                            >
-                              ↑
-                            </button>
-                            <button
-                              onClick={() => handleMoveCustomOrder(site, 'down')}
-                              disabled={orderingSiteId === site.id}
-                              className="btn btn-link btn-link-muted"
-                            >
-                              ↓
-                            </button>
-                          </>
+                          <SiteDragHandle disabled={orderingSiteId !== null} />
                         )}
                         <button
                           onClick={() => handleOpenSiteApiKey(site)}
@@ -2315,12 +2488,14 @@ export default function Sites() {
                         </button>
                       </div>
                     </td>
-                  </tr>
+                  </SortableSiteTableRow>
                 ))}
               </tbody>
             </table>
             </div>
-          )
+          )}
+            </SortableContext>
+          </DndContext>
         ) : (
           <div className="empty-state">
             <svg className="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">

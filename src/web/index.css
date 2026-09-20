@@ -2380,6 +2380,81 @@ html[data-layout="desktop"] .main-content {
   font-size: 11px;
 }
 
+.site-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.site-drag-handle:hover:not(:disabled),
+.site-drag-handle:focus-visible {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 7%, var(--color-bg-card));
+  outline: none;
+}
+
+.site-drag-handle:active:not(:disabled) {
+  cursor: grabbing;
+}
+
+.site-drag-handle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.site-drag-handle svg {
+  flex: 0 0 auto;
+  fill: currentColor;
+}
+
+.site-sort-dragging {
+  opacity: 0.48;
+  filter: saturate(0.7);
+}
+
+.sites-table tr.site-sort-drop-before > td {
+  border-top: 3px solid var(--color-primary);
+}
+
+.sites-table tr.site-sort-drop-after > td {
+  border-bottom: 3px solid var(--color-primary);
+}
+
+.mobile-card-list > .site-sort-drop-before::before,
+.mobile-card-list > .site-sort-drop-after::after {
+  content: '';
+  position: absolute;
+  z-index: 3;
+  left: 4px;
+  right: 4px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+
+.mobile-card-list > .site-sort-drop-before::before {
+  top: -6px;
+}
+
+.mobile-card-list > .site-sort-drop-after::after {
+  bottom: -6px;
+}
+
 .token-table {
   width: 100%;
   border-collapse: collapse;

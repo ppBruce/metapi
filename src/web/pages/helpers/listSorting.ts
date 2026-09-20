@@ -81,6 +81,43 @@ export function buildCustomReorderUpdates<T extends SortableBase>(
   return updates;
 }
 
+export function buildCustomDragReorderUpdates<T extends SortableBase>(
+  items: T[],
+  activeId: number,
+  overId: number,
+): Array<{ id: number; sortOrder: number }> {
+  if (activeId === overId) return [];
+
+  const sorted = sortItemsForDisplay(items, 'custom', () => 0);
+  const active = sorted.find((item) => item.id === activeId);
+  const over = sorted.find((item) => item.id === overId);
+  if (!active || !over) return [];
+
+  const activeDisabled = active.status === 'disabled';
+  if (!!active.isPinned !== !!over.isPinned || activeDisabled !== (over.status === 'disabled')) {
+    return [];
+  }
+
+  const group = sorted.filter((item) => (
+    !!item.isPinned === !!active.isPinned
+    && (item.status === 'disabled') === activeDisabled
+  ));
+  const activeIndex = group.findIndex((item) => item.id === activeId);
+  const overIndex = group.findIndex((item) => item.id === overId);
+  if (activeIndex < 0 || overIndex < 0) return [];
+
+  const next = [...group];
+  const [moved] = next.splice(activeIndex, 1);
+  next.splice(overIndex, 0, moved);
+
+  return next.flatMap((item, index) => {
+    const previous = Number.isFinite(item.sortOrder as number)
+      ? Number(item.sortOrder)
+      : Number.MAX_SAFE_INTEGER;
+    return previous === index ? [] : [{ id: item.id, sortOrder: index }];
+  });
+}
+
 /**
  * When unpinning an item, place it at the front of the unpinned group
  * (sortOrder=0) and shift all existing unpinned items down by one so the
@@ -108,4 +145,3 @@ export function buildUnpinMoveToFrontUpdates<T extends SortableBase>(
   });
   return updates;
 }
-

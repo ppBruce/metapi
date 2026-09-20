@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildCustomReorderUpdates, buildUnpinMoveToFrontUpdates, sortItemsForDisplay, type SortMode } from './listSorting.js';
+import { buildCustomDragReorderUpdates, buildCustomReorderUpdates, buildUnpinMoveToFrontUpdates, sortItemsForDisplay, type SortMode } from './listSorting.js';
 
 type Item = {
   id: number;
   isPinned?: boolean | null;
   sortOrder?: number | null;
   balance?: number | null;
+  status?: string | null;
 };
 
 function ids(items: Item[]): number[] {
@@ -34,6 +35,30 @@ describe('sortItemsForDisplay', () => {
   it('sorts by balance asc while keeping pinned items first', () => {
     const sorted = sortItemsForDisplay(base, 'balance-asc', (item) => item.balance || 0);
     expect(ids(sorted)).toEqual([2, 4, 1, 3]);
+  });
+});
+
+describe('buildCustomDragReorderUpdates', () => {
+  const list: Item[] = [
+    { id: 10, isPinned: true, sortOrder: 0, status: 'active' },
+    { id: 11, isPinned: true, sortOrder: 1, status: 'active' },
+    { id: 20, isPinned: false, sortOrder: 0, status: 'active' },
+    { id: 21, isPinned: false, sortOrder: 1, status: 'active' },
+    { id: 22, isPinned: false, sortOrder: 2, status: 'active' },
+    { id: 30, isPinned: false, sortOrder: 0, status: 'disabled' },
+  ];
+
+  it('moves directly to the dropped position and normalizes the group', () => {
+    expect(buildCustomDragReorderUpdates(list, 20, 22)).toEqual([
+      { id: 21, sortOrder: 0 },
+      { id: 22, sortOrder: 1 },
+      { id: 20, sortOrder: 2 },
+    ]);
+  });
+
+  it('does not move across pinned or disabled group boundaries', () => {
+    expect(buildCustomDragReorderUpdates(list, 20, 10)).toEqual([]);
+    expect(buildCustomDragReorderUpdates(list, 20, 30)).toEqual([]);
   });
 });
 
