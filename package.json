@@ -99,6 +99,11 @@
     "ws": "^8.21.3",
     "zod": "^4.4.3"
   },
+  "overrides": {
+    "node-abi": "^4.33.0",
+    "ip-address": "^10.3.0",
+    "minimist": "^1.2.8"
+  },
   "devDependencies": {
     "@babel/eslint-parser": "^7.29.7",
     "@babel/preset-typescript": "^7.29.7",
@@ -137,10 +142,6 @@
     "vitepress-plugin-mermaid": "^2.0.17",
     "vitest": "^2.1.9",
     "wait-on": "^9.1.0"
-  },
-  "overrides": {
-    "node-abi": "^4.33.0",
-    "ip-address": "^10.3.0"
   },
   "author": {
     "name": "wyf9661",
