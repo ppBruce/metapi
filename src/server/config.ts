@@ -320,8 +320,21 @@ export function buildFastifyOptions(
     logger: true,
     // false | true | hop count — avoid unconditionally trusting client-supplied XFF.
     // Default preserves legacy trust-all (true); TRUST_PROXY=false disables; TRUST_PROXY_HOPS=N constrains.
+    //
+    // fastify >= 5.12 no longer accepts a bare number here: it types `trustProxy`
+    // as boolean | string | string[] | function and compiles a numeric value to
+    // "trust nothing" (GHSA-3m5p-2c4r-xxw2 — hop-count-only trust cannot validate
+    // the immediate peer, so a direct client could inject X-Forwarded-For and
+    // choose its own address). Passing the number through would therefore silently
+    // collapse every client to the proxy address and break IP allowlists, so the
+    // hop window is expressed explicitly instead, keeping the configured meaning.
+    // Note the residual caveat that motivated the upstream change: hop-count trust
+    // is only as strong as the assumption that nothing else can reach this port.
+    // Where the proxy addresses are known, prefer an explicit list over hops.
     trustProxy: appConfig.trustProxy
-      ? (appConfig.trustProxyHops ?? true)
+      ? (appConfig.trustProxyHops != null
+        ? (_address: string, hop: number) => hop < (appConfig.trustProxyHops as number)
+        : true)
       : false,
     bodyLimit: appConfig.requestBodyLimit,
   };
