@@ -29,7 +29,7 @@ import { BRAND_ICON_CDN_BASE, BRAND_ICON_VERSION } from '../../src/server/servic
 
 const OUTPUT = resolve(process.cwd(), 'src/server/shared/brandIconColors.ts');
 const ICONS_PACKAGE = '@lobehub/icons@5.18.0';
-const DECLARED_URL = `https://registry.npmmirror.com/@lobehub/icons/5.18.0/files/es/toc.json`;
+const DECLARED_URL = 'https://registry.npmmirror.com/@lobehub/icons/5.18.0/files/es/toc.json';
 
 /** Pixels below this alpha are anti-aliasing fringe and would wash the hue out. */
 const ALPHA_FLOOR = 140;
