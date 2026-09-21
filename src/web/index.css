@@ -1091,6 +1091,7 @@ html[data-layout="desktop"] .main-content {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  position: relative;
 }
 
 .mobile-card {
@@ -2066,6 +2067,12 @@ html[data-layout="desktop"] .main-content {
   min-width: 100%; /* prevent width jitter when rows change height and scrollbar appears/disappears */
 }
 
+/* Anchor for the cross-page drop bands, which are overlays and must not be
+   clipped by the table wrap's own horizontal scroll container. */
+.sites-sort-area {
+  position: relative;
+}
+
 .inventory-name-title {
   display: block;
   overflow: hidden;
@@ -2378,6 +2385,121 @@ html[data-layout="desktop"] .main-content {
   white-space: nowrap;
   padding: 3px 6px;
   font-size: 11px;
+}
+
+/* The whole row is the drag surface — no handle button. */
+.sites-table tbody tr.site-row-draggable {
+  cursor: grab;
+  touch-action: manipulation;
+}
+
+.sites-table tbody tr.site-row-draggable:active {
+  cursor: grabbing;
+}
+
+.mobile-card-list > .site-card-draggable {
+  cursor: grab;
+}
+
+/* While a drag is in flight the cursor must stay "grabbing" everywhere the
+   pointer can travel, not just over the dragged row. */
+body.site-drag-active,
+body.site-drag-active * {
+  cursor: grabbing !important;
+}
+
+/*
+ * The dragged row travels with the pointer at its own size — no scaling, no
+ * copy. The lift is a shadow plus a solid background, because a <tr> is
+ * transparent: without it the rows underneath bleed through while it moves.
+ * Nothing here changes layout, so the row's box stays exactly the same size.
+ */
+.sites-table tbody tr.site-sort-dragging > td {
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-bg-card));
+  box-shadow: 0 12px 26px -8px rgba(0, 0, 0, 0.38);
+}
+
+.mobile-card-list > .site-sort-dragging {
+  background: var(--color-bg-card);
+  box-shadow: 0 12px 26px -8px rgba(0, 0, 0, 0.38);
+}
+
+/* Moving at the pointer's own pace: the dragged row must not lag behind it. */
+.sites-table tbody tr.site-sort-dragging,
+.mobile-card-list > .site-sort-dragging {
+  transition: none;
+}
+
+.sites-table tr.site-sort-drop-before > td {
+  border-top: 3px solid var(--color-primary);
+}
+
+.sites-table tr.site-sort-drop-after > td {
+  border-bottom: 3px solid var(--color-primary);
+}
+
+.mobile-card-list > .site-sort-drop-before::before,
+.mobile-card-list > .site-sort-drop-after::after {
+  content: '';
+  position: absolute;
+  z-index: 3;
+  left: 4px;
+  right: 4px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+
+.mobile-card-list > .site-sort-drop-before::before {
+  top: -6px;
+}
+
+.mobile-card-list > .site-sort-drop-after::after {
+  bottom: -6px;
+}
+
+/* Cross-page drop bands.
+   Absolutely positioned overlays at the top/bottom edge of the list, so the
+   rows keep their measured positions while a drag is in flight (inserting them
+   into the flow mid-drag would shift every row and desync dnd-kit's rects).
+   They render only while a drag is in flight and only when the adjacent page's
+   boundary slot is reachable inside the dragged item's own group. */
+.site-page-drop-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  border: 1px dashed color-mix(in srgb, var(--color-primary) 55%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-bg-card));
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: auto;
+}
+
+.site-page-drop-band-prev {
+  top: -2px;
+}
+
+.site-page-drop-band-next {
+  bottom: -2px;
+}
+
+.site-page-drop-band.is-over {
+  border-style: solid;
+  background: color-mix(in srgb, var(--color-primary) 18%, var(--color-bg-card));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 22%, transparent);
+}
+
+.site-page-drop-band-label {
+  padding: 0 8px;
 }
 
 .token-table {

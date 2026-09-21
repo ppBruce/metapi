@@ -4,6 +4,7 @@ import {
   buildEventNavigationPath,
   buildSiteFocusPath,
   clearFocusParams,
+  buildSiteFocusSearch,
   readFocusAccountIntent,
   readFocusAnnouncementId,
   readFocusSiteId,
@@ -43,6 +44,14 @@ describe('navigationFocus helpers', () => {
     expect(clearFocusParams('?focusAnnouncementId=44&type=site_notice')).toBe('?type=site_notice');
     expect(clearFocusParams('?focusAccountId=2&openRebind=1&type=token')).toBe('?type=token');
     expect(clearFocusParams('?focusAccountId=2')).toBe('');
+  });
+
+  it('sets the focus flag and the landing page together', () => {
+    // A cross-page drop lands on the adjacent page: the URL must carry that page
+    // too, otherwise the page-sync effect drags the view back to the origin page.
+    expect(buildSiteFocusSearch('?page=2', 12, 1)).toBe('?page=1&focusSiteId=12');
+    expect(buildSiteFocusSearch('', 12, 1)).toBe('?focusSiteId=12&page=1');
+    expect(buildSiteFocusSearch('?page=2', 12)).toBe('?page=2&focusSiteId=12');
   });
 
   it('builds event navigation path by related entity', () => {
