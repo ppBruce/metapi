@@ -1,4 +1,5 @@
 import { stripTrailingSlashes } from '../urlNormalization.js';
+import { withSiteProxyRequestInit } from '../siteProxy.js';
 
 export type TitleHintPlatform =
   | 'sub2api'
@@ -44,11 +45,11 @@ function extractHtmlTitle(html: string): string {
 async function detectPlatformByTitleOnce(base: string): Promise<TitleHintPlatform | undefined> {
   try {
     const { fetch } = await import('undici');
-    const res = await fetch(`${base}/`, {
+    const res = await fetch(`${base}/`, await withSiteProxyRequestInit(`${base}/`, {
       method: 'GET',
       headers: { Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' },
       signal: AbortSignal.timeout(5000),
-    });
+    }));
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
     if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
       return undefined;

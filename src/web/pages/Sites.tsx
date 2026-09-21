@@ -4,6 +4,29 @@
  * @Description: 代码是我抄的，不会也是真的
  */
 import { createContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+
+
+/** Debounce before auto-detecting while the operator is still typing. */
+const AUTO_DETECT_DEBOUNCE_MS = 700;
+
+/**
+ * Only probe once what was typed is host-like. `new URL('htt')` parses fine, so
+ * existence of a hostname is not enough — require a dotted host (or localhost),
+ * and accept the scheme-less form operators actually type (`nih.cc`).
+ */
+function looksLikeDetectableSiteUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === 'localhost' || /^[^./\s]+(\.[^./\s]+)+$/.test(host);
+  } catch {
+    return false;
+  }
+}
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   DndContext,
@@ -348,6 +371,7 @@ export default function Sites() {
   const [probeLog, setProbeLog] = useState<ProbeLogEntry[]>([]);
   const [probeCompleted, setProbeCompleted] = useState(false);
   const probeAbortRef = useRef<AbortController | null>(null);
+  const autoDetectTimerRef = useRef<number | null>(null);
   const probeLogEndRef = useRef<HTMLDivElement | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [disabledModelSearch, setDisabledModelSearch] = useState('');
@@ -357,7 +381,13 @@ export default function Sites() {
   );
   const primarySiteUrlAnalysis = useMemo(() => analyzePrimarySiteUrl(form.url), [form.url]);
   const latestPrimarySiteUrlRef = useRef(form.url);
+  const latestProxyUrlRef = useRef(form.proxyUrl);
   const latestPlatformRef = useRef(form.platform);
+  // Platform that came from detection (as opposed to a manual pick): it may be
+  // overwritten by a later detection, a hand-picked one may not.
+  const autoDetectedPlatformRef = useRef<string | null>(null);
+  const autoDetectSignatureRef = useRef<string | null>(null);
+  const handleDetectRef = useRef<(options?: { silent?: boolean }) => Promise<void>>(async () => {});
   const latestInitializationPresetIdRef = useRef(selectedInitializationPresetId);
 
   useEffect(() => {
@@ -369,6 +399,10 @@ export default function Sites() {
   useEffect(() => {
     latestPrimarySiteUrlRef.current = form.url;
   }, [form.url]);
+
+  useEffect(() => {
+    latestProxyUrlRef.current = form.proxyUrl;
+  }, [form.proxyUrl]);
 
   useEffect(() => {
     latestPlatformRef.current = form.platform;
@@ -493,6 +527,32 @@ export default function Sites() {
   }, [location.search, safePage, setPage]);
 
   const normalizedFormPlatform = String(form.platform ?? '').trim();
+
+  // Auto-detect once the URL (or the proxy) settles, instead of only when the
+  // field loses focus — typing a URL and going straight to Save skipped
+  // detection entirely. The proxy is part of the trigger because a site that is
+  // only reachable through a proxy cannot be detected without it: filling the
+  // proxy in has to re-run the probe.
+  useEffect(() => {
+    if (!editor) return;
+    const url = String(form.url ?? '').trim();
+    const platformPinned = Boolean(normalizedFormPlatform)
+      && normalizedFormPlatform !== autoDetectedPlatformRef.current;
+    if (!url || platformPinned || !looksLikeDetectableSiteUrl(url)) return;
+    if (autoDetectSignatureRef.current === `${url}\n${String(form.proxyUrl ?? '').trim()}`) return;
+
+    const timer = window.setTimeout(() => {
+      autoDetectTimerRef.current = null;
+      void handleDetectRef.current({ silent: true });
+    }, AUTO_DETECT_DEBOUNCE_MS);
+    autoDetectTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (autoDetectTimerRef.current === timer) autoDetectTimerRef.current = null;
+    };
+    // handleDetect is reached through a ref: depending on it directly would
+    // restart the timer on every re-render it causes.
+  }, [editor, form.url, form.proxyUrl, normalizedFormPlatform]);
   const platformOptions = useMemo(() => {
     const current = normalizedFormPlatform;
     const options = SITE_PLATFORM_OPTIONS
@@ -1027,26 +1087,33 @@ export default function Sites() {
     load();
   };
 
-  const handleDetect = async () => {
+  const handleDetect = async (options?: { silent?: boolean }) => {
     const requestedUrl = String(form.url ?? '').trim();
+    const requestedProxyUrl = String(form.proxyUrl ?? '').trim();
     const requestedPlatform = normalizedFormPlatform;
     const requestedInitializationPresetId = selectedInitializationPresetId;
+    const requestedSignature = `${requestedUrl}\n${requestedProxyUrl}`;
     if (!requestedUrl) {
-      toast.error('请先输入 URL');
+      if (!options?.silent) toast.error('请先输入 URL');
       return;
     }
     const requestedPrimarySiteUrl = analyzePrimarySiteUrl(requestedUrl);
     setDetecting(true);
     try {
-      const result = await api.detectSite(requestedUrl);
+      const result = requestedProxyUrl
+        ? await api.detectSite(requestedUrl, requestedProxyUrl)
+        : await api.detectSite(requestedUrl);
       if (
         String(latestPrimarySiteUrlRef.current ?? '').trim() !== requestedUrl
+        || String(latestProxyUrlRef.current ?? '').trim() !== requestedProxyUrl
         || String(latestPlatformRef.current ?? '').trim() !== requestedPlatform
         || latestInitializationPresetIdRef.current !== requestedInitializationPresetId
       ) {
         return;
       }
       if (result?.platform) {
+        autoDetectedPlatformRef.current = result.platform;
+        autoDetectSignatureRef.current = requestedSignature;
         const detectedPreset = getSiteInitializationPreset(result?.initializationPresetId);
         setForm((prev) => ({
           ...prev,
@@ -1076,15 +1143,34 @@ export default function Sites() {
             : `检测到平台: ${result.platform}`,
         );
       } else {
-        toast.error(result?.error || '无法识别平台类型');
+        // Leave the signature unset so a later edit (e.g. filling in the proxy
+        // the site needs) retries the probe instead of being skipped.
+        if (autoDetectSignatureRef.current === requestedSignature) {
+          autoDetectSignatureRef.current = null;
+        }
+        if (!options?.silent) toast.error(result?.error || '无法识别平台类型');
       }
     } catch (e) {
+      if (autoDetectSignatureRef.current === requestedSignature) {
+        autoDetectSignatureRef.current = null;
+      }
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '自动检测失败');
+      if (!options?.silent) toast.error(eMessage || '自动检测失败');
     } finally {
       setDetecting(false);
     }
   };
+
+  useEffect(() => {
+    handleDetectRef.current = handleDetect;
+  });
+
+  useEffect(() => () => {
+    if (autoDetectTimerRef.current !== null) {
+      window.clearTimeout(autoDetectTimerRef.current);
+      autoDetectTimerRef.current = null;
+    }
+  }, []);
 
   const handleDelete = async (site: SiteRow) => {
     setDeleteConfirm({ mode: 'single', siteId: site.id, siteName: site.name });
@@ -1474,13 +1560,13 @@ export default function Sites() {
                   onChange={(e) => setForm((prev) => ({ ...prev, url: e.target.value }))}
                   onBlur={() => {
                     if (String(form.url ?? '').trim() && !normalizedFormPlatform) {
-                      handleDetect();
+                      handleDetect({ silent: true });
                     }
                   }}
                   style={{ ...formInputStyle, flex: 1 }}
                 />
                 <button
-                  onClick={handleDetect}
+                  onClick={() => { void handleDetect(); }}
                   disabled={detecting || !String(form.url ?? '').trim()}
                   className="btn btn-ghost"
                   style={{ padding: '10px 14px', minWidth: 96, border: '1px solid var(--color-border)' }}
@@ -2154,6 +2240,8 @@ export default function Sites() {
           <ResponsiveFormGrid>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <input
+                aria-label="站点代理"
+                data-testid="site-proxy-url-input"
                 placeholder="站点代理（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
                 value={form.proxyUrl}
                 onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
