@@ -1,8 +1,12 @@
 import * as net from 'node:net';
+import { createHash } from 'node:crypto';
 import { promises as dns } from 'node:dns';
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { asc, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { fetch, getSetCookies, type Cookie, type Response } from 'undici';
+import { config } from '../config.js';
 import { normalizeSiteProxyUrl, withExplicitProxyRequestInit } from './siteProxy.js';
 import { withSystemProxyRequestInit } from './systemProxy.js';
 
@@ -45,6 +49,141 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 const iconCache = new Map<string, CacheEntry>();
 const missCache = new Map<string, number>();
+/**
+ * In-flight de-duplication. The usage-log page renders one badge per row, so a
+ * cold cache turns ten rows of the same site into ten simultaneous upstream
+ * fetches (measured: nine concurrent cold favicon requests for one site, 3-8s
+ * each, ~6-8s wall — every one of them reading the same page). One fetch is
+ * enough; the rest await the same promise.
+ */
+const inflight = new Map<string, Promise<unknown>>();
+/**
+ * Second-level cache on disk. The in-process cache dies with the process, so
+ * every restart/deploy (including a hot-swap of the server bundle) re-fetched
+ * every icon on the next page view. Persisting the SAME 12h window keeps the
+ * in-memory semantics unchanged — the file is only consulted after an in-memory
+ * miss — and makes a restart cost nothing.
+ *
+ * The directory is version-scoped on purpose: the old design relied on a
+ * restart to age every entry out, which is how a favicon-resolution rule change
+ * (order, ranking, candidates) or a lobehub icon CDN bump took effect. Bump
+ * ICON_DISK_CACHE_VERSION in the same change that alters resolution rules, and
+ * every previously written entry is ignored from then on.
+ */
+const ICON_DISK_CACHE_VERSION = 'v1';
+let diskCacheDirReady = false;
+
+function diskCacheDir(): string {
+  return join(config.dataDir, 'icon-cache', ICON_DISK_CACHE_VERSION);
+}
+
+function diskCachePath(key: string): string {
+  return join(diskCacheDir(), `${createHash('sha256').update(key).digest('hex')}.json`);
+}
+
+function readDiskCache(key: string): IconPayload | null {
+  const path = diskCachePath(key);
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
+      expiresAt?: number;
+      contentType?: string;
+      source?: string;
+      buffer?: string;
+    };
+    if (!parsed.expiresAt || parsed.expiresAt <= Date.now()) {
+      // Expired: drop the file so the directory does not grow without bound.
+      try { unlinkSync(path); } catch { /* best effort */ }
+      return null;
+    }
+    if (!parsed.contentType || typeof parsed.buffer !== 'string') return null;
+    return {
+      buffer: Buffer.from(parsed.buffer, 'base64'),
+      contentType: parsed.contentType,
+      source: parsed.source || 'disk-cache',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeDiskCache(key: string, payload: IconPayload, expiresAt: number): void {
+  try {
+    if (!diskCacheDirReady) {
+      mkdirSync(diskCacheDir(), { recursive: true });
+      diskCacheDirReady = true;
+    }
+    writeFileSync(
+      diskCachePath(key),
+      JSON.stringify({
+        expiresAt,
+        contentType: payload.contentType,
+        source: payload.source,
+        buffer: payload.buffer.toString('base64'),
+      }),
+      'utf8',
+    );
+  } catch {
+    // A disk cache is an optimisation: never let a read-only FS / full disk
+    // break icon serving, and don't retry the mkdir on every write.
+    diskCacheDirReady = existsSync(diskCacheDir());
+  }
+}
+
+/** Share one upstream fetch between concurrent callers of the same cache key. */
+function dedupeInFlight<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const existing = inflight.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const pending = run().finally(() => {
+    inflight.delete(key);
+  });
+  inflight.set(key, pending);
+  return pending;
+}
+
+/** Drop only the in-memory layer — models a process restart with the disk cache intact. */
+export function __clearIconMemoryCacheForTests(): void {
+  iconCache.clear();
+  missCache.clear();
+  inflight.clear();
+}
+
+export function __resetIconCacheForTests(): void {
+  __clearIconMemoryCacheForTests();
+  // The disk layer must reset too, or a neighbouring test that shares the same
+  // DATA_DIR sees another case's entry and the MISS/HIT assertions flip.
+  try {
+    rmSync(diskCacheDir(), { recursive: true, force: true });
+    diskCacheDirReady = false;
+  } catch {
+    /* nothing on disk */
+  }
+}
+
+function readCache(key: string): IconPayload | null {
+  const entry = iconCache.get(key);
+  if (entry) {
+    if (entry.expiresAt <= Date.now()) {
+      iconCache.delete(key);
+    } else {
+      return { buffer: entry.buffer, contentType: entry.contentType, source: entry.source };
+    }
+  }
+  // In-memory miss: the disk layer (survives restarts) is consulted before we
+  // pay for an upstream fetch, and a hit rehydrates the in-memory entry.
+  const fromDisk = readDiskCache(key);
+  if (fromDisk) {
+    iconCache.set(key, { ...fromDisk, expiresAt: Date.now() + CACHE_TTL_MS });
+    return fromDisk;
+  }
+  return null;
+}
+
+function writeCache(key: string, payload: IconPayload): void {
+  const expiresAt = Date.now() + CACHE_TTL_MS;
+  iconCache.set(key, { ...payload, expiresAt });
+  missCache.delete(key);
+  writeDiskCache(key, payload, expiresAt);
+}
 
 const BROWSER_HEADERS = {
   'User-Agent':
@@ -62,28 +201,8 @@ const FAVICON_CONVENTIONAL_PATH = '/favicon.ico';
  */
 const FAVICON_COMPAT_CANDIDATES = ['/favicon.png', '/favicon.svg', '/logo.svg', '/logo.png'];
 
-const BRAND_ICON_VERSION = '1.83.0';
-const BRAND_ICON_CDN_BASE = `https://registry.npmmirror.com/@lobehub/icons-static-png/${BRAND_ICON_VERSION}/files`;
-
-export function __resetIconCacheForTests(): void {
-  iconCache.clear();
-  missCache.clear();
-}
-
-function readCache(key: string): IconPayload | null {
-  const entry = iconCache.get(key);
-  if (!entry) return null;
-  if (entry.expiresAt <= Date.now()) {
-    iconCache.delete(key);
-    return null;
-  }
-  return { buffer: entry.buffer, contentType: entry.contentType, source: entry.source };
-}
-
-function writeCache(key: string, payload: IconPayload): void {
-  iconCache.set(key, { ...payload, expiresAt: Date.now() + CACHE_TTL_MS });
-  missCache.delete(key);
-}
+export const BRAND_ICON_VERSION = '1.97.0';
+export const BRAND_ICON_CDN_BASE = `https://registry.npmmirror.com/@lobehub/icons-static-png/${BRAND_ICON_VERSION}/files`;
 
 /** Remember recent misses so a logo-less site is not re-probed on every render. */
 function isNegativelyCached(key: string): boolean {
@@ -456,35 +575,39 @@ export async function lookupSiteFavicon(
 
   if (isNegativelyCached(cacheKey)) return { status: 'not-found' };
 
-  // 1. What the page itself declares — the first thing a browser reads, and the
-  //    only source that can point at a CDN URL, an SVG or an inline icon.
-  const declared = await resolveDeclaredPageIcon(origin, proxyUrl);
-  if (declared.chosen) return acceptFavicon(cacheKey, declared.chosen);
+  // One upstream resolution per key: ten usage-log rows of the same site must
+  // not launch ten page fetches (see `inflight`).
+  return dedupeInFlight(cacheKey, async () => {
+    // 1. What the page itself declares — the first thing a browser reads, and the
+    //    only source that can point at a CDN URL, an SVG or an inline icon.
+    const declared = await resolveDeclaredPageIcon(origin, proxyUrl);
+    if (declared.chosen) return acceptFavicon(cacheKey, declared.chosen);
 
-  // 2. An inline `data:` icon too large to serve eagerly, but declared by the
-  //    page — the browser shows it in the tab, so using /favicon.ico or a
-  //    guess-path logo instead would disagree with the browser. Accepting it
-  //    here, before probing undeclared paths, preserves the browser's icon
-  //    preference (page declaration beats all guesswork).
-  if (declared.oversizedInline) return acceptFavicon(cacheKey, declared.oversizedInline);
+    // 2. An inline `data:` icon too large to serve eagerly, but declared by the
+    //    page — the browser shows it in the tab, so using /favicon.ico or a
+    //    guess-path logo instead would disagree with the browser. Accepting it
+    //    here, before probing undeclared paths, preserves the browser's icon
+    //    preference (page declaration beats all guesswork).
+    if (declared.oversizedInline) return acceptFavicon(cacheKey, declared.oversizedInline);
 
-  // 3. The one conventional path a browser falls back to when the page declares
-  //    nothing. It is intentionally requested after (not before) the document:
-  //    a declared SVG logo beats a 16px legacy .ico, and guessing static paths
-  //    first was what made this lookup slow and lossy.
-  const conventional = await fetchImage(`${origin}${FAVICON_CONVENTIONAL_PATH}`, origin, proxyUrl);
-  if (conventional) return acceptFavicon(cacheKey, conventional);
+    // 3. The one conventional path a browser falls back to when the page declares
+    //    nothing. It is intentionally requested after (not before) the document:
+    //    a declared SVG logo beats a 16px legacy .ico, and guessing static paths
+    //    first was what made this lookup slow and lossy.
+    const conventional = await fetchImage(`${origin}${FAVICON_CONVENTIONAL_PATH}`, origin, proxyUrl);
+    if (conventional) return acceptFavicon(cacheKey, conventional);
 
-  // 4. Compatibility sweep for deployments that never declare an icon and do not
-  //    ship the conventional one (self-hosted NewAPI instances typically serve a
-  //    logo file at the root instead).
-  for (const candidate of FAVICON_COMPAT_CANDIDATES) {
-    const payload = await fetchImage(`${origin}${candidate}`, origin, proxyUrl);
-    if (payload) return acceptFavicon(cacheKey, { ...payload, source: candidate });
-  }
+    // 4. Compatibility sweep for deployments that never declare an icon and do not
+    //    ship the conventional one (self-hosted NewAPI instances typically serve a
+    //    logo file at the root instead).
+    for (const candidate of FAVICON_COMPAT_CANDIDATES) {
+      const payload = await fetchImage(`${origin}${candidate}`, origin, proxyUrl);
+      if (payload) return acceptFavicon(cacheKey, { ...payload, source: candidate });
+    }
 
-  markMiss(cacheKey);
-  return { status: 'not-found' };
+    markMiss(cacheKey);
+    return { status: 'not-found' as const };
+  });
 }
 
 const BRAND_ICON_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -513,12 +636,19 @@ export async function lookupBrandIcon(
   if (cached) return { status: 'ok', payload: cached, cache: 'HIT' };
   if (isNegativelyCached(cacheKey)) return { status: 'not-found' };
 
-  const payload = await fetchImage(`${BRAND_ICON_CDN_BASE}/${theme}/${key}.png`);
-  if (!payload) {
-    markMiss(cacheKey);
-    return { status: 'not-found' };
-  }
-  const resolved = { ...payload, source: `${theme}/${key}.png` };
-  writeCache(cacheKey, resolved);
-  return { status: 'ok', payload: resolved, cache: 'MISS' };
+  return dedupeInFlight(cacheKey, async () => {
+    // Re-check: the caller we shared the promise with may have been the one that
+    // filled the cache. (Cheap, and keeps the HIT/MISS header honest.)
+    const raced = readCache(cacheKey);
+    if (raced) return { status: 'ok' as const, payload: raced, cache: 'HIT' as const };
+
+    const payload = await fetchImage(`${BRAND_ICON_CDN_BASE}/${theme}/${key}.png`);
+    if (!payload) {
+      markMiss(cacheKey);
+      return { status: 'not-found' as const };
+    }
+    const resolved = { ...payload, source: `${theme}/${key}.png` };
+    writeCache(cacheKey, resolved);
+    return { status: 'ok' as const, payload: resolved, cache: 'MISS' as const };
+  });
 }
