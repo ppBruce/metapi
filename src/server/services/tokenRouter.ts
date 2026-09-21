@@ -10,7 +10,6 @@ import { refreshBalance } from './balanceService.js';
 import {SITE_API_ENDPOINT_COOLDOWN_MS} from './siteApiEndpointService.js';
 import {isContributionCloseToBest, resolveFailureBackoffSec, resolveRoundRobinCooldownSec, ROUND_ROBIN_COOLDOWN_LEVELS_SEC} from './tokenRouterMath.js';
 import type {
-  ChannelRow,
   RouteChannelCandidate,
   RouteMatch,
   RouteRow,
@@ -29,7 +28,6 @@ import {
 import {
   getStableFirstLastSelectedSiteByKey,
   getStableFirstObservationProgressByKey,
-  getStableFirstObservationSiteCooldownByKey,
   rememberStableFirstSiteSelectionForKey,
 } from './tokenRouterStableFirstMemory.js';
 import {clearRuntimeHealthStatesForChannels, persistSiteRuntimeHealthState, ensureSiteRuntimeHealthStateLoaded, filterSiteRuntimeBrokenCandidatesByModel, getSiteRuntimeHealthDetails, recordSiteRuntimeFailure, recordSiteRuntimeSuccess} from './tokenRouterRuntimeHealthStore.js';
@@ -76,13 +74,21 @@ import {
   resolveRouteStrategy,
   setCandidateDecisionReason,
 } from './tokenRouterCandidateHelpers.js';
+import {
+  invalidateRouteScopedCache,
+  invalidateTokenRouterCache,
+  loadEnabledRoutes,
+  loadRouteMatch,
+  patchCachedChannel,
+} from './tokenRouterRouteCache.js';
+// Re-exported: external callers (sites/tokens routes, modelService, oauth route
+// units) import the cache invalidator from this module, as before the split.
+export { invalidateTokenRouterCache } from './tokenRouterRouteCache.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import {
   getOauthRouteUnitStrategyLabel,
-  listOauthRouteUnitMembersByUnitIds,
-  loadOauthRouteUnitSummariesByIds,
 } from './oauth/routeUnitService.js';
-import {buildVisibleEnabledRoutes, channelSupportsRequestedModel, getExposedModelNameForRoute, isExplicitGroupRoute, isModelAllowedByDownstreamPolicy, isRouteDisplayNameMatch, normalizeChannelSourceModel, normalizeModelAlias, normalizeRouteDisplayName, normalizeRouteMode, resolveMappedModel, resolveModelResolution, type ModelResolution} from './tokenRouterModelMatching.js';
+import {buildVisibleEnabledRoutes, channelSupportsRequestedModel, getExposedModelNameForRoute, isExplicitGroupRoute, isModelAllowedByDownstreamPolicy, isRouteDisplayNameMatch, normalizeChannelSourceModel, normalizeModelAlias, normalizeRouteDisplayName, resolveMappedModel, resolveModelResolution, type ModelResolution} from './tokenRouterModelMatching.js';
 import {isExactRouteModelPattern, matchesModelPattern} from './tokenRouterModelPatterns.js';
 import {formatShadowSelectionLog, rankShadowCandidates, type ShadowCandidateInput} from './routeScoringShadow.js';
 import { getPerformanceShadowMetrics } from './performanceShadow.js';
@@ -163,223 +169,9 @@ async function loadCredentialScopedChannelIds(
   return rows.map((row: any) => row.id);
 }
 
-type RouteCacheSnapshot = {
-  loadedAt: number;
-  routes: RouteRow[];
-};
 
-type RouteMatchCacheSnapshot = {
-  loadedAt: number;
-  match: RouteMatch;
-};
 
-let routeCacheSnapshot: RouteCacheSnapshot = {
-  loadedAt: 0,
-  routes: [],
-};
 
-const routeMatchCache = new Map<number, RouteMatchCacheSnapshot>();
-
-// Single-flight promise stores: prevent concurrent cache-miss queries from
-// all hitting the DB at once. When the first caller starts loading, subsequent
-// callers await the same promise instead of issuing duplicate queries.
-let enabledRoutesInflight: Promise<RouteRow[]> | null = null;
-const routeMatchInflight = new Map<number, Promise<RouteMatch>>();
-
-function resolveTokenRouterCacheTtlMs(): number {
-  const raw = Math.trunc(config.tokenRouterCacheTtlMs || 0);
-  return Math.max(100, raw);
-}
-
-function isCacheFresh(loadedAt: number, nowMs: number): boolean {
-  return nowMs - loadedAt < resolveTokenRouterCacheTtlMs();
-}
-
-async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
-  if (isCacheFresh(routeCacheSnapshot.loadedAt, nowMs)) {
-    return routeCacheSnapshot.routes;
-  }
-  // Single-flight: if another caller is already loading, share its promise.
-  if (enabledRoutesInflight) {
-    return enabledRoutesInflight;
-  }
-
-  enabledRoutesInflight = (async () => {
-    const rawRoutes = await db.select().from(schema.tokenRoutes)
-      .where(eq(schema.tokenRoutes.enabled, true))
-      .all();
-    const explicitGroupRouteIds = rawRoutes
-      .filter((route: any) => normalizeRouteMode(route.routeMode) === 'explicit_group')
-      .map((route: any) => route.id);
-    const sourceRows = explicitGroupRouteIds.length > 0
-      ? await db.select().from(schema.routeGroupSources)
-        .where(inArray(schema.routeGroupSources.groupRouteId, explicitGroupRouteIds))
-        .all()
-      : [];
-    const sourceIdsByRouteId = new Map<number, number[]>();
-    for (const row of sourceRows) {
-      if (!sourceIdsByRouteId.has(row.groupRouteId)) {
-        sourceIdsByRouteId.set(row.groupRouteId, []);
-      }
-      sourceIdsByRouteId.get(row.groupRouteId)!.push(row.sourceRouteId);
-    }
-    const routes = rawRoutes.map((route: any) => ({
-      ...route,
-      routeMode: normalizeRouteMode(route.routeMode),
-      sourceRouteIds: Array.from(new Set(sourceIdsByRouteId.get(route.id) ?? [])),
-    }));
-    routeCacheSnapshot = {
-      loadedAt: Date.now(),
-      routes,
-    };
-    return routes;
-  })();
-
-  try {
-    return await enabledRoutesInflight;
-  } finally {
-    enabledRoutesInflight = null;
-  }
-}
-
-async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<RouteMatch> {
-  const cached = routeMatchCache.get(route.id);
-  if (cached && isCacheFresh(cached.loadedAt, nowMs)) {
-    return cached.match;
-  }
-  // Single-flight: if another caller is already loading this route match,
-  // share its promise.
-  const existing = routeMatchInflight.get(route.id);
-  if (existing) {
-    return existing;
-  }
-
-  const promise = (async (): Promise<RouteMatch> => {
-    const enabledRoutes = await loadEnabledRoutes(nowMs);
-    const routeIds = (() => {
-      if (!isExplicitGroupRoute(route)) {
-        return [route.id];
-      }
-      return Array.from(new Set(route.sourceRouteIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0)));
-    })();
-    const enabledSourceRoutes = isExplicitGroupRoute(route)
-      ? enabledRoutes.filter((item) => (
-        routeIds.includes(item.id)
-        && !isExplicitGroupRoute(item)
-        && isExactRouteModelPattern(item.modelPattern)
-      ))
-      : enabledRoutes.filter((item) => routeIds.includes(item.id));
-    const enabledSourceRouteIds = enabledSourceRoutes.map((item) => item.id);
-    const fallbackSourceModelByRouteId = new Map<number, string>(
-      enabledSourceRoutes
-        .filter((item) => isExactRouteModelPattern(item.modelPattern))
-        .map((item) => [item.id, (item.modelPattern || '').trim()]),
-    );
-    const channels = enabledSourceRouteIds.length > 0
-      ? await db
-        .select()
-        .from(schema.routeChannels)
-        .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
-        .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-        .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
-        .where(inArray(schema.routeChannels.routeId, enabledSourceRouteIds))
-        .all()
-      : [];
-
-    const oauthRouteUnitIds: number[] = Array.from(new Set<number>(
-      channels
-        .map((row: any) => Number(row.route_channels.oauthRouteUnitId))
-        .filter((id: any): id is number => Number.isFinite(id) && id > 0),
-    ));
-    const [routeUnitSummaries, routeUnitMembersByUnitId] = await Promise.all([
-      loadOauthRouteUnitSummariesByIds(oauthRouteUnitIds),
-      listOauthRouteUnitMembersByUnitIds(oauthRouteUnitIds),
-    ]);
-
-    const mapped = channels.map((row: any) => ({
-      channel: {
-        ...row.route_channels,
-        sourceModel: normalizeChannelSourceModel(row.route_channels.sourceModel)
-          || fallbackSourceModelByRouteId.get(row.route_channels.routeId)
-          || null,
-      },
-      account: row.accounts,
-      site: row.sites,
-      token: row.account_tokens,
-      routeUnit: row.route_channels.oauthRouteUnitId
-        ? (routeUnitSummaries.get(row.route_channels.oauthRouteUnitId) || null)
-        : null,
-      routeUnitMembers: row.route_channels.oauthRouteUnitId
-        ? (routeUnitMembersByUnitId.get(row.route_channels.oauthRouteUnitId) || []).map((member) => ({
-          member: member.member,
-          account: member.account,
-          site: member.site,
-          token: null,
-        }))
-        : [],
-    }));
-
-    const match = { route, channels: mapped };
-    routeMatchCache.set(route.id, {
-      loadedAt: Date.now(),
-      match,
-    });
-    return match;
-  })();
-
-  routeMatchInflight.set(route.id, promise);
-
-  try {
-    return await promise;
-  } finally {
-    routeMatchInflight.delete(route.id);
-  }
-}
-
-function patchCachedChannel(channelId: number, apply: (channel: ChannelRow) => void): void {
-  for (const entry of routeMatchCache.values()) {
-    const target = entry.match.channels.find((item) => item.channel.id === channelId);
-    if (!target) continue;
-    apply(target.channel);
-    break;
-  }
-}
-
-function clearStableFirstCachesForRoute(routeId: number): void {
-  const routePrefix = `${routeId}:`;
-  for (const key of getStableFirstLastSelectedSiteByKey().keys()) {
-    if (key.startsWith(routePrefix)) {
-      getStableFirstLastSelectedSiteByKey().delete(key);
-    }
-  }
-  for (const key of getStableFirstObservationProgressByKey().keys()) {
-    if (key.startsWith(routePrefix)) {
-      getStableFirstObservationProgressByKey().delete(key);
-    }
-  }
-  for (const key of getStableFirstObservationSiteCooldownByKey().keys()) {
-    if (key.startsWith(routePrefix)) {
-      getStableFirstObservationSiteCooldownByKey().delete(key);
-    }
-  }
-}
-
-function invalidateRouteScopedCache(routeId: number): void {
-  if (!Number.isFinite(routeId) || routeId <= 0) return;
-  routeMatchCache.delete(routeId);
-  clearStableFirstCachesForRoute(routeId);
-}
-
-export function invalidateTokenRouterCache(): void {
-  routeCacheSnapshot = {
-    loadedAt: 0,
-    routes: [],
-  };
-  routeMatchCache.clear();
-  getStableFirstLastSelectedSiteByKey().clear();
-  getStableFirstObservationProgressByKey().clear();
-  getStableFirstObservationSiteCooldownByKey().clear();
-}
 
 export type RouteDecisionExplanation = RouteDecision & {
   routeId?: number;
