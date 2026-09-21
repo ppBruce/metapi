@@ -2919,14 +2919,21 @@ export class TokenRouter {
       routes = routes.filter((route) => allowSet.has(route.id));
     }
 
-    const matchedRoute = routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
+    // Match priority: wildcard group -> explicit group -> exact pattern.
+    // Wildcard groups win first because they aggregate the widest channel pool,
+    // which keeps failover budget (scaled from the candidate count) meaningful.
+    // A single-channel exact route is the last resort, not the preferred hit.
+    const matchedRoute = routes.find((route) => (
+      !isExplicitGroupRoute(route)
+      && !isExactRouteModelPattern(route.modelPattern)
+      && (isRouteDisplayNameMatch(model, route.displayName) || matchesModelPattern(model, route.modelPattern))
+    ))
+      || routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
       || routes.find((route) => (
         !isExplicitGroupRoute(route)
         && isExactRouteModelPattern(route.modelPattern)
-        && (route.modelPattern || '').trim() === model
-      ))
-      || routes.find((route) => !isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
-      || routes.find((route) => !isExplicitGroupRoute(route) && matchesModelPattern(model, route.modelPattern));
+        && ((route.modelPattern || '').trim() === model || isRouteDisplayNameMatch(model, route.displayName))
+      ));
 
     if (!matchedRoute) return null;
 

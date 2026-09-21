@@ -234,6 +234,58 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(decision.actualModel).toBe('claude-opus-4-5');
   });
 
+  it('prefers a wildcard group over a colliding exact route', async () => {
+    const wildcard = await createRouteWithSingleChannel(
+      're:^gemini-3\\.8',
+      undefined,
+      {
+        displayName: 'gemini-3.8-flash',
+        sourceModel: 'gemini-3.8-flash-high',
+      },
+    );
+    const exact = await createRouteWithSingleChannel(
+      'gemini-3.8-flash',
+      undefined,
+      {
+        sourceModel: 'gemini-3.8-flash',
+      },
+    );
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('gemini-3.8-flash');
+
+    expect(selected).toBeTruthy();
+    expect(selected?.channel.routeId).toBe(wildcard.route.id);
+    expect(selected?.channel.id).not.toBe(exact.channel.id);
+    expect(selected?.actualModel).toBe('gemini-3.8-flash-high');
+  });
+
+  it('prefers a wildcard group over an explicit group sharing the same display name', async () => {
+    const wildcard = await createRouteWithSingleChannel(
+      'gemini-3.8-*',
+      undefined,
+      {
+        displayName: 'gemini-3.8-flash',
+        sourceModel: 'gemini-3.8-flash-high',
+      },
+    );
+    const source = await createRouteWithSingleChannel(
+      'gemini-3.8-flash-low',
+      undefined,
+      {
+        sourceModel: 'gemini-3.8-flash-low',
+      },
+    );
+    await createExplicitGroupRoute('gemini-3.8-flash', [source.route.id]);
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('gemini-3.8-flash');
+
+    expect(selected).toBeTruthy();
+    expect(selected?.channel.routeId).toBe(wildcard.route.id);
+    expect(selected?.channel.id).not.toBe(source.channel.id);
+  });
+
   it('keeps exact routes out of exposed models when covered by an explicit group', async () => {
     const source = await createRouteWithSingleChannel('source-model-a');
     const unrelated = await createRouteWithSingleChannel('unrelated-exact-model');
