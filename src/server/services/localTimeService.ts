@@ -72,6 +72,20 @@ export function toLocalDayKeyFromStoredUtc(raw: StoredUtcDateTimeInput): string 
   return formatLocalDate(parsed);
 }
 
+/**
+ * Local wall-clock hour label ("YYYY-MM-DD HH:00") for a stored UTC hour
+ * bucket. Display-only: the hourly aggregation keys rows on the UTC instant
+ * (`site_hour_usage.bucket_start_utc`) so range queries stay unambiguous, but
+ * everything the user reads must be local time — the trend axis and its tooltip
+ * print this label verbatim. Rendering the raw UTC key made the x-axis show the
+ * UTC hour (a 16:00 local bucket ticked as "08").
+ */
+export function toLocalHourLabelFromStoredUtc(raw: StoredUtcDateTimeInput): string | null {
+  const parsed = parseStoredUtcDateTime(raw);
+  if (!parsed) return null;
+  return `${formatLocalDate(parsed)} ${pad2(parsed.getHours())}:00`;
+}
+
 export function getLocalHourAnchor(now = new Date()): Date {
   return new Date(
     now.getFullYear(),

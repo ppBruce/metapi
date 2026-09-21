@@ -3,6 +3,7 @@ import { db, schema } from '../db/index.js';
 import {
   getLocalHourRangeStartUtc,
   getLocalRangeStartDayKey,
+  toLocalHourLabelFromStoredUtc,
 } from './localTimeService.js';
 import {
   readSnapshotCache,
@@ -133,8 +134,12 @@ async function loadSiteStatsSnapshotPayload(
     const site = activeSiteById.get(row.siteId);
     if (!site) continue;
     const siteName = site.name || 'unknown';
-    // Hourly buckets key on the local hour start; daily rows key on local day.
-    const bucket = useHourly ? row.bucketStartUtc : row.localDay;
+    // Hourly buckets are stored on the UTC hour start but must be LABELLED in
+    // local time (the axis and tooltip print this key verbatim); daily rows are
+    // already local day keys, so both granularities now hand the UI local text.
+    const bucket = useHourly
+      ? toLocalHourLabelFromStoredUtc(row.bucketStartUtc)
+      : row.localDay;
     if (!bucket) continue;
 
     if (!siteFrame[bucket]) siteFrame[bucket] = {};

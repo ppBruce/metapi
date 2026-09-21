@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
+import { formatLocalDate, formatUtcSqlDateTime } from '../../services/localTimeService.js';
 
 type DbModule = typeof import('../../db/index.js');
 
@@ -165,9 +165,21 @@ describe('stats snapshot v2 routes', () => {
     });
     expect(siteTrendResponse.statusCode).toBe(200);
     const siteTrend = siteTrendResponse.json() as {
-      trend: Array<{ date: string }>;
+      trend: Array<{ date: string; sites: Record<string, { spend: number }> }>;
     };
     expect(siteTrend.trend.length).toBeGreaterThan(0);
+    // The trend key is printed verbatim on the chart's x-axis, so a daily bucket
+    // must be a LOCAL day (the hourly variant is covered in localTimeService.test.ts).
+    for (const bucket of siteTrend.trend) {
+      expect(bucket.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+    expect(siteTrend.trend.map((bucket) => bucket.date)).toContain(
+      formatLocalDate(new Date()),
+    );
+    const todayBucket = siteTrend.trend.find(
+      (bucket) => bucket.date === formatLocalDate(new Date()),
+    );
+    expect(todayBucket?.sites['stats-site']?.spend).toBeGreaterThan(0);
 
     const sitesResponse = await app.inject({
       method: 'GET',
