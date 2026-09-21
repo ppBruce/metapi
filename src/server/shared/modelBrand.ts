@@ -1,3 +1,15 @@
+import { BRAND_ICON_COLORS } from './brandIconColors.js';
+
+/**
+ * The badge colour for a brand is never hand-written: it is looked up from the
+ * icon key in `brandIconColors.ts`, which is generated from lobehub (see
+ * `npm run brand:colors`). Keys that lobehub itself only draws in black/white
+ * carry no colour and fall through to the theme ink + per-name hash.
+ */
+function brandColorFor(icon: string): string {
+  return BRAND_ICON_COLORS[icon] ?? '#000000';
+}
+
 export interface BrandMatchContext {
   raw: string;
   cleaned: string;
@@ -5,28 +17,69 @@ export interface BrandMatchContext {
   candidates: string[];
 }
 
+/**
+ * Icon key convention (lobehub @1.97 static PNGs).
+ *
+ * `icon`/`modelIcon` may be any key from lobehub, but the *variant* must stay
+ * legible in BOTH themes: the badge renders the mark directly on the page with
+ * no tile behind it, so a mark that is near-white on light or near-black on
+ * dark disappears.
+ *
+ * - `<key>-color` is a fixed mark: identical pixels in light and dark. Use it
+ *   only when it clears ~3:1 contrast against both backgrounds (verified: the
+ *   color variants of antgroup/nova/stepfun are ~106-121 mean luminance, ok;
+ *   kimi-codex-nanobanana-openrouter are ~209-243 which is invisible on white,
+ *   deepl/essentialai are ~38-41 which is invisible on dark).
+ * - `<key>` (no suffix) is theme-aware: black ink for light, white ink for
+ *   dark, ~17.8:1 in both. This is the safe default whenever the color variant
+ *   fails, and it is what lobehub itself shows for marks like StepFun.
+ *
+ * To re-verify: fetch `/light|dark/<key>.png`, average luminance over pixels
+ * with alpha > 40, then require <=195 for light and >=60 for dark.
+ * Never use `-text`/`-brand` wordmark variants: the badge is square.
+ */
 export interface BrandInfo {
   name: string;
   icon: string;
   color: string;
+  /**
+   * Model-family mark, when the family has its own logo distinct from the
+   * vendor's (Kimi vs Moonshot, Grok vs xAI, Claude vs Anthropic, Gemma vs
+   * Google). The brand slot keeps `icon` (the vendor mark); the model slot
+   * renders this one. null/undefined = the family has no separate mark, the
+   * model slot falls back to the vendor icon.
+   */
+  modelIcon?: string | null;
 }
 
-export type BrandMatchMode = 'includes' | 'startsWith' | 'segment' | 'boundary';
+export type BrandMatchMode = 'includes' | 'startsWith' | 'segment' | 'boundary' | 'regex';
 
 type BrandRule = {
   keyword: string;
   mode: BrandMatchMode;
+  /** Model-family icon for models matched by this rule (see BrandInfo.modelIcon). */
+  icon?: string;
 };
 
-type BrandDefinition = BrandInfo & {
+type BrandDefinition = Omit<BrandInfo, 'color'> & {
   rules: BrandRule[];
 };
 
+// 品牌规则按数组顺序决定优先级：getBrand() 取第一个命中的品牌。
+// 作者约定（新增品牌/规则时请遵守）：
+// 1. 越具体的品牌越靠前（例如 360gpt 在 GPT 之前、nemotron 在 llama 之前），
+//    否则一个宽泛的规则会先把名字抢走。
+// 2. 厂商词足够长且独特（deepseek/glm/qwen/kimi…≥4 字符）→ 用 includes，
+//    这样厂商每出一代新模型（deepseek-v9、glm-5、kimi-k3、qwen4-max）都自动归类，无需改代码。
+// 3. 短缩写或容易被他家名字包含的 token（hy、ds、nova、xai…）绝不能用 includes 匹配子串，
+//    必须用 startsWith / segment / boundary / regex 锚定；
+//    反例：包含式匹配会让 minimaxai/… 落到 xai、让 sensenova-… 落到 nova。
+// 4. 缩写要覆盖整个命名代际时用 regex（如 ^hy\d+(-|$) 覆盖 hy3/hy4/hy5…），
+//    而不是每出一个版本号就补一条 startsWith。
 const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'OpenAI',
     icon: 'openai',
-    color: 'linear-gradient(135deg, #10a37f, #1a7f5a)',
     rules: [
       { keyword: 'gpt', mode: 'startsWith' },
       { keyword: 'chatgpt', mode: 'startsWith' },
@@ -36,9 +89,9 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
       { keyword: 'text-moderation', mode: 'startsWith' },
       { keyword: 'davinci', mode: 'startsWith' },
       { keyword: 'babbage', mode: 'startsWith' },
-      { keyword: 'codex-mini', mode: 'startsWith' },
-      { keyword: 'codex-auto-review', mode: 'startsWith' },
-      { keyword: 'codex-', mode: 'startsWith' },
+      { keyword: 'codex-mini', mode: 'startsWith', icon: 'codex' },
+      { keyword: 'codex-auto-review', mode: 'startsWith', icon: 'codex' },
+      { keyword: 'codex-', mode: 'startsWith', icon: 'codex' },
       { keyword: 'o1', mode: 'startsWith' },
       { keyword: 'o3', mode: 'startsWith' },
       { keyword: 'o4', mode: 'startsWith' },
@@ -47,19 +100,17 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   },
   {
     name: 'Anthropic',
-    icon: 'claude-color',
-    color: 'linear-gradient(135deg, #d4a574, #c4956a)',
+    icon: 'anthropic',
     rules: [
-      { keyword: 'claude', mode: 'includes' },
+      { keyword: 'claude', mode: 'includes', icon: 'claude-color' },
     ],
   },
   {
     name: 'Google',
-    icon: 'gemini-color',
-    color: 'linear-gradient(135deg, #4285f4, #34a853)',
+    icon: 'google-color',
     rules: [
-      { keyword: 'gemini', mode: 'includes' },
-      { keyword: 'gemma', mode: 'includes' },
+      { keyword: 'gemini', mode: 'includes', icon: 'gemini-color' },
+      { keyword: 'gemma', mode: 'includes', icon: 'gemma-color' },
       { keyword: 'google/', mode: 'includes' },
       { keyword: 'palm', mode: 'includes' },
       { keyword: 'paligemma', mode: 'includes' },
@@ -68,6 +119,10 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
       { keyword: 'deplot', mode: 'includes' },
       { keyword: 'codegemma', mode: 'includes' },
       { keyword: 'imagen', mode: 'includes' },
+      { keyword: 'nano banana', mode: 'includes', icon: 'nanobanana' },
+      { keyword: 'nano-banana', mode: 'includes', icon: 'nanobanana' },
+      { keyword: 'omni1.1', mode: 'startsWith' },
+      { keyword: 'omni-flash', mode: 'startsWith' },
       { keyword: 'learnlm', mode: 'includes' },
       { keyword: 'aqa', mode: 'includes' },
       { keyword: 'veo', mode: 'startsWith' },
@@ -77,7 +132,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'DeepSeek',
     icon: 'deepseek-color',
-    color: 'linear-gradient(135deg, #4d6bfe, #44a3ec)',
     rules: [
       { keyword: 'deepseek', mode: 'includes' },
       { keyword: 'ds-chat', mode: 'segment' },
@@ -86,7 +140,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: '通义千问',
     icon: 'qwen-color',
-    color: 'linear-gradient(135deg, #615cf7, #9b8afb)',
     rules: [
       { keyword: 'qwen', mode: 'includes' },
       { keyword: 'qwq', mode: 'includes' },
@@ -95,11 +148,10 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   },
   {
     name: '智谱 AI',
-    icon: 'zhipu-color',
-    color: 'linear-gradient(135deg, #3b6cf5, #6366f1)',
+    icon: 'zai',
     rules: [
-      { keyword: 'glm', mode: 'includes' },
-      { keyword: 'chatglm', mode: 'includes' },
+      { keyword: 'glm', mode: 'includes', icon: 'zhipu-color' },
+      { keyword: 'chatglm', mode: 'includes', icon: 'zhipu-color' },
       { keyword: 'codegeex', mode: 'includes' },
       { keyword: 'cogview', mode: 'includes' },
       { keyword: 'cogvideo', mode: 'includes' },
@@ -108,17 +160,16 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Meta',
     icon: 'meta-color',
-    color: 'linear-gradient(135deg, #0668E1, #1877f2)',
     rules: [
       { keyword: 'llama', mode: 'includes' },
       { keyword: 'code-llama', mode: 'includes' },
       { keyword: 'codellama', mode: 'includes' },
+      { keyword: 'muse-glimmer', mode: 'startsWith' },
     ],
   },
   {
     name: 'Mistral',
     icon: 'mistral-color',
-    color: 'linear-gradient(135deg, #f7d046, #f2a900)',
     rules: [
       { keyword: 'mistral', mode: 'includes' },
       { keyword: 'mixtral', mode: 'includes' },
@@ -132,16 +183,14 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Moonshot',
     icon: 'moonshot',
-    color: 'linear-gradient(135deg, #000000, #333333)',
     rules: [
       { keyword: 'moonshot', mode: 'includes' },
-      { keyword: 'kimi', mode: 'includes' },
+      { keyword: 'kimi', mode: 'includes', icon: 'kimi' },
     ],
   },
   {
     name: '零一万物',
     icon: 'yi-color',
-    color: 'linear-gradient(135deg, #1d4ed8, #3b82f6)',
     rules: [
       { keyword: 'yi-', mode: 'startsWith' },
       { keyword: 'yi', mode: 'boundary' },
@@ -150,7 +199,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: '文心一言',
     icon: 'wenxin-color',
-    color: 'linear-gradient(135deg, #2932e1, #4468f2)',
     rules: [
       { keyword: 'ernie', mode: 'includes' },
       { keyword: 'eb-', mode: 'includes' },
@@ -159,7 +207,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: '讯飞星火',
     icon: 'spark-color',
-    color: 'linear-gradient(135deg, #0070f3, #00d4ff)',
     rules: [
       { keyword: 'spark', mode: 'includes' },
       { keyword: 'generalv', mode: 'includes' },
@@ -168,27 +215,26 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: '腾讯混元',
     icon: 'hunyuan-color',
-    color: 'linear-gradient(135deg, #00b7ff, #0052d9)',
     rules: [
       { keyword: 'hunyuan', mode: 'includes' },
       { keyword: 'tencent-hunyuan', mode: 'includes' },
       { keyword: 'hy-', mode: 'startsWith' },
-      { keyword: 'hy3', mode: 'startsWith' },
-      { keyword: 'hy3', mode: 'segment' },
+      // hy + 数字代际（hy3 / hy4-preview / hy4-preview-f / hy5…）一次覆盖；
+      // 若未来出现不含数字后缀的同族命名（如 hy-omni），再补 startsWith。
+      { keyword: '^hy\\d+(-|$)', mode: 'regex' },
     ],
   },
   {
     name: '豆包',
     icon: 'doubao-color',
-    color: 'linear-gradient(135deg, #3b5bdb, #7048e8)',
     rules: [
       { keyword: 'doubao', mode: 'includes' },
+      { keyword: 'seedream', mode: 'includes' },
     ],
   },
   {
     name: 'MiniMax',
     icon: 'minimax-color',
-    color: 'linear-gradient(135deg, #6366f1, #818cf8)',
     rules: [
       { keyword: 'minimax', mode: 'includes' },
       { keyword: 'abab', mode: 'includes' },
@@ -198,7 +244,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Cohere',
     icon: 'cohere-color',
-    color: 'linear-gradient(135deg, #39594d, #5ba77f)',
     rules: [
       { keyword: 'command', mode: 'includes' },
       { keyword: 'c4ai-', mode: 'includes' },
@@ -209,7 +254,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Microsoft',
     icon: 'microsoft-color',
-    color: 'linear-gradient(135deg, #00bcf2, #0078d4)',
     rules: [
       { keyword: 'microsoft/', mode: 'includes' },
       { keyword: 'phi-', mode: 'includes' },
@@ -220,15 +264,13 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'xAI',
     icon: 'xai',
-    color: 'linear-gradient(135deg, #111, #444)',
     rules: [
-      { keyword: 'grok', mode: 'includes' },
+      { keyword: 'grok', mode: 'includes', icon: 'grok' },
     ],
   },
   {
     name: 'Agnes',
-    icon: 'agnes',
-    color: 'linear-gradient(135deg, #ec4899, #a855f7)',
+    icon: 'agnesai',
     rules: [
       { keyword: 'agnes', mode: 'includes' },
     ],
@@ -236,7 +278,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'OpenCode',
     icon: 'opencode',
-    color: 'linear-gradient(135deg, #111827, #374151)',
     rules: [
       { keyword: 'opencode', mode: 'includes' },
       { keyword: 'big-pickle', mode: 'includes' },
@@ -249,7 +290,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Kilo',
     icon: 'kilocode',
-    color: 'linear-gradient(135deg, #f59e0b, #f97316)',
     rules: [
       { keyword: 'kilocode', mode: 'includes' },
       { keyword: 'kilo-auto', mode: 'includes' },
@@ -259,8 +299,7 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   },
   {
     name: '阶跃星辰',
-    icon: 'stepfun-color',
-    color: 'linear-gradient(135deg, #0066ff, #3399ff)',
+    icon: 'stepfun',
     rules: [
       { keyword: 'stepfun', mode: 'includes' },
       { keyword: 'step-', mode: 'startsWith' },
@@ -270,15 +309,13 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: '百川智能',
     icon: 'baichuan-color',
-    color: 'linear-gradient(135deg, #0f766e, #14b8a6)',
     rules: [
       { keyword: 'baichuan', mode: 'includes' },
     ],
   },
   {
     name: 'AI21 Labs',
-    icon: 'ai21-brand-color',
-    color: 'linear-gradient(135deg, #7c3aed, #a855f7)',
+    icon: 'ai21',
     rules: [
       { keyword: 'ai21', mode: 'includes' },
       { keyword: 'jamba', mode: 'startsWith' },
@@ -288,7 +325,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'AI2',
     icon: 'ai2-color',
-    color: 'linear-gradient(135deg, #0f766e, #14b8a6)',
     rules: [
       { keyword: 'allenai', mode: 'includes' },
       { keyword: 'olmo', mode: 'includes' },
@@ -296,8 +332,7 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   },
   {
     name: 'Amazon Nova',
-    icon: 'nova',
-    color: 'linear-gradient(135deg, #f59e0b, #f97316)',
+    icon: 'nova-color',
     rules: [
       { keyword: 'amazon/nova', mode: 'startsWith' },
       { keyword: 'amazon.nova', mode: 'includes' },
@@ -313,7 +348,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Stability',
     icon: 'stability-color',
-    color: 'linear-gradient(135deg, #8b5cf6, #a855f7)',
     rules: [
       { keyword: 'flux', mode: 'includes' },
       { keyword: 'stablediffusion', mode: 'includes' },
@@ -325,7 +359,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'NVIDIA',
     icon: 'nvidia-color',
-    color: 'linear-gradient(135deg, #76b900, #4a8c0b)',
     rules: [
       { keyword: 'nvidia/', mode: 'includes' },
       { keyword: 'nvclip', mode: 'includes' },
@@ -340,7 +373,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'IBM',
     icon: 'ibm',
-    color: 'linear-gradient(135deg, #0f62fe, #4589ff)',
     rules: [
       { keyword: 'ibm/', mode: 'includes' },
       { keyword: 'granite', mode: 'includes' },
@@ -349,7 +381,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'BAAI',
     icon: 'baai',
-    color: 'linear-gradient(135deg, #111827, #374151)',
     rules: [
       { keyword: 'baai/', mode: 'includes' },
       { keyword: 'bge-', mode: 'includes' },
@@ -358,7 +389,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'ByteDance',
     icon: 'bytedance-color',
-    color: 'linear-gradient(135deg, #325ab4, #0f66ff)',
     rules: [
       { keyword: 'bytedance', mode: 'includes' },
       { keyword: 'seed-oss', mode: 'includes' },
@@ -372,7 +402,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'InternLM',
     icon: 'internlm-color',
-    color: 'linear-gradient(135deg, #1b3882, #4063c5)',
     rules: [
       { keyword: 'internlm', mode: 'includes' },
     ],
@@ -380,7 +409,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Midjourney',
     icon: 'midjourney',
-    color: 'linear-gradient(135deg, #4c6ef5, #748ffc)',
     rules: [
       { keyword: 'midjourney', mode: 'includes' },
       { keyword: 'mj_', mode: 'startsWith' },
@@ -388,8 +416,7 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   },
   {
     name: 'DeepL',
-    icon: 'deepl-color',
-    color: 'linear-gradient(135deg, #0f2b46, #21476f)',
+    icon: 'deepl',
     rules: [
       { keyword: 'deepl-', mode: 'startsWith' },
       { keyword: 'deepl/', mode: 'includes' },
@@ -398,7 +425,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Jina AI',
     icon: 'jina',
-    color: 'linear-gradient(135deg, #111827, #4b5563)',
     rules: [
       { keyword: 'jina', mode: 'includes' },
     ],
@@ -406,7 +432,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Relace',
     icon: 'relace',
-    color: 'linear-gradient(135deg, #7c3aed, #6366f1)',
     rules: [
       { keyword: 'relace', mode: 'includes' },
     ],
@@ -414,7 +439,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Arcee',
     icon: 'arcee-color',
-    color: 'linear-gradient(135deg, #2563eb, #60a5fa)',
     rules: [
       { keyword: 'arcee-ai', mode: 'includes' },
       { keyword: 'arcee', mode: 'includes' },
@@ -423,7 +447,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'AionLabs',
     icon: 'aionlabs-color',
-    color: 'linear-gradient(135deg, #0f766e, #14b8a6)',
     rules: [
       { keyword: 'aion-labs', mode: 'includes' },
       { keyword: 'aionlabs', mode: 'includes' },
@@ -432,15 +455,13 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'DeepCogito',
     icon: 'deepcogito-color',
-    color: 'linear-gradient(135deg, #2563eb, #7c3aed)',
     rules: [
       { keyword: 'deepcogito', mode: 'includes' },
     ],
   },
   {
     name: 'Essential AI',
-    icon: 'essentialai-color',
-    color: 'linear-gradient(135deg, #0f172a, #334155)',
+    icon: 'essentialai',
     rules: [
       { keyword: 'essentialai', mode: 'includes' },
     ],
@@ -448,7 +469,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Inception',
     icon: 'inception',
-    color: 'linear-gradient(135deg, #7c3aed, #ec4899)',
     rules: [
       { keyword: 'inception', mode: 'includes' },
     ],
@@ -456,7 +476,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Inflection',
     icon: 'inflection',
-    color: 'linear-gradient(135deg, #1d4ed8, #2563eb)',
     rules: [
       { keyword: 'inflection', mode: 'includes' },
     ],
@@ -464,7 +483,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Liquid AI',
     icon: 'liquid',
-    color: 'linear-gradient(135deg, #0f172a, #475569)',
     rules: [
       { keyword: 'liquid', mode: 'includes' },
       { keyword: 'lfm-', mode: 'startsWith' },
@@ -473,7 +491,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'LongCat',
     icon: 'longcat-color',
-    color: 'linear-gradient(135deg, #f97316, #fb7185)',
     rules: [
       { keyword: 'longcat', mode: 'includes' },
     ],
@@ -481,7 +498,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Morph',
     icon: 'morph-color',
-    color: 'linear-gradient(135deg, #4f46e5, #8b5cf6)',
     rules: [
       { keyword: 'morph/', mode: 'includes' },
       { keyword: 'morph-', mode: 'startsWith' },
@@ -490,7 +506,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Nous Research',
     icon: 'nousresearch',
-    color: 'linear-gradient(135deg, #111827, #4b5563)',
     rules: [
       { keyword: 'nousresearch', mode: 'includes' },
     ],
@@ -498,15 +513,14 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Upstage',
     icon: 'upstage-color',
-    color: 'linear-gradient(135deg, #2563eb, #14b8a6)',
     rules: [
       { keyword: 'upstage', mode: 'includes' },
+      { keyword: 'solar-', mode: 'startsWith' },
     ],
   },
   {
     name: 'Xiaomi MiMo',
     icon: 'xiaomimimo',
-    color: 'linear-gradient(135deg, #f97316, #fb923c)',
     rules: [
       { keyword: 'xiaomi/mimo', mode: 'includes' },
       { keyword: 'xiaomimimo', mode: 'includes' },
@@ -516,7 +530,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Z.ai',
     icon: 'zai',
-    color: 'linear-gradient(135deg, #0f172a, #2563eb)',
     rules: [
       { keyword: '2zai', mode: 'startsWith' },
       { keyword: 'z-ai', mode: 'startsWith' },
@@ -524,16 +537,22 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   },
   {
     name: 'SenseNova',
-    icon: 'sensenova-brand-color',
-    color: 'linear-gradient(135deg, #f59e0b, #f97316)',
+    icon: 'sensenova-color',
     rules: [
       { keyword: 'sensenova', mode: 'includes' },
     ],
   },
   {
+    name: '蚂蚁百灵',
+    icon: 'antgroup-color',
+    rules: [
+      { keyword: 'inclusionai', mode: 'includes' },
+      { keyword: 'ling-', mode: 'startsWith' },
+    ],
+  },
+  {
     name: 'Perplexity',
     icon: 'perplexity-color',
-    color: 'linear-gradient(135deg, #0f766e, #14b8a6)',
     rules: [
       { keyword: 'perplexity', mode: 'includes' },
       { keyword: 'pplx-', mode: 'startsWith' },
@@ -542,7 +561,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'OpenRouter',
     icon: 'openrouter',
-    color: 'linear-gradient(135deg, #7c3aed, #2563eb)',
     rules: [
       { keyword: 'openrouter', mode: 'includes' },
       { keyword: 'openrouter-', mode: 'startsWith' },
@@ -551,7 +569,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Groq',
     icon: 'groq',
-    color: 'linear-gradient(135deg, #111827, #374151)',
     rules: [
       { keyword: 'groq', mode: 'includes' },
     ],
@@ -559,7 +576,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Fireworks',
     icon: 'fireworks-color',
-    color: 'linear-gradient(135deg, #fb7185, #f97316)',
     rules: [
       { keyword: 'fireworks-ai', mode: 'includes' },
       { keyword: 'fireworks', mode: 'includes' },
@@ -568,15 +584,13 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'DeepInfra',
     icon: 'deepinfra-color',
-    color: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
     rules: [
       { keyword: 'deepinfra', mode: 'includes' },
     ],
   },
   {
     name: 'Together AI',
-    icon: 'together-brand-color',
-    color: 'linear-gradient(135deg, #7c3aed, #ec4899)',
+    icon: 'together-color',
     rules: [
       { keyword: 'together.ai', mode: 'includes' },
       { keyword: 'together', mode: 'includes' },
@@ -584,8 +598,7 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   },
   {
     name: 'Replicate',
-    icon: 'replicate-brand',
-    color: 'linear-gradient(135deg, #111827, #6366f1)',
+    icon: 'replicate',
     rules: [
       { keyword: 'replicate', mode: 'includes' },
     ],
@@ -593,15 +606,13 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'SambaNova',
     icon: 'sambanova-color',
-    color: 'linear-gradient(135deg, #2563eb, #06b6d4)',
     rules: [
       { keyword: 'sambanova', mode: 'includes' },
     ],
   },
   {
     name: 'Cerebras',
-    icon: 'cerebras-brand-color',
-    color: 'linear-gradient(135deg, #0f766e, #65a30d)',
+    icon: 'cerebras-color',
     rules: [
       { keyword: 'cerebras', mode: 'includes' },
     ],
@@ -609,7 +620,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Ollama',
     icon: 'ollama',
-    color: 'linear-gradient(135deg, #1f2937, #4b5563)',
     rules: [
       { keyword: 'ollama', mode: 'includes' },
     ],
@@ -617,7 +627,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'ModelScope',
     icon: 'modelscope-color',
-    color: 'linear-gradient(135deg, #2563eb, #60a5fa)',
     rules: [
       { keyword: 'modelscope', mode: 'includes' },
     ],
@@ -625,7 +634,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'SiliconCloud',
     icon: 'siliconcloud-color',
-    color: 'linear-gradient(135deg, #0ea5e9, #22d3ee)',
     rules: [
       { keyword: 'siliconcloud', mode: 'includes' },
       { keyword: 'siliconflow', mode: 'includes' },
@@ -634,7 +642,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Azure AI',
     icon: 'azureai-color',
-    color: 'linear-gradient(135deg, #0284c7, #2563eb)',
     rules: [
       { keyword: 'azureai', mode: 'includes' },
       { keyword: 'azure-openai', mode: 'includes' },
@@ -644,7 +651,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'AWS Bedrock',
     icon: 'bedrock-color',
-    color: 'linear-gradient(135deg, #f59e0b, #f97316)',
     rules: [
       { keyword: 'bedrock', mode: 'includes' },
     ],
@@ -652,15 +658,13 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: 'Vertex AI',
     icon: 'vertexai-color',
-    color: 'linear-gradient(135deg, #2563eb, #6366f1)',
     rules: [
       { keyword: 'vertexai', mode: 'includes' },
     ],
   },
   {
     name: 'Google Cloud',
-    icon: 'googlecloud-brand-color',
-    color: 'linear-gradient(135deg, #4285f4, #34a853)',
+    icon: 'googlecloud-color',
     rules: [
       { keyword: 'googlecloud', mode: 'includes' },
       { keyword: 'google-cloud', mode: 'includes' },
@@ -669,7 +673,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: '百度智能云',
     icon: 'baiducloud-color',
-    color: 'linear-gradient(135deg, #2563eb, #38bdf8)',
     rules: [
       { keyword: 'baiducloud', mode: 'includes' },
       { keyword: 'qianfan', mode: 'includes' },
@@ -678,7 +681,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: '百炼',
     icon: 'bailian-color',
-    color: 'linear-gradient(135deg, #7c3aed, #2563eb)',
     rules: [
       { keyword: 'bailian', mode: 'includes' },
       { keyword: 'dashscope', mode: 'includes' },
@@ -687,7 +689,6 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: '阿里云',
     icon: 'alibabacloud-color',
-    color: 'linear-gradient(135deg, #f97316, #fb923c)',
     rules: [
       { keyword: 'alibabacloud', mode: 'includes' },
     ],
@@ -695,15 +696,14 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
   {
     name: '火山引擎',
     icon: 'volcengine-color',
-    color: 'linear-gradient(135deg, #325ab4, #0f66ff)',
     rules: [
       { keyword: 'volcengine', mode: 'includes' },
+      { keyword: '^ep-\\d{6,}', mode: 'regex' },
     ],
   },
   {
     name: '七牛云',
     icon: 'qiniu-color',
-    color: 'linear-gradient(135deg, #06b6d4, #0891b2)',
     rules: [
       { keyword: 'qiniu', mode: 'includes' },
     ],
@@ -792,6 +792,19 @@ function matchesRule(context: BrandMatchContext, rule: BrandRule): boolean {
         || pattern.test(context.cleaned)
         || context.candidates.some((candidate) => pattern.test(candidate));
     }
+    case 'regex': {
+      // 关键词是完整正则（如 ^hy\d+(-|$)），一次覆盖整个命名代际（hy3/hy4/…），
+      // 避免每出一个新版本号就补一条 startsWith。无效正则按不匹配处理。
+      let pattern: RegExp;
+      try {
+        pattern = new RegExp(rule.keyword);
+      } catch {
+        return false;
+      }
+      return pattern.test(context.raw)
+        || pattern.test(context.cleaned)
+        || context.candidates.some((candidate) => pattern.test(candidate));
+    }
     default:
       return false;
   }
@@ -807,18 +820,35 @@ const BRAND_FALLBACK_BOUNDARY_RULES = BRAND_DEFINITIONS.map((brand) => ({
 }));
 
 export function getAllBrands(): BrandInfo[] {
-  return BRAND_DEFINITIONS.map(({ name, icon, color }) => ({ name, icon, color }));
+  return BRAND_DEFINITIONS.map(({ name, icon }) => ({ name, icon, color: brandColorFor(icon) }));
+}
+
+/**
+ * Every icon key the registry can hand to a badge, brand slots and model slots
+ * alike. The dominant-colour table (brandIconColors.ts) is generated from this
+ * list, so a new icon key here means re-running `npm run brand:colors`.
+ */
+export function getAllBrandIconKeys(): string[] {
+  const keys = new Set<string>();
+  for (const brand of BRAND_DEFINITIONS) {
+    if (brand.icon) keys.add(brand.icon);
+    for (const rule of brand.rules) {
+      if (rule.icon) keys.add(rule.icon);
+    }
+  }
+  return [...keys].sort();
 }
 
 export function getAllBrandNames(): string[] {
   return BRAND_DEFINITIONS.map((brand) => brand.name);
 }
 
-function toBrandInfo(brand: BrandDefinition): BrandInfo {
+function toBrandInfo(brand: BrandDefinition, modelIcon?: string): BrandInfo {
   return {
     name: brand.name,
     icon: brand.icon,
-    color: brand.color,
+    color: brandColorFor(brand.icon),
+    modelIcon: modelIcon || null,
   };
 }
 
@@ -827,16 +857,17 @@ export function getMatchingBrands(modelName: string): BrandInfo[] {
   const matches: BrandInfo[] = [];
   const seen = new Set<string>();
 
-  const add = (brand: BrandDefinition) => {
+  const add = (brand: BrandDefinition, modelIcon?: string) => {
     if (seen.has(brand.name)) return;
     seen.add(brand.name);
-    matches.push(toBrandInfo(brand));
+    matches.push(toBrandInfo(brand, modelIcon));
   };
 
   for (const definition of BRAND_DEFINITIONS) {
-    if (definition.rules.some((rule) => matchesRule(context, rule))) {
-      add(definition);
-    }
+    const matched = definition.rules.filter((rule) => matchesRule(context, rule));
+    if (matched.length === 0) continue;
+    // 第一个声明了模型标的命中规则胜出（gpt-5-codex 同时命中 gpt 与 codex- 时取后者）。
+    add(definition, matched.find((rule) => rule.icon)?.icon);
   }
 
   for (const candidate of context.candidates) {

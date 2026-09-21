@@ -2388,6 +2388,11 @@ export default function ProxyLogs() {
                         <ModelBadge
                           model={log.modelRequested}
                           actualModel={log.modelActual}
+                          site={{
+                            name: log.siteName,
+                            url: log.siteUrl,
+                            id: siteIdByName.get(String(log.siteName || '').trim()),
+                          }}
                           style={{ alignSelf: 'flex-start' }}
                         />
                       </td>

@@ -9,6 +9,6 @@ describe('BrandIcon rendering', () => {
     const brandedWrapper = wrappers.find((node) => node.props.style?.width === 44 && node.props.style?.height === 44);
 
     expect(brandedWrapper).toBeDefined();
-    expect(brandedWrapper?.props.style?.background).not.toBe('linear-gradient(135deg, #76b900, #4a8c0b)');
+    expect(brandedWrapper?.props.style?.background).not.toMatch(/linear-gradient/);
   });
 });

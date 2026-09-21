@@ -1,5 +1,6 @@
 export {
   collectBrandCandidates,
+  getAllBrandIconKeys,
   getAllBrandNames,
   getAllBrands,
   getBrand,
@@ -8,8 +9,11 @@ export {
   type BrandMatchContext,
 } from '../../server/shared/modelBrand.js';
 
+import { BRAND_ICON_COLORS } from '../../server/shared/brandIconColors.js';
+
+export { BRAND_ICON_COLORS, MONO_ICON_KEYS } from '../../server/shared/brandIconColors.js';
+
 const LEGACY_ICON_ALIASES: Record<string, string> = {
-  anthropic: 'claude-color',
   'claude.color': 'claude-color',
   'cohere.color': 'cohere-color',
   'doubao.color': 'doubao-color',
@@ -22,7 +26,6 @@ const LEGACY_ICON_ALIASES: Record<string, string> = {
   'spark.color': 'spark-color',
   stability: 'stability-color',
   'stability-brand-color': 'stability-color',
-  stepfun: 'stepfun-color',
   'wenxin.color': 'wenxin-color',
   xai: 'xai',
   'yi.color': 'yi-color',
@@ -48,11 +51,6 @@ const FALLBACK_FOREGROUNDS = [
   '#005e85', '#0d5a8b', '#2a568e', '#3c518f',
 ];
 
-/** Absolute icon URLs for brands missing from the shared icon CDN. */
-const CUSTOM_BRAND_ICON_URLS: Record<string, string> = {
-  agnes: 'https://agnes-ai.com/images/biglogo.png',
-};
-
 function isAbsoluteHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
 }
@@ -70,11 +68,10 @@ export function normalizeBrandIconKey(icon: string | null | undefined): string |
 export function getBrandIconUrl(icon: string | null | undefined, cdn: string): string | null {
   const normalized = normalizeBrandIconKey(icon);
   if (!normalized) return null;
+  // Absolute URLs pass through: brand records may carry their own logo.
   if (isAbsoluteHttpUrl(normalized)) return normalized;
-  const custom = CUSTOM_BRAND_ICON_URLS[normalized];
-  if (custom) return custom;
-  // `cdn` carries the resolved theme ('dark' | 'light'); brand icons are proxied
-  // through our own origin so one server-side cache serves every client.
+  // Every icon comes from the shared icon CDN — no per-brand hard-coded sources,
+  // so a vendor nobody has catalogued yet simply shows its letter glyph.
   const theme = cdn === 'dark' ? 'dark' : 'light';
   return `/api/brand-icon?icon=${encodeURIComponent(normalized)}&theme=${theme}`;
 }
@@ -150,8 +147,16 @@ export function perturbBadgeColor(hex: string, name: string, theme: 'dark' | 'li
   const isGray = rgb.r === rgb.g && rgb.g === rgb.b;
   let shifted: string;
   if (isGray) {
-    const scale = 1 + (nameHash(name, 'luma') - 0.5) * 0.5;
-    shifted = toHex({ r: rgb.r * scale, g: rgb.g * scale, b: rgb.b * scale });
+    // Grayscale: hue is meaningless. Directly pick a luminance within the
+    // theme's readable band via name hash so black/white brands (OpenAI vs
+    // Kimi vs xAI vs Z.ai) each get a distinct neutral chip, and same-brand
+    // models also differ per hash. The result is already clamp-safe so the
+    // after-return clampBadgeColor call is a no-op for this branch.
+    const [lo, hi] = theme === 'dark' ? [0.47, 0.75] : [0.16, 0.38];
+    const t = nameHash(name, 'luma');
+    const lum = lo + t * (hi - lo);
+    const v = Math.round(lum * 255);
+    shifted = toHex({ r: v, g: v, b: v });
   } else {
     const [h, s, l] = rgbToHsl(rgb);
     const dh = (nameHash(name, 'hue') - 0.5) * 120;
@@ -242,6 +247,25 @@ export function clampBadgeColor(hex: string, theme: 'dark' | 'light'): string {
     }
   }
   return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+}
+
+/**
+ * Pick the colour a badge should be tinted with. The table is generated from
+ * lobehub (`npm run brand:colors`): the mark's own dominant colour when the PNG
+ * has one, else the brand colour lobehub declares for it. Marks lobehub itself
+ * only draws in black/white (openai, kimi, grok, zai …) are absent on purpose —
+ * `fallback` (the brand's ink) is returned instead of an invented hue.
+ */
+export function brandIconBadgeColor(
+  icons: (string | null | undefined)[],
+  fallback: string | null | undefined,
+): string | null {
+  for (const icon of icons) {
+    const key = normalizeBrandIconKey(icon);
+    const hex = key ? BRAND_ICON_COLORS[key] : undefined;
+    if (hex) return hex;
+  }
+  return fallback ?? null;
 }
 
 /**

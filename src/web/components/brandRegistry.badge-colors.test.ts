@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { getAllBrands } from '../../server/shared/modelBrand.js';
-import { brandBadgeColors } from './brandRegistry.js';
+import { BRAND_ICON_COLORS, brandBadgeColors } from './brandRegistry.js';
 
 describe('brandBadgeColors', () => {
   it('derives tint, border, and text from the brand color', () => {
-    // DeepSeek brand color starts at #4d6bfe (77,107,254) and is darkened
-    // slightly (luminance clamp 0.40) for readable label text; the tint
-    // follows the darkened label hue so bg and text stay in the same family.
-    expect(brandBadgeColors('linear-gradient(135deg, #4d6bfe, #44a3ec)')).toEqual({
+    // DeepSeek brand color #4d6bfe (77,107,254) is darkened slightly (luminance
+    // clamp 0.40) for readable label text; the tint follows the darkened label
+    // hue so bg and text stay in the same family.
+    expect(brandBadgeColors(BRAND_ICON_COLORS['deepseek-color']!)).toEqual({
       bg: 'rgba(71,98,233,0.12)',
       border: 'rgba(71,98,233,0.25)',
       text: '#4762e9',
@@ -15,23 +15,21 @@ describe('brandBadgeColors', () => {
   });
 
   it('gives GLM and Qwen their own tints instead of one shared theme color', () => {
-    const zhipu = brandBadgeColors('linear-gradient(135deg, #3b6cf5, #6366f1)');
-    const qwen = brandBadgeColors('linear-gradient(135deg, #615cf7, #9b8afb)');
+    // 色来自 lobehub：zhipu-color 是智谱（GLM 的模型标），qwen-color 是通义千问。
+    const zhipu = brandBadgeColors(BRAND_ICON_COLORS['zhipu-color']!);
+    const qwen = brandBadgeColors(BRAND_ICON_COLORS['qwen-color']!);
 
-    expect(zhipu.bg).toBe('rgba(56,102,233,0.12)');
-    expect(qwen.bg).toBe('rgba(95,90,242,0.12)');
     expect(zhipu.bg).not.toBe(qwen.bg);
     expect(zhipu.text).not.toBe('var(--color-primary)');
     expect(qwen.text).not.toBe('var(--color-primary)');
   });
 
   it('darkens light brand colors so the label stays readable', () => {
-    // NVIDIA green (#76b900) is bright enough that using it verbatim as label
-    // text on a 12% tint is hard to read.
-    const nvidia = brandBadgeColors('linear-gradient(135deg, #76b900, #4a8c0b)');
-    expect(nvidia.bg).toBe('rgba(76,120,0,0.12)');
-    expect(nvidia.text).not.toBe('#76b900');
-    expect(nvidia.text).toBe('#4c7800');
+    // NVIDIA green (#74b71b, lobehub 声明色) is bright enough that using it
+    // verbatim as label text on a 12% tint is hard to read.
+    const nvidia = brandBadgeColors(BRAND_ICON_COLORS['nvidia-color']!);
+    expect(nvidia.text).not.toBe('#74b71b');
+    expect(nvidia.text).toBe('#4b7711');
   });
 
   it('supports shorthand hex and falls back when no color is present', () => {
@@ -45,8 +43,8 @@ describe('brandBadgeColors', () => {
   });
 
   it('perturbs the palette per name so same-brand items differ', () => {
-    const a = brandBadgeColors('linear-gradient(135deg, #4d6bfe, #44a3ec)', 'light', 'deepseek-chat');
-    const b = brandBadgeColors('linear-gradient(135deg, #4d6bfe, #44a3ec)', 'light', 'deepseek-reasoner');
+    const a = brandBadgeColors(BRAND_ICON_COLORS['deepseek-color']!, 'light', 'deepseek-chat');
+    const b = brandBadgeColors(BRAND_ICON_COLORS['deepseek-color']!, 'light', 'deepseek-reasoner');
     expect(a.text).not.toBe(b.text);
     expect(a.bg).not.toBe(b.bg);
     // Perturbation stays in the same blue family (±20° hue).
@@ -56,17 +54,30 @@ describe('brandBadgeColors', () => {
   });
 
   it('lightens dark brand colors so the label stays readable on dark themes', () => {
-    // xAI (Grok) brand color is near-black #111 — using it verbatim would make
-    // the badge vanish on a dark background.
-    const xai = brandBadgeColors('linear-gradient(135deg, #111, #444)', 'dark');
-    expect(xai.text).not.toBe('#111111');
+    // 下的上抬逻辑，而不是依赖某家品牌色。
+    const dark = brandBadgeColors('#111', 'dark');
+    expect(dark.text).not.toBe('#111111');
     // The lifted text must be a hex with noticeable luminance.
-    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(xai.text);
+    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(dark.text);
     expect(m).not.toBeNull();
     const luminance = 0.2126 * (Number.parseInt(m![1]!, 16) / 255)
       + 0.7152 * (Number.parseInt(m![2]!, 16) / 255)
       + 0.0722 * (Number.parseInt(m![3]!, 16) / 255);
     expect(luminance).toBeGreaterThan(0.18);
+  });
+
+  it('keeps black/white brands distinguishable instead of collapsing to one grey', () => {
+    // OpenAI/Kimi/xAI/Z.ai 的图标 lobehub 只声明黑或白，徽标必须靠哈希在
+    // 中性区间内散开，不能因为 clamp 全部落到同一个灰（曾经 gpt-5 和 gpt-4o
+    // 完全同色）。
+    const names = ['gpt-5', 'gpt-4o', 'kimi-k2', 'kimi-k1.5', 'grok-4', 'glm-4.6', 'openai-o3'];
+    const seen = new Map<string, string>();
+    for (const name of names) {
+      const text = brandBadgeColors('#000000', 'light', name).text;
+      expect(text).not.toBe('var(--color-primary)');
+      expect(seen.has(text)).toBe(false);
+      seen.set(text, name);
+    }
   });
 
   it('covers every registered brand so none fall back to the shared tint', () => {

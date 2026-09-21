@@ -841,7 +841,7 @@ describe('TokenRoutes grouped source models', () => {
         return {
           name: 'NVIDIA',
           icon: 'nvidia-color',
-          color: 'linear-gradient(135deg,#76b900,#4a8c0b)',
+          color: '#74b71b',
         };
       }
       return null;
@@ -1147,13 +1147,13 @@ describe('TokenRoutes grouped source models', () => {
     getBrandMock.mockImplementation((modelName: string) => {
       const model = String(modelName);
       if (model.includes('gpt')) {
-        return { name: 'OpenAI', icon: 'openai', color: 'linear-gradient(135deg,#111,#555)' };
+        return { name: 'OpenAI', icon: 'openai', color: '#000000' };
       }
       if (model.includes('claude')) {
-        return { name: 'Anthropic', icon: 'anthropic', color: 'linear-gradient(135deg,#d97706,#f59e0b)' };
+        return { name: 'Anthropic', icon: 'anthropic', color: '#000000' };
       }
       if (model.includes('gemini')) {
-        return { name: 'Gemini', icon: 'gemini', color: 'linear-gradient(135deg,#2563eb,#7c3aed)' };
+        return { name: 'Gemini', icon: 'gemini', color: '#3186ff' };
       }
       return null;
     });
