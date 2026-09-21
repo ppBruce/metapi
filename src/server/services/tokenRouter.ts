@@ -2,15 +2,13 @@
 import { db, schema } from '../db/index.js';
 import {
   config,
-  normalizeTokenRouterFailureCooldownMaxSec,
-  TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING,
 } from '../config.js';
 import {refreshModelPricingCatalog} from './modelPricingService.js';
 import { proxyChannelCoordinator, type ProxyChannelLoadSnapshot } from './proxyChannelCoordinator.js';
-import {classifyProxyFailure, isUsageLimitRateLimitFailure, type SiteRuntimeFailureContext} from './siteFailureClassification.js';
+import {classifyProxyFailure, type SiteRuntimeFailureContext} from './siteFailureClassification.js';
 import { refreshBalance } from './balanceService.js';
 import {SITE_API_ENDPOINT_COOLDOWN_MS} from './siteApiEndpointService.js';
-import {clampFailureCooldownMs as clampFailureCooldownMsMath, clampNumber, isContributionCloseToBest, resolveEffectiveFailureCooldownMs as resolveEffectiveFailureCooldownMsMath, resolveFailureBackoffSec, resolveRoundRobinCooldownSec, ROUND_ROBIN_COOLDOWN_LEVELS_SEC} from './tokenRouterMath.js';
+import {clampNumber, isContributionCloseToBest, resolveFailureBackoffSec, resolveRoundRobinCooldownSec, ROUND_ROBIN_COOLDOWN_LEVELS_SEC} from './tokenRouterMath.js';
 import type {
   ChannelRow,
   RouteChannelCandidate,
@@ -36,11 +34,6 @@ import {
 } from './tokenRouterStableFirstMemory.js';
 import {clearRuntimeHealthStatesForChannels, persistSiteRuntimeHealthState, ensureSiteRuntimeHealthStateLoaded, filterSiteRuntimeBrokenCandidatesByModel, getSiteRuntimeHealthDetails, recordSiteRuntimeFailure, recordSiteRuntimeSuccess} from './tokenRouterRuntimeHealthStore.js';
 import {
-  filterRecentlyFailedCandidates as filterRecentlyFailedCandidatesPure,
-  isChannelRecentlyFailed as isChannelRecentlyFailedPure,
-  type FailureAwareChannel,
-} from './tokenRouterCandidateFilter.js';
-import {
   buildContributionRanks,
   countCandidatesBySite,
   normalizeContributions,
@@ -62,8 +55,20 @@ import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from '.
 import { isUsableAccountToken } from './accountTokenService.js';
 import { getCredentialModeFromExtraConfig } from './accountExtraConfig.js';
 import { ensureSiteContextCapabilityLoaded, lookupSiteContextLimitForNames } from './siteContextCapabilityService.js';
+import {
+  clampFailureCooldownMs,
+  filterRecentlyFailedCandidates,
+  formatContextTokens,
+  isChannelRecentlyFailed,
+  isSiteDisabled,
+  resolveEffectiveFailureCooldownMs,
+  resolveFailureCooldownWeight,
+  resolveShortWindowLimitCooldown,
+} from './tokenRouterFailurePolicy.js';
+// Kept on this module's public surface: both were exported from here before the
+// failure policy moved out, and callers (and their tests) import them from here.
+export { filterRecentlyFailedCandidates, isChannelRecentlyFailed } from './tokenRouterFailurePolicy.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
-import { parseCodexQuotaResetHint } from './oauth/quota.js';
 import {
   getOauthRouteUnitStrategyLabel,
   listOauthRouteUnitMembersByUnitIds,
@@ -98,7 +103,6 @@ interface SelectedChannel {
   actualModel: string;
 }
 
-const SHORT_WINDOW_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 // 余额/配额耗尽（"Insufficient Balance" 等）的固定冷却：这类状态只能靠充值或
 // 人工解除，恢复探测对它无效。用一个小时量级的固定冷却把渠道从探测池里摘出去，
 // 同时保留路由层 1 小时后自动复检一次的机会（与「冷却上限 1 小时」的约定一致）。
@@ -128,67 +132,6 @@ function getBoundedGapState(requestedModel: string, siteId: number): BoundedGapS
   return state;
 }
 
-function resolveConfiguredFailureCooldownMaxMs(): number {
-  const normalized = normalizeTokenRouterFailureCooldownMaxSec(config.tokenRouterFailureCooldownMaxSec)
-    ?? TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING;
-  return Math.max(1_000, normalized * 1000);
-}
-
-function clampFailureCooldownMs(cooldownMs: number): number {
-  return clampFailureCooldownMsMath(cooldownMs, resolveConfiguredFailureCooldownMaxMs());
-}
-
-function resolveEffectiveFailureCooldownMs(failCount?: number | null, weight = 1): number {
-  const maxMs = resolveConfiguredFailureCooldownMaxMs();
-  const rawBackoffMs = resolveEffectiveFailureCooldownMsMath(failCount, maxMs);
-  const normalizedWeight = Number.isFinite(weight)
-    ? Math.max(0.1, Math.min(3, Number(weight)))
-    : 1;
-  // Apply weight BEFORE clamping so the ceiling cannot be exceeded by weight
-  return clampFailureCooldownMsMath(rawBackoffMs * normalizedWeight, maxMs);
-}
-
-function resolveFailureCooldownWeight(context: SiteRuntimeFailureContext = {}): {
-  weight: number;
-  skipCooldown: boolean;
-} {
-  const decision = classifyProxyFailure(context);
-  return {
-    weight: decision.cooldownWeight,
-    // Client/policy rejections should not park the channel out of the pool.
-    skipCooldown: decision.cooldownScope === 'none',
-  };
-}
-
-
-function resolveShortWindowLimitCooldown(
-  account: typeof schema.accounts.$inferSelect,
-  context: SiteRuntimeFailureContext = {},
-  nowMs = Date.now(),
-): string | null {
-  const status = typeof context.status === 'number' ? context.status : 0;
-  const errorText = (context.errorText || '').trim();
-  if (!isUsageLimitRateLimitFailure({ status, errorText })) return null;
-
-  const resetHint = parseCodexQuotaResetHint(status, errorText, nowMs);
-  if (resetHint) {
-    const hintMs = Date.parse(resetHint.resetAt);
-    if (Number.isFinite(hintMs) && hintMs > nowMs) {
-      return new Date(hintMs).toISOString();
-    }
-  }
-
-  const oauth = getOauthInfoFromAccount(account);
-  const storedResetAt = oauth?.quota?.lastLimitResetAt;
-  if (oauth?.provider === 'codex' && storedResetAt) {
-    const storedMs = Date.parse(storedResetAt);
-    if (Number.isFinite(storedMs) && storedMs > nowMs) {
-      return new Date(storedMs).toISOString();
-    }
-  }
-
-  return new Date(nowMs + SHORT_WINDOW_LIMIT_COOLDOWN_MS).toISOString();
-}
 
 async function loadCredentialScopedChannelIds(
   channel: typeof schema.routeChannels.$inferSelect,
@@ -428,47 +371,6 @@ export function invalidateTokenRouterCache(): void {
   getStableFirstLastSelectedSiteByKey().clear();
   getStableFirstObservationProgressByKey().clear();
   getStableFirstObservationSiteCooldownByKey().clear();
-}
-
-function isSiteDisabled(status?: string | null): boolean {
-  return (status || 'active') === 'disabled';
-}
-
-/** Compact token-count label for eligibility messages (131072 -> 131K). */
-function formatContextTokens(tokens: number): string {
-  if (!Number.isFinite(tokens) || tokens <= 0) return String(tokens);
-  if (tokens >= 1_000_000) {
-    const millions = tokens / 1_000_000;
-    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`;
-  }
-  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
-  return String(tokens);
-}
-
-export function isChannelRecentlyFailed(
-  channel: FailureAwareChannel,
-  nowMs = Date.now(),
-  avoidSec = resolveFailureBackoffSec(channel.failCount),
-): boolean {
-  return isChannelRecentlyFailedPure(
-    channel,
-    nowMs,
-    resolveConfiguredFailureCooldownMaxMs(),
-    avoidSec,
-  );
-}
-
-export function filterRecentlyFailedCandidates<T extends { channel: FailureAwareChannel }>(
-  candidates: T[],
-  nowMs = Date.now(),
-  avoidSec?: number,
-): T[] {
-  return filterRecentlyFailedCandidatesPure(
-    candidates,
-    nowMs,
-    resolveConfiguredFailureCooldownMaxMs(),
-    avoidSec,
-  );
 }
 
 export type RouteDecisionExplanation = RouteDecision & {
