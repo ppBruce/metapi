@@ -5,7 +5,7 @@
  * free of page state. Types are declared locally to avoid a circular import
  * with ProxyLogs.tsx.
  */
-import { DetailDisclosureCard, debugCodeBlockStyle, detailInfoGridStyle, detailInfoItemStyle, detailInfoLabelStyle, detailInfoValueStyle } from './proxyLogsUi.js';
+import { DetailDisclosureCard, debugCodeBlockStyle, detailInfoGridStyle, detailInfoItemStyle, detailInfoLabelStyle, detailInfoValueStyle, detailSectionTitleStyle, formSectionStyle } from './proxyLogsUi.js';
 import { parseStoredDebugPreview, stringifyStoredDebugValue } from './proxyLogsHelpers.js';
 import type { ProxyDebugTraceDetail } from '../../api.js';
 
@@ -156,5 +156,146 @@ export function ProxyDebugAttemptDetail({ attempt }: { attempt: ProxyDebugTraceA
         <pre style={debugCodeBlockStyle}>{serializedAttempt}</pre>
       </div>
     </DetailDisclosureCard>
+  );
+}
+
+/** Load state of the selected debug trace, as the page tracks it. */
+export type ProxyDebugTraceDetailState = {
+  loading: boolean;
+  data?: ProxyDebugTraceDetail;
+  error?: string;
+};
+
+/**
+ * The debug-trace detail panel: empty / loading / error / no-data states, the
+ * basic-info grid, the stored debug payloads and the attempt list.
+ *
+ * Extracted from ProxyLogs.tsx. It reads nothing from the page directly — the
+ * selected trace and its load state come in as props, and the copy handler is
+ * injected so this module stays free of page state (same pattern as the other
+ * helpers here).
+ */
+export function ProxyDebugTraceDetailPanel({
+selectedDebugTraceId,
+detail,
+onCopyStoredDebugValue,
+}: {
+selectedDebugTraceId: number | null;
+detail?: ProxyDebugTraceDetailState;
+onCopyStoredDebugValue: (label: string, value: unknown) => void;
+}) {
+  if (!selectedDebugTraceId) {
+    return (
+      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+        暂无追踪详情。请选择一条最近追踪后再查看。
+      </div>
+    );
+  }
+
+  if (detail?.loading) {
+    return (
+      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+        加载追踪详情中...
+      </div>
+    );
+  }
+
+  if (detail?.error) {
+    return (
+      <div style={{ color: 'var(--color-danger)', fontSize: 13 }}>
+        {detail.error}
+      </div>
+    );
+  }
+
+  if (!detail?.data) {
+    return (
+      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+        暂无追踪详情。
+      </div>
+    );
+  }
+
+  const traceDetail = detail.data.trace;
+
+  return (
+    <div style={{ display: 'grid', gap: 12 }}>
+      <div style={{ ...formSectionStyle, gap: 10 }}>
+        <div style={detailSectionTitleStyle}>基础信息</div>
+        <div style={detailInfoGridStyle}>
+          <div style={detailInfoItemStyle}>
+            <div style={detailInfoLabelStyle}>下游路径</div>
+            <div style={detailInfoValueStyle}>
+              {traceDetail.downstreamPath || '-'}
+            </div>
+          </div>
+          <div style={detailInfoItemStyle}>
+            <div style={detailInfoLabelStyle}>Session</div>
+            <div style={detailInfoValueStyle}>
+              {traceDetail.sessionId || '-'}
+            </div>
+          </div>
+          <div style={detailInfoItemStyle}>
+            <div style={detailInfoLabelStyle}>模型</div>
+            <div style={detailInfoValueStyle}>
+              {traceDetail.requestedModel || '-'}
+            </div>
+          </div>
+          <div style={detailInfoItemStyle}>
+            <div style={detailInfoLabelStyle}>最终上游路径</div>
+            <div style={detailInfoValueStyle}>
+              {traceDetail.finalUpstreamPath || '-'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gap: 10 }}>
+        {renderStoredDebugDetails(
+          '候选 endpoint',
+          traceDetail.endpointCandidatesJson,
+          {
+            copyLabel: '候选 endpoint',
+          }, onCopyStoredDebugValue,
+        )}
+        {renderStoredDebugDetails(
+          '原始下游请求头',
+          traceDetail.requestHeadersJson,
+          {
+            copyLabel: '原始下游请求头',
+          }, onCopyStoredDebugValue,
+        )}
+        {renderStoredDebugDetails(
+          '原始下游请求体',
+          traceDetail.requestBodyJson,
+          {
+            copyLabel: '原始下游请求体',
+          }, onCopyStoredDebugValue,
+        )}
+        {renderStoredDebugDetails(
+          '最终响应',
+          traceDetail.finalResponseBodyJson,
+          {
+            copyLabel: '最终响应',
+          }, onCopyStoredDebugValue,
+        )}
+      </div>
+
+      <DetailDisclosureCard
+        title={`Attempt 记录 (${detail.data.attempts.length})`}
+      >
+        <div style={{ padding: 12, display: 'grid', gap: 8 }}>
+          {detail.data.attempts.length === 0 ? (
+            <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+              暂无 attempt 记录
+            </div>
+          ) : (
+            detail.data.attempts.map((attempt) => (
+              <ProxyDebugAttemptDetail key={attempt.id} attempt={attempt} />
+            ))
+          )}
+        </div>
+      </DetailDisclosureCard>
+    </div>
   );
 }

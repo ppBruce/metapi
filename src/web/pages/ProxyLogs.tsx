@@ -7,7 +7,7 @@ import React, {
   useCallback,
 } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import {api, type ProxyDebugTraceDetail, type ProxyDebugTraceListItem, type ProxyLogDetail, type ProxyLogListItem, type ProxyLogsSummary, type ProxyLogStatusFilter} from '../api.js';
+import {api, type ProxyDebugTraceListItem, type ProxyLogDetail, type ProxyLogListItem, type ProxyLogsSummary, type ProxyLogStatusFilter} from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { ModelBadge } from '../components/BrandIcon.js';
 import CenteredModal from '../components/CenteredModal.js';
@@ -25,11 +25,11 @@ import PageJumpInput from '../components/PageJumpInput.js';
 import PaginationControls from '../components/PaginationControls.js';
 import { parseProxyLogPathMeta } from './helpers/proxyLogPathMeta.js';
 import {DEFAULT_PROXY_DEBUG_SETTINGS, DEBUG_REFRESH_INTERVAL_MS, DEBUG_TRACE_PAGE_SIZE, EMPTY_SUMMARY, TRACE_TABLE_LIMIT, buildBillingProcessLines, buildProxyDebugSettingsPayload, buildProxyLogsRouteSearch, firstByteColor, formatBillingDetailSummary, formatFirstByteLabel, formatLatency, formatProxyDebugCaptureSummary, formatProxyDebugTargetSummary, formatProxyLogTokenValue, formatProxyLogUsageSource, formatStreamModeLabel, formatTokensPerSecond, latencyColor, normalizeProxyDebugSettings, parseStoredDebugPreview, persistDebugTracePanelExpanded, readProxyLogsRouteState, readStoredDebugTracePanelExpanded, renderDownstreamKeySummary, proxyLogKeyChipColors, resolveProxyLogClientDisplay, proxyLogRetryColor, resolveProxyLogInputTokens, toApiTimeBoundary, formatProxyLogTokenPair, type ProxyDebugSettingsState, type ProxyLogRenderItem} from './helpers/proxyLogsHelpers.js';
-import {CompactSummaryMetric, DetailDisclosureCard, copyTextToClipboard, debugCheckboxRowStyle, detailInfoGridStyle, detailInfoItemStyle, detailInfoLabelStyle, detailInfoValueStyle, detailSectionTitleStyle, formInputStyle, formSectionLabelStyle, formSectionStyle, renderProxyLogClientCell, ProxyLogTimingCell, StreamModeIcon} from './helpers/proxyLogsUi.js';
+import {CompactSummaryMetric, copyTextToClipboard, debugCheckboxRowStyle, formInputStyle, formSectionLabelStyle, formSectionStyle, renderProxyLogClientCell, ProxyLogTimingCell, StreamModeIcon} from './helpers/proxyLogsUi.js';
 import {
-  renderStoredDebugDetails,
   renderTraceStatusBadge,
-  ProxyDebugAttemptDetail,
+  ProxyDebugTraceDetailPanel,
+  type ProxyDebugTraceDetailState,
 } from './helpers/proxyLogTraceDetail.js';
 import { tr } from '../i18n.js';
 import DateTimeInput from '../components/DateTimeInput.js';
@@ -51,12 +51,6 @@ type ProxyLogSiteFilterOption = {
   id: number;
   name: string;
   status: string | null;
-};
-
-type ProxyDebugTraceDetailState = {
-  loading: boolean;
-  data?: ProxyDebugTraceDetail;
-  error?: string;
 };
 
 /**
@@ -802,122 +796,6 @@ export default function ProxyLogs() {
   );
 
 
-  function renderDebugTraceDetailContent() {
-    if (!selectedDebugTraceId) {
-      return (
-        <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-          暂无追踪详情。请选择一条最近追踪后再查看。
-        </div>
-      );
-    }
-
-    if (selectedDebugTraceDetail?.loading) {
-      return (
-        <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-          加载追踪详情中...
-        </div>
-      );
-    }
-
-    if (selectedDebugTraceDetail?.error) {
-      return (
-        <div style={{ color: 'var(--color-danger)', fontSize: 13 }}>
-          {selectedDebugTraceDetail.error}
-        </div>
-      );
-    }
-
-    if (!selectedDebugTraceDetail?.data) {
-      return (
-        <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-          暂无追踪详情。
-        </div>
-      );
-    }
-
-    const traceDetail = selectedDebugTraceDetail.data.trace;
-
-    return (
-      <div style={{ display: 'grid', gap: 12 }}>
-        <div style={{ ...formSectionStyle, gap: 10 }}>
-          <div style={detailSectionTitleStyle}>基础信息</div>
-          <div style={detailInfoGridStyle}>
-            <div style={detailInfoItemStyle}>
-              <div style={detailInfoLabelStyle}>下游路径</div>
-              <div style={detailInfoValueStyle}>
-                {traceDetail.downstreamPath || '-'}
-              </div>
-            </div>
-            <div style={detailInfoItemStyle}>
-              <div style={detailInfoLabelStyle}>Session</div>
-              <div style={detailInfoValueStyle}>
-                {traceDetail.sessionId || '-'}
-              </div>
-            </div>
-            <div style={detailInfoItemStyle}>
-              <div style={detailInfoLabelStyle}>模型</div>
-              <div style={detailInfoValueStyle}>
-                {traceDetail.requestedModel || '-'}
-              </div>
-            </div>
-            <div style={detailInfoItemStyle}>
-              <div style={detailInfoLabelStyle}>最终上游路径</div>
-              <div style={detailInfoValueStyle}>
-                {traceDetail.finalUpstreamPath || '-'}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: 'grid', gap: 10 }}>
-          {renderStoredDebugDetails(
-            '候选 endpoint',
-            traceDetail.endpointCandidatesJson,
-            {
-              copyLabel: '候选 endpoint',
-            }, handleCopyStoredDebugValue,
-          )}
-          {renderStoredDebugDetails(
-            '原始下游请求头',
-            traceDetail.requestHeadersJson,
-            {
-              copyLabel: '原始下游请求头',
-            }, handleCopyStoredDebugValue,
-          )}
-          {renderStoredDebugDetails(
-            '原始下游请求体',
-            traceDetail.requestBodyJson,
-            {
-              copyLabel: '原始下游请求体',
-            }, handleCopyStoredDebugValue,
-          )}
-          {renderStoredDebugDetails(
-            '最终响应',
-            traceDetail.finalResponseBodyJson,
-            {
-              copyLabel: '最终响应',
-            }, handleCopyStoredDebugValue,
-          )}
-        </div>
-
-        <DetailDisclosureCard
-          title={`Attempt 记录 (${selectedDebugTraceDetail.data.attempts.length})`}
-        >
-          <div style={{ padding: 12, display: 'grid', gap: 8 }}>
-            {selectedDebugTraceDetail.data.attempts.length === 0 ? (
-              <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-                暂无 attempt 记录
-              </div>
-            ) : (
-              selectedDebugTraceDetail.data.attempts.map((attempt) => (
-                <ProxyDebugAttemptDetail key={attempt.id} attempt={attempt} />
-              ))
-            )}
-          </div>
-        </DetailDisclosureCard>
-      </div>
-    );
-  }
 
   const filterControls = (
     <>
@@ -1865,7 +1743,11 @@ export default function ProxyLogs() {
           side="right"
         >
           <div style={{ padding: 16, display: 'grid', gap: 16 }}>
-            {renderDebugTraceDetailContent()}
+            {<ProxyDebugTraceDetailPanel
+            selectedDebugTraceId={selectedDebugTraceId}
+            detail={selectedDebugTraceDetail}
+            onCopyStoredDebugValue={handleCopyStoredDebugValue}
+          />}
           </div>
         </MobileDrawer>
       ) : (
@@ -1877,7 +1759,11 @@ export default function ProxyLogs() {
           closeOnBackdrop
           closeOnEscape
         >
-          {renderDebugTraceDetailContent()}
+          <ProxyDebugTraceDetailPanel
+            selectedDebugTraceId={selectedDebugTraceId}
+            detail={selectedDebugTraceDetail}
+            onCopyStoredDebugValue={handleCopyStoredDebugValue}
+          />
         </CenteredModal>
       )}
 
