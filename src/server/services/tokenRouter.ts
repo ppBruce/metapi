@@ -4,11 +4,11 @@ import {
   config,
 } from '../config.js';
 import {refreshModelPricingCatalog} from './modelPricingService.js';
-import { proxyChannelCoordinator, type ProxyChannelLoadSnapshot } from './proxyChannelCoordinator.js';
+import { proxyChannelCoordinator } from './proxyChannelCoordinator.js';
 import {classifyProxyFailure, type SiteRuntimeFailureContext} from './siteFailureClassification.js';
 import { refreshBalance } from './balanceService.js';
 import {SITE_API_ENDPOINT_COOLDOWN_MS} from './siteApiEndpointService.js';
-import {clampNumber, isContributionCloseToBest, resolveFailureBackoffSec, resolveRoundRobinCooldownSec, ROUND_ROBIN_COOLDOWN_LEVELS_SEC} from './tokenRouterMath.js';
+import {isContributionCloseToBest, resolveFailureBackoffSec, resolveRoundRobinCooldownSec, ROUND_ROBIN_COOLDOWN_LEVELS_SEC} from './tokenRouterMath.js';
 import type {
   ChannelRow,
   RouteChannelCandidate,
@@ -48,7 +48,6 @@ import {
   markBoundedGapStateDirty,
 } from './boundedGapPersistence.js';
 import {
-  type RouteRoutingStrategy,
 } from './routeRoutingStrategy.js';
 import { resolveDownstreamPolicyModel } from './downstreamPolicyTypes.js';
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
@@ -68,6 +67,15 @@ import {
 // Kept on this module's public surface: both were exported from here before the
 // failure policy moved out, and callers (and their tests) import them from here.
 export { filterRecentlyFailedCandidates, isChannelRecentlyFailed } from './tokenRouterFailurePolicy.js';
+import {
+  formatChannelRuntimeLoad,
+  isExplicitTokenChannel,
+  isOauthRouteUnitCandidate,
+  isOauthRouteUnitMemberCoolingDown,
+  resolveChannelRuntimeLoadMultiplier,
+  resolveRouteStrategy,
+  setCandidateDecisionReason,
+} from './tokenRouterCandidateHelpers.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import {
   getOauthRouteUnitStrategyLabel,
@@ -401,16 +409,6 @@ type CandidateEligibilityReason = {
   details?: Record<string, unknown>;
 };
 
-function setCandidateDecisionReason(
-  candidate: RouteDecisionCandidate,
-  code: RouteDecisionReasonCode,
-  reason: string,
-  details?: Record<string, unknown>,
-): void {
-  candidate.reason = reason;
-  candidate.reasonCodes = [code];
-  candidate.reasonDetails = details;
-}
 
 type CandidateEligibilityOptions = {
   requestedModel: string;
@@ -423,42 +421,10 @@ type CandidateEligibilityOptions = {
 };
 
 
-function resolveRouteStrategy(_route: RouteRow): RouteRoutingStrategy {
-  return config.defaultRoutingStrategy;
-}
 
 
 
 
-function isOauthRouteUnitCandidate(candidate: RouteChannelCandidate): boolean {
-  return !!candidate.routeUnit || !!candidate.channel.oauthRouteUnitId;
-}
-
-function isOauthRouteUnitMemberCoolingDown(
-  member: typeof schema.oauthRouteUnitMembers.$inferSelect,
-  nowIso: string,
-): boolean {
-  return !!member.cooldownUntil && member.cooldownUntil > nowIso;
-}
-
-function resolveChannelRuntimeLoadMultiplier(snapshot: ProxyChannelLoadSnapshot): number {
-  if (!snapshot.sessionScoped || snapshot.concurrencyLimit <= 0) return 1;
-
-  const activeRatio = clampNumber(snapshot.activeLeaseCount / Math.max(1, snapshot.concurrencyLimit), 0, 1.5);
-  const waitingRatio = clampNumber(snapshot.waitingCount / Math.max(1, snapshot.concurrencyLimit), 0, 3);
-  const activePenalty = activeRatio * 0.28;
-  const waitingPenalty = waitingRatio * 0.32;
-  const saturationPenalty = snapshot.saturated ? 0.12 : 0;
-  return clampNumber(1 - activePenalty - waitingPenalty - saturationPenalty, 0.18, 1);
-}
-
-function formatChannelRuntimeLoad(snapshot: ProxyChannelLoadSnapshot): string {
-  if (!snapshot.sessionScoped || snapshot.concurrencyLimit <= 0) {
-    return '未限流';
-  }
-  const multiplier = resolveChannelRuntimeLoadMultiplier(snapshot);
-  return `${multiplier.toFixed(2)}（活跃=${snapshot.activeLeaseCount}/${snapshot.concurrencyLimit}，等待=${snapshot.waitingCount}）`;
-}
 
 import {
   STICKY_PREFERRED_YIELD_LOW_COVERAGE,
@@ -469,9 +435,6 @@ import {
 
 
 
-function isExplicitTokenChannel(candidate: RouteChannelCandidate): boolean {
-  return typeof candidate.channel.tokenId === 'number' && candidate.channel.tokenId > 0;
-}
 
 export {
   isExactRouteModelPattern,
