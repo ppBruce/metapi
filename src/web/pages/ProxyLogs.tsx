@@ -24,11 +24,12 @@ import ModernSelect from '../components/ModernSelect.js';
 import PageJumpInput from '../components/PageJumpInput.js';
 import PaginationControls from '../components/PaginationControls.js';
 import { parseProxyLogPathMeta } from './helpers/proxyLogPathMeta.js';
-import {DEFAULT_PROXY_DEBUG_SETTINGS, DEBUG_REFRESH_INTERVAL_MS, DEBUG_TRACE_PAGE_SIZE, EMPTY_SUMMARY, TRACE_TABLE_LIMIT, buildBillingProcessLines, buildProxyDebugSettingsPayload, buildProxyLogsRouteSearch, firstByteColor, formatBillingDetailSummary, formatFirstByteLabel, formatLatency, formatProxyDebugCaptureSummary, formatProxyDebugTargetSummary, formatProxyLogTokenValue, formatProxyLogUsageSource, formatStreamModeLabel, formatTokensPerSecond, latencyColor, normalizeProxyDebugSettings, parseStoredDebugPreview, persistDebugTracePanelExpanded, readProxyLogsRouteState, readStoredDebugTracePanelExpanded, renderDownstreamKeySummary, proxyLogKeyChipColors, resolveProxyLogClientDisplay, proxyLogRetryColor, resolveProxyLogInputTokens, stringifyStoredDebugValue, toApiTimeBoundary, formatProxyLogTokenPair, type ProxyDebugSettingsState, type ProxyLogRenderItem} from './helpers/proxyLogsHelpers.js';
-import {CompactSummaryMetric, DetailDisclosureCard, copyTextToClipboard, debugCheckboxRowStyle, debugCodeBlockStyle, detailInfoGridStyle, detailInfoItemStyle, detailInfoLabelStyle, detailInfoValueStyle, detailSectionTitleStyle, formInputStyle, formSectionLabelStyle, formSectionStyle, renderProxyLogClientCell, ProxyLogTimingCell, StreamModeIcon} from './helpers/proxyLogsUi.js';
+import {DEFAULT_PROXY_DEBUG_SETTINGS, DEBUG_REFRESH_INTERVAL_MS, DEBUG_TRACE_PAGE_SIZE, EMPTY_SUMMARY, TRACE_TABLE_LIMIT, buildBillingProcessLines, buildProxyDebugSettingsPayload, buildProxyLogsRouteSearch, firstByteColor, formatBillingDetailSummary, formatFirstByteLabel, formatLatency, formatProxyDebugCaptureSummary, formatProxyDebugTargetSummary, formatProxyLogTokenValue, formatProxyLogUsageSource, formatStreamModeLabel, formatTokensPerSecond, latencyColor, normalizeProxyDebugSettings, parseStoredDebugPreview, persistDebugTracePanelExpanded, readProxyLogsRouteState, readStoredDebugTracePanelExpanded, renderDownstreamKeySummary, proxyLogKeyChipColors, resolveProxyLogClientDisplay, proxyLogRetryColor, resolveProxyLogInputTokens, toApiTimeBoundary, formatProxyLogTokenPair, type ProxyDebugSettingsState, type ProxyLogRenderItem} from './helpers/proxyLogsHelpers.js';
+import {CompactSummaryMetric, DetailDisclosureCard, copyTextToClipboard, debugCheckboxRowStyle, detailInfoGridStyle, detailInfoItemStyle, detailInfoLabelStyle, detailInfoValueStyle, detailSectionTitleStyle, formInputStyle, formSectionLabelStyle, formSectionStyle, renderProxyLogClientCell, ProxyLogTimingCell, StreamModeIcon} from './helpers/proxyLogsUi.js';
 import {
   renderStoredDebugDetails,
   renderTraceStatusBadge,
+  ProxyDebugAttemptDetail,
 } from './helpers/proxyLogTraceDetail.js';
 import { tr } from '../i18n.js';
 import DateTimeInput from '../components/DateTimeInput.js';
@@ -57,8 +58,6 @@ type ProxyDebugTraceDetailState = {
   data?: ProxyDebugTraceDetail;
   error?: string;
 };
-
-type ProxyDebugTraceAttempt = ProxyDebugTraceDetail['attempts'][number];
 
 /**
  * Server-side SQL now paginates by request group and attaches attemptCount
@@ -802,81 +801,6 @@ export default function ProxyLogs() {
     [toast],
   );
 
-  function renderAttemptDetail(attempt: ProxyDebugTraceAttempt) {
-    const serializedAttempt = [
-      `targetUrl: ${attempt.targetUrl}`,
-      `runtimeExecutor: ${attempt.runtimeExecutor || '-'}`,
-      `recoverApplied: ${attempt.recoverApplied ? 'true' : 'false'}`,
-      `downgradeDecision: ${attempt.downgradeDecision ? 'true' : 'false'}`,
-      `downgradeReason: ${attempt.downgradeReason || '-'}`,
-      '',
-      'requestHeaders:',
-      stringifyStoredDebugValue(attempt.requestHeadersJson) || '-',
-      '',
-      'requestBody:',
-      stringifyStoredDebugValue(attempt.requestBodyJson) || '-',
-      '',
-      'responseHeaders:',
-      stringifyStoredDebugValue(attempt.responseHeadersJson) || '-',
-      '',
-      'responseBody:',
-      stringifyStoredDebugValue(attempt.responseBodyJson) || '-',
-      '',
-      'rawErrorText:',
-      attempt.rawErrorText || '-',
-      '',
-      'memoryWrite:',
-      stringifyStoredDebugValue(attempt.memoryWriteJson) || '-',
-    ].join('\n');
-
-    return (
-      <DetailDisclosureCard
-        key={attempt.id}
-        title={`#${attempt.attemptIndex + 1} · ${attempt.endpoint} · ${attempt.responseStatus ?? '-'} · ${attempt.requestPath}`}
-      >
-        <div style={{ padding: 12, display: 'grid', gap: 12 }}>
-          <div style={detailInfoGridStyle}>
-            <div style={detailInfoItemStyle}>
-              <div style={detailInfoLabelStyle}>目标地址</div>
-              <div
-                style={{
-                  ...detailInfoValueStyle,
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 12,
-                }}
-              >
-                {attempt.targetUrl || '-'}
-              </div>
-            </div>
-            <div style={detailInfoItemStyle}>
-              <div style={detailInfoLabelStyle}>执行器</div>
-              <div style={detailInfoValueStyle}>
-                {attempt.runtimeExecutor || '-'}
-              </div>
-            </div>
-            <div style={detailInfoItemStyle}>
-              <div style={detailInfoLabelStyle}>恢复逻辑</div>
-              <div style={detailInfoValueStyle}>
-                {attempt.recoverApplied ? '已应用' : '未应用'}
-              </div>
-            </div>
-            <div style={detailInfoItemStyle}>
-              <div style={detailInfoLabelStyle}>降级决策</div>
-              <div style={detailInfoValueStyle}>
-                {attempt.downgradeDecision ? '已触发' : '未触发'}
-              </div>
-            </div>
-          </div>
-          {attempt.downgradeReason ? (
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-              降级原因：{attempt.downgradeReason}
-            </div>
-          ) : null}
-          <pre style={debugCodeBlockStyle}>{serializedAttempt}</pre>
-        </div>
-      </DetailDisclosureCard>
-    );
-  }
 
   function renderDebugTraceDetailContent() {
     if (!selectedDebugTraceId) {
@@ -985,7 +909,9 @@ export default function ProxyLogs() {
                 暂无 attempt 记录
               </div>
             ) : (
-              selectedDebugTraceDetail.data.attempts.map(renderAttemptDetail)
+              selectedDebugTraceDetail.data.attempts.map((attempt) => (
+                <ProxyDebugAttemptDetail key={attempt.id} attempt={attempt} />
+              ))
             )}
           </div>
         </DetailDisclosureCard>
