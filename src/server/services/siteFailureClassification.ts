@@ -21,7 +21,7 @@ export type SiteRuntimeFailureContext = {
 
 /** Timeout / first-byte patterns shared by retry and site health. */
 export const RETRYABLE_TIMEOUT_PATTERNS: RegExp[] = [
-  /(request timed out|connection timed out|read timeout|first byte timeout|\btimed out\b)/i,
+  /(request timed out|connection timed out|read timeout|first byte timeout|stream idle timeout|\btimed out\b)/i,
 ];
 
 /**
