@@ -35,6 +35,19 @@ export type OauthAccountQuotaWindow = {
   message?: string | null;
 };
 
+export type OauthAccountQuotaEntry = {
+  key: string;
+  label: string;
+  kind: 'window' | 'bucket' | 'credits';
+  used?: number | null;
+  limit?: number | null;
+  remaining?: number | null;
+  remainingPercent?: number | null;
+  unit?: string | null;
+  resetAt?: string | null;
+  unlimited?: boolean;
+};
+
 export type OauthAccountInfo = {
   provider: string;
   email: string;
@@ -43,6 +56,7 @@ export type OauthAccountInfo = {
     fiveHour: OauthAccountQuotaWindow | null;
     sevenDay: OauthAccountQuotaWindow | null;
   } | null;
+  entries: OauthAccountQuotaEntry[];
 };
 
 function asTrimmedString(value: unknown): string {
@@ -130,6 +144,43 @@ function normalizeOauthQuotaWindowPair(
   return { fiveHour, sevenDay };
 }
 
+function normalizeOauthQuotaEntry(raw: any): OauthAccountQuotaEntry | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const key = asTrimmedString(raw.key);
+  const label = asTrimmedString(raw.label);
+  const kind = raw.kind === 'window' || raw.kind === 'bucket' || raw.kind === 'credits'
+    ? raw.kind
+    : null;
+  if (!key || !label || !kind) return null;
+  const entry: OauthAccountQuotaEntry = { key, label, kind };
+  const pickNumber = (field: string) => (
+    typeof raw[field] === 'number' && Number.isFinite(raw[field]) ? raw[field] as number : undefined
+  );
+  const used = pickNumber('used');
+  const limit = pickNumber('limit');
+  const remaining = pickNumber('remaining');
+  const remainingPercent = pickNumber('remainingPercent');
+  if (used !== undefined) entry.used = used;
+  if (limit !== undefined) entry.limit = limit;
+  if (remaining !== undefined) entry.remaining = remaining;
+  if (remainingPercent !== undefined) entry.remainingPercent = remainingPercent;
+  const unit = asTrimmedString(raw.unit);
+  if (unit) entry.unit = unit;
+  const resetAt = asTrimmedString(raw.resetAt);
+  if (resetAt) entry.resetAt = resetAt;
+  if (raw.unlimited === true) entry.unlimited = true;
+  return entry;
+}
+
+function normalizeOauthQuotaEntries(quota: any): OauthAccountQuotaEntry[] {
+  if (!quota || typeof quota !== 'object' || Array.isArray(quota)) return [];
+  const raw = quota.entries;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(normalizeOauthQuotaEntry)
+    .filter((entry: OauthAccountQuotaEntry | null): entry is OauthAccountQuotaEntry => !!entry);
+}
+
 /**
  * Parse OAuth account info from an account row.
  *
@@ -159,8 +210,9 @@ export function parseOauthAccountInfo(account: any): OauthAccountInfo | null {
   const email = asTrimmedString(oauth.email);
   const planType = asTrimmedString(oauth.planType);
   const quota = normalizeOauthQuotaWindowPair(oauth.quota);
+  const entries = normalizeOauthQuotaEntries(oauth.quota);
 
-  return { provider, email, planType, quota };
+  return { provider, email, planType, quota, entries };
 }
 
 // ── Sub2API subscription usage helpers ─────────────────────────────────────
