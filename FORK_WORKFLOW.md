@@ -58,16 +58,33 @@ git commit -m "merge: resolve conflicts with upstream vX.X.X"
 # 5. 运行类型检查确保代码正确
 npm run typecheck
 
-# 6. 重新构建 Docker 镜像
-docker build -t metapi:1.7.X-custom .
+# 6. 合并完成后先记录回滚材料（生产数据目录和当前镜像）
+PLAN=docs/plans/metapi-upgrade-$(date +%Y%m%d)-1.7.X
+mkdir -p "$PLAN/backup"
+docker inspect metapi-metapi-1 > "$PLAN/backup/container.before.json"
+docker image inspect metapi:1.7.Y-custom > "$PLAN/backup/image.before.json"
+cp .env docker-compose.yml docker-compose.override.yml "$PLAN/backup/"
+docker tag metapi:1.7.Y-custom metapi:rollback-before-1.7.X
 
-# 7. 更新 docker-compose.yml 中的镜像版本
+# 停止服务后生成一致性数据库快照
+docker compose stop metapi
+sqlite3 data/ppbruce/hub.db ".backup '$PLAN/backup/hub.before-switch.db'"
+
+# 7. 更新 docker-compose.yml / override 中的镜像版本和合并提交
 # image: metapi:1.7.X-custom
+# org.opencontainers.image.revision: <merge commit>
 
-# 8. 重启容器验证
-docker-compose up -d
+# 8. 构建并启动新镜像（Compose 使用当前 checkout）
+docker compose build metapi
+docker compose up -d --no-build --pull never metapi
 
-# 9. 推送到你的 GitHub
+# 9. 验证容器、健康接口和一个管理接口
+docker compose ps
+curl --fail http://127.0.0.1:4000/api/health/ready
+curl --fail -H "Authorization: Bearer $AUTH_TOKEN" \
+  http://127.0.0.1:4000/api/stats/dashboard
+
+# 10. 推送到你的 GitHub
 git push origin local/1.7.X-custom
 ```
 
