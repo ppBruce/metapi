@@ -830,9 +830,7 @@ describe('OAuthManagement page', () => {
       });
       expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
       expect(collectText(root.root)).toContain('已创建路由池，但连接列表刷新失败');
-      expect(collectText(root.root)).toContain('Fallback Pool');
-      expect(collectText(root.root)).toContain('2 个成员');
-      expect(collectText(root.root)).toContain('轮询');
+      expect(collectText(root.root)).toContain('已创建路由池，但连接列表刷新失败 · Fallback Pool（2 个成员 · 轮询）');
       expect(collectText(root.root)).not.toContain('已选 2 项');
     } finally {
       root?.unmount();
@@ -940,9 +938,7 @@ describe('OAuthManagement page', () => {
       expect(apiMock.deleteOAuthRouteUnit).toHaveBeenCalledWith(96);
       expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
       expect(collectText(root.root)).toContain('已拆回单体，但连接列表刷新失败');
-      expect(collectText(root.root)).toContain('Sticky Pool');
-      expect(collectText(root.root)).toContain('2 个成员');
-      expect(collectText(root.root)).toContain('单个用到不可用再切');
+      expect(collectText(root.root)).toContain('已拆回单体，但连接列表刷新失败 · Sticky Pool（2 个成员 · 单个用到不可用再切）');
     } finally {
       root?.unmount();
     }
@@ -1862,7 +1858,7 @@ describe('OAuthManagement page', () => {
         const text = collectText(root!.root);
         expect(text).toContain('官方上游连接');
         expect(text).toContain('CLI');
-        expect(text).toContain('API Key');
+        expect(text).not.toContain('连接管理页默认只保留');
       });
 
       await clickButton(root!, '新建 OAuth 连接');
@@ -2785,6 +2781,17 @@ describe('OAuthManagement page', () => {
       await vi.waitFor(async () => {
         await flushMicrotasks();
         expect(collectText(root!.root)).toContain('权重');
+      });
+
+      // Idle state shows the weight as a click-to-edit label; enter edit mode.
+      const weightDisplay = root!.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.className === 'string'
+        && node.props.className.split(' ').includes('oauth-weight-display')
+      ));
+      expect(collectText(weightDisplay)).toContain('3');
+      await act(async () => {
+        weightDisplay.props.onClick();
       });
 
       const weightInput = findOauthSettingInput(root!, 'site-weight');
