@@ -17,6 +17,7 @@ const { apiMock, openMock, focusMock, confirmMock, promptMock } = vi.hoisted(() 
     updateOAuthConnectionProxy: vi.fn(),
     updateSite: vi.fn(),
     deleteOAuthConnection: vi.fn(),
+    deleteOAuthConnections: vi.fn(),
     importOAuthConnections: vi.fn(),
     createOAuthRouteUnit: vi.fn(),
     deleteOAuthRouteUnit: vi.fn(),

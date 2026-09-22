@@ -890,15 +890,17 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
     }
     setActionLoadingKey('delete:selected');
     try {
-      const results = await Promise.allSettled(selectedConnectionIds.map((accountId) => api.deleteOAuthConnection(accountId)));
-      const failed = results.filter((item) => item.status === 'rejected').length;
+      const result = await api.deleteOAuthConnections(selectedConnectionIds);
       await loadConnections();
       setSelectedConnectionIds([]);
-      if (failed > 0) {
-        setSessionInfo(`批量删除完成，${failed} 个连接删除失败`);
+      if (result.failedItems.length > 0) {
+        setSessionInfo(`批量删除完成，${result.failedItems.length} 个连接删除失败`);
       } else {
-        setSessionSuccess(`已删除 ${results.length} 个 OAuth 连接`);
+        setSessionSuccess(`已删除 ${result.successIds.length} 个 OAuth 连接`);
       }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      setSessionError(errorMessage || '批量删除 OAuth 连接失败');
     } finally {
       setActionLoadingKey('');
     }
