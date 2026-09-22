@@ -6,6 +6,8 @@ import { resetCodexHttpSessionQueue } from '../../proxy-core/runtime/codexHttpSe
 import { resetCodexSessionResponseStore } from '../../proxy-core/runtime/codexSessionResponseStore.js';
 import { resetProxyChannelCoordinatorState } from '../../services/proxyChannelCoordinator.js';
 
+const { CODEX_CLIENT_VERSION } = await import('../../shared/codexClientFamily.js');
+
 const fetchMock = vi.fn();
 const selectChannelMock = vi.fn();
 const selectNextChannelMock = vi.fn();
@@ -305,7 +307,7 @@ describe('responses proxy codex oauth refresh', () => {
     expect(secondOptions.headers.Authorization).toBe('Bearer fresh-access-token');
     expect(secondOptions.headers.Originator || secondOptions.headers.originator).toBe('codex_cli_rs');
     expect(secondOptions.headers['Chatgpt-Account-Id'] || secondOptions.headers['chatgpt-account-id']).toBe('chatgpt-account-123');
-    expect(secondOptions.headers.Version || secondOptions.headers.version).toBe('0.149.1');
+    expect(secondOptions.headers.Version || secondOptions.headers.version).toBe(CODEX_CLIENT_VERSION);
     expect(String(secondOptions.headers.Session_id || secondOptions.headers.session_id || '')).toMatch(/^[0-9a-f-]{36}$/i);
     expect(secondOptions.headers.Conversation_id || secondOptions.headers.conversation_id).toBeUndefined();
     expect(secondOptions.headers['User-Agent'] || secondOptions.headers['user-agent']).toBe('CodexClient/1.0');
