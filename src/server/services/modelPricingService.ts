@@ -10,7 +10,9 @@ import {
   modelsDevCostToPricingModel,
 } from './modelPriceCatalogService.js';
 import { evaluateTieredExprInSandbox } from './tieredExprSandbox.js';
+import { createBoundedCache } from '../shared/boundedCache.js';
 
+const PRICE_CACHE_MAX_ENTRIES = 512;
 const PRICE_CACHE_TTL_MS = 10 * 60 * 1000;
 const PRICE_CACHE_FAILURE_TTL_MS = 60 * 1000;
 const PRICING_FETCH_TIMEOUT_MS = 8_000;
@@ -150,8 +152,8 @@ export interface ProxyBillingDetails {
   };
 }
 
-const pricingCache = new Map<string, PricingCacheEntry>();
-const routingReferenceCostCache = new Map<string, RoutingReferenceCostCacheEntry>();
+const pricingCache = createBoundedCache<string, PricingCacheEntry>(PRICE_CACHE_MAX_ENTRIES);
+const routingReferenceCostCache = createBoundedCache<string, RoutingReferenceCostCacheEntry>(PRICE_CACHE_MAX_ENTRIES);
 
 function toNumber(value: unknown, fallback = 0): number {
   const n = typeof value === 'number' ? value : Number(value);
