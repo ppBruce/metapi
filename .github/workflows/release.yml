@@ -26,7 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 25
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -88,7 +88,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 25
+          node-version: 24
           cache: npm
 
       - name: Restore Electron cache (Windows)
@@ -374,9 +374,6 @@ jobs:
           - arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
-          - arch: armv7
-            platform: linux/arm/v7
-            runner: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -391,10 +388,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-
-      - name: Set up QEMU
-        if: matrix.arch == 'armv7'
-        uses: docker/setup-qemu-action@v4
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
@@ -504,6 +497,5 @@ jobs:
             docker buildx imagetools create \
               --tag "$tag" \
               "${tag}-amd64" \
-              "${tag}-arm64" \
-              "${tag}-armv7"
+              "${tag}-arm64"
           done <<< "${{ steps.meta.outputs.tags }}"

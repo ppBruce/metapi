@@ -1,6 +1,4 @@
-# Keep the Docker base on Node 22 because the official Node 24/25 slim images
-# no longer publish linux/arm/v7 manifests, which breaks our armv7 Docker jobs.
-FROM node:22-bookworm-slim AS builder
+FROM node:24-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -12,16 +10,13 @@ ENV PYTHON=/usr/bin/python3
 
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
-# Only rebuild native modules that need target-arch compilation. esbuild has
-# prebuilt binaries for armv7 (vitepress/esbuild@0.21.5 ships as
-# esbuild-linux-arm); rebuilding it under QEMU breaks its version check.
 RUN npm rebuild sharp better-sqlite3 --no-audit --no-fund
 
 COPY . .
 RUN npm run build:web && npm run build:server
 RUN npm prune --omit=dev --no-audit --no-fund
 
-FROM node:22-bookworm-slim
+FROM node:24-bookworm-slim
 
 WORKDIR /app
 
