@@ -28,6 +28,8 @@ vi.mock('undici', () => ({
 type DbModule = typeof import('../../db/index.js');
 type RouteRefreshWorkflowModule = typeof import('../../services/routeRefreshWorkflow.js');
 
+const { CODEX_CLIENT_VERSION } = await import('../../shared/codexClientFamily.js');
+
 function buildJwt(payload: Record<string, unknown>) {
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value))
     .toString('base64url');
@@ -2396,7 +2398,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     });
     expect(parsedExtra.oauth?.tokenExpiresAt).toBe(Date.parse('2026-04-12T11:26:13+08:00'));
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
+      `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
       expect.objectContaining({
         method: 'GET',
         headers: expect.objectContaining({

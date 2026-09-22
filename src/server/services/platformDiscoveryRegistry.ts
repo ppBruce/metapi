@@ -5,6 +5,7 @@ import { runWithSiteApiEndpointPool } from './siteApiEndpointService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { getOAuthProviderDefinition } from './oauth/providers.js';
 import { CLAUDE_DEFAULT_ANTHROPIC_VERSION } from './oauth/claudeProvider.js';
+import { CODEX_CLIENT_VERSION } from '../shared/codexClientFamily.js';
 import {
   ANTIGRAVITY_DAILY_UPSTREAM_BASE_URL,
   ANTIGRAVITY_MODELS_USER_AGENT,
@@ -44,7 +45,7 @@ function normalizeBaseUrl(baseUrl: string): string {
 
 function buildCodexModelsEndpoint(baseUrl: string): string {
   const normalized = normalizeBaseUrl(baseUrl);
-  return `${normalized}/models?client_version=${encodeURIComponent('1.0.0')}`;
+  return `${normalized}/models?client_version=${encodeURIComponent(CODEX_CLIENT_VERSION)}`;
 }
 
 function extractCodexModelIds(payload: unknown): string[] {
