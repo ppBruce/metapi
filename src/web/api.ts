@@ -660,7 +660,7 @@ export type OAuthConnectionInfo = {
   proxyUrl?: string | null;
   routeUnit?: OAuthRouteUnitSummary | null;
   routeParticipation?: OAuthRouteParticipation | null;
-  site?: { id: number; name: string; url: string; platform: string } | null;
+  site?: { id: number; name: string; url: string; platform: string; globalWeight?: number | null } | null;
 };
 
 export type OAuthConnectionsResponse = {
