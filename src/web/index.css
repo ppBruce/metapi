@@ -3870,6 +3870,18 @@ textarea {
   gap: 6px;
 }
 
+.oauth-weight-input {
+  width: 72px;
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.oauth-site-weight-editor {
+  gap: 4px;
+}
+
 .oauth-input,
 .oauth-textarea {
   width: 100%;

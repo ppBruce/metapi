@@ -9,7 +9,7 @@ import { useToast } from '../components/Toast.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import OAuthModelsModal, { type OAuthModelItem } from './oauth/OAuthModelsModal.js';
 import AutoRefreshCountdown from './oauth/AutoRefreshCountdown.js';
-import {QuotaWindowRow, SideDrawer, compactAccountKey, hasOauthProxySelection, renderCodeBlock, renderGuideCard, resolveConnectionEmailLabel, resolveConnectionPrimaryTitle, resolveConnectionRouteParticipation, resolveConnectionStatusLabel, resolveModelSyncDetail, resolveModelSyncStatusText, resolveProxyDisplayText, resolveProxyProjectSummary, resolveQuotaSourceLabel, resolveQuotaStatusLabel, resolveQuotaSyncDetail, resolveQuotaSyncStatusText, resolveRouteParticipationSummary, resolveRouteUnitStrategyLabel} from './oauth/connectionPresentation.js';
+import {QuotaWindowRow, SideDrawer, SiteWeightEditor, compactAccountKey, hasOauthProxySelection, renderCodeBlock, renderGuideCard, resolveConnectionEmailLabel, resolveConnectionPrimaryTitle, resolveConnectionRouteParticipation, resolveConnectionStatusLabel, resolveModelSyncDetail, resolveModelSyncStatusText, resolveProxyDisplayText, resolveProxyProjectSummary, resolveQuotaSourceLabel, resolveQuotaStatusLabel, resolveQuotaSyncDetail, resolveQuotaSyncStatusText, resolveRouteParticipationSummary, resolveRouteUnitStrategyLabel} from './oauth/connectionPresentation.js';
 import {api, type OAuthConnectionInfo, type OAuthProviderInfo, type OAuthRouteUnitStrategy, type OAuthStartInstructions} from '../api.js';
 import {copyText} from '../clipboard.js';
 import { StatusText, StatusPill } from '../components/StatusText.js';
@@ -332,6 +332,7 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
   const [providerFilter, setProviderFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [siteFilter, setSiteFilter] = useState('');
+  const [siteWeightDrafts, setSiteWeightDrafts] = useState<Record<string, string>>({});
   const [visibleColumns, setVisibleColumns] = useState<Record<ColumnKey, boolean>>({
     identity: true,
     site: true,
@@ -918,6 +919,29 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
     }
   };
 
+  const handleUpdateSiteWeight = async (connection: OAuthConnectionInfo) => {
+    const siteId = connection.site?.id || connection.siteId;
+    const rawValue = siteWeightDrafts[String(siteId)] ?? String(connection.site?.globalWeight ?? 1);
+    const weight = Number(rawValue);
+    if (!Number.isFinite(weight) || weight <= 0) {
+      setSessionError('权重必须是大于 0 的数字');
+      return;
+    }
+    const normalizedWeight = Math.max(0.01, Math.min(100, Number(weight.toFixed(3))));
+    const actionKey = `weight:${siteId}`;
+    setActionLoadingKey(actionKey);
+    try {
+      await api.updateSite(siteId, { globalWeight: normalizedWeight });
+      setSessionSuccess(`站点权重已更新为 ${normalizedWeight}`);
+      await loadConnections();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      setSessionError(errorMessage || '更新站点权重失败');
+    } finally {
+      setActionLoadingKey('');
+    }
+  };
+
   const handleRefreshSelected = async () => {
     if (selectedConnectionIds.length === 0) return;
     setActionLoadingKey('quota:selected');
@@ -1476,6 +1500,15 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
                     {sitePlatform && sitePlatform !== connection.provider ? (
                       <div className="oauth-cell-secondary">{sitePlatform}</div>
                     ) : null}
+                    <SiteWeightEditor
+                      value={siteWeightDrafts[String(connection.site?.id || connection.siteId)] ?? String(connection.site?.globalWeight ?? 1)}
+                      saving={actionLoadingKey === `weight:${connection.site?.id || connection.siteId}`}
+                      onChange={(next) => setSiteWeightDrafts((current) => ({
+                        ...current,
+                        [String(connection.site?.id || connection.siteId)]: next,
+                      }))}
+                      onSave={() => void handleUpdateSiteWeight(connection)}
+                    />
                   </div>
                 </td>
               ) : null}
@@ -1604,7 +1637,27 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
               />
             )}
           >
-            <MobileField label="站点" value={connection.site?.name || '--'} />
+            <MobileField
+              label="站点"
+              value={(
+                <div className="oauth-cell-stack">
+                  <div className="oauth-cell-primary oauth-site-name">{connection.site?.name || '--'}</div>
+                  {asTrimmedString(connection.site?.platform) && asTrimmedString(connection.site?.platform) !== connection.provider ? (
+                    <div className="oauth-cell-secondary">{asTrimmedString(connection.site?.platform)}</div>
+                  ) : null}
+                  <SiteWeightEditor
+                    value={siteWeightDrafts[String(connection.site?.id || connection.siteId)] ?? String(connection.site?.globalWeight ?? 1)}
+                    saving={actionLoadingKey === `weight:${connection.site?.id || connection.siteId}`}
+                    onChange={(next) => setSiteWeightDrafts((current) => ({
+                      ...current,
+                      [String(connection.site?.id || connection.siteId)]: next,
+                    }))}
+                    onSave={() => void handleUpdateSiteWeight(connection)}
+                  />
+                </div>
+              )}
+              stacked
+            />
             <MobileField label="邮箱" value={resolveConnectionEmailLabel(connection) || '--'} />
             <MobileField label="计划 / 项目" value={connection.projectId ? `${connection.planType || '--'} · ${connection.projectId}` : (connection.planType || '--')} />
             <MobileField label="路由参与" value={resolveRouteParticipationSummary(connection)} />

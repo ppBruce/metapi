@@ -15,6 +15,7 @@ const { apiMock, openMock, focusMock, confirmMock, promptMock } = vi.hoisted(() 
     refreshOAuthConnectionQuotaBatch: vi.fn(),
     rebindOAuthConnection: vi.fn(),
     updateOAuthConnectionProxy: vi.fn(),
+    updateSite: vi.fn(),
     deleteOAuthConnection: vi.fn(),
     importOAuthConnections: vi.fn(),
     createOAuthRouteUnit: vi.fn(),
@@ -2665,6 +2666,147 @@ describe('OAuthManagement page', () => {
       expect(collectText(root!.root)).toContain('额度信息已刷新');
       expect(collectText(root!.root)).not.toContain('当前 Codex OAuth 未暴露官方 5h 窗口');
       expect(collectText(root!.root)).not.toContain('当前 Codex OAuth 未暴露官方 7d 窗口');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('edits the site global weight from the connection row', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 7,
+          siteId: 2,
+          provider: 'codex',
+          email: 'codex-user@example.com',
+          accountKey: 'chatgpt-account-123',
+          planType: 'plus',
+          modelCount: 3,
+          modelsPreview: ['gpt-5'],
+          status: 'healthy',
+          site: {
+            id: 2,
+            name: 'ChatGPT Codex OAuth',
+            url: 'https://chatgpt.com/backend-api/codex',
+            platform: 'codex',
+            globalWeight: 3,
+          },
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+    apiMock.updateSite.mockResolvedValue({ success: true });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        expect(collectText(root!.root)).toContain('权重');
+      });
+
+      const weightInput = findOauthSettingInput(root!, 'site-weight');
+      expect(weightInput.props.value).toBe('3');
+
+      await act(async () => {
+        weightInput.props.onChange({ target: { value: '2.5' } });
+      });
+      await act(async () => {
+        await findButton(root!, '保存').props.onClick();
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+      });
+
+      expect(apiMock.updateSite).toHaveBeenCalledWith(2, { globalWeight: 2.5 });
+      expect(collectText(root!.root)).toContain('站点权重已更新为 2.5');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('rejects a site global weight that is not a positive number', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({ providers: [] });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 7,
+          siteId: 2,
+          provider: 'codex',
+          email: 'codex-user@example.com',
+          accountKey: 'chatgpt-account-123',
+          planType: 'plus',
+          modelCount: 3,
+          modelsPreview: ['gpt-5'],
+          status: 'healthy',
+          site: {
+            id: 2,
+            name: 'ChatGPT Codex OAuth',
+            url: 'https://chatgpt.com/backend-api/codex',
+            platform: 'codex',
+            globalWeight: 3,
+          },
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        expect(collectText(root!.root)).toContain('权重');
+      });
+
+      const weightInput = findOauthSettingInput(root!, 'site-weight');
+      await act(async () => {
+        weightInput.props.onChange({ target: { value: '0' } });
+      });
+      await act(async () => {
+        await findButton(root!, '保存').props.onClick();
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+      });
+
+      expect(apiMock.updateSite).not.toHaveBeenCalled();
+      expect(collectText(root!.root)).toContain('权重必须是大于 0 的数字');
     } finally {
       root?.unmount();
     }

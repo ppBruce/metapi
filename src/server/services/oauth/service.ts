@@ -1019,6 +1019,7 @@ export async function listOauthConnections(options: {
         name: row.sites.name,
         url: row.sites.url,
         platform: row.sites.platform,
+        globalWeight: row.sites.globalWeight,
       },
     }];
   });

@@ -271,6 +271,42 @@ export function QuotaWindowRow({
   );
 }
 
+export function SiteWeightEditor({
+  value,
+  saving,
+  onChange,
+  onSave,
+}: {
+  value: string;
+  saving: boolean;
+  onChange: (next: string) => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="oauth-cell-inline oauth-site-weight-editor">
+      <span className="oauth-cell-tertiary">权重</span>
+      <input
+        data-oauth-setting="site-weight"
+        className="oauth-input oauth-weight-input"
+        type="number"
+        min="0.01"
+        max="100"
+        step="0.001"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      <button
+        type="button"
+        className="btn btn-link btn-link-info oauth-inline-trigger"
+        onClick={onSave}
+        disabled={saving}
+      >
+        {saving ? '保存中...' : '保存'}
+      </button>
+    </div>
+  );
+}
+
 export function SideDrawer({
   open,
   onClose,
