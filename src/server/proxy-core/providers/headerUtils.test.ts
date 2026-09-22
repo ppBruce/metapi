@@ -17,6 +17,17 @@ describe('provider header utils', () => {
     expect(uuidFromSeed('seed-1')).toMatch(/^[0-9a-f-]{36}$/);
   });
 
+  it('pins uuidFromSeed output so a derivation change cannot slip through', async () => {
+    // These exact values are load-bearing: codex session/conversation ids are
+    // derived from them, so changing the derivation silently breaks continuity
+    // with previously seen sessions. If this assertion fails, that is the
+    // intended alarm — update it only as a deliberate, announced change.
+    const { uuidFromSeed } = await import('./headerUtils.js');
+
+    expect(uuidFromSeed('seed-1')).toBe('42229d20-6bce-5487-81e6-6626479015f2');
+    expect(uuidFromSeed('metapi:codex:cache-key-1')).toBe('7ab65a65-18ae-5b81-8b3b-4f89fa943088');
+  });
+
   it('merges claude beta headers without duplicating entries', async () => {
     const { mergeClaudeBetaHeader } = await import('./headerUtils.js');
 
