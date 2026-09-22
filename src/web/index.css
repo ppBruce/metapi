@@ -2306,7 +2306,24 @@ html[data-layout="desktop"] .main-content {
   max-width: 100%;
 }
 
-.sites-name-tag {
+/*
+ * Outbound markers (proxy / custom headers) in the name cell. Fixed-size slots
+ * so a row does not change height or shift its name when a marker appears.
+ */
+.sites-name-flags {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+}
+
+.sites-name-flag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
 }
 
@@ -2355,6 +2372,18 @@ html[data-layout="desktop"] .main-content {
   gap: 6px;
   white-space: nowrap;
   min-height: 24px;
+}
+
+/* One icon+count marker; the icon is a fixed 12px box so digits stay aligned. */
+.sites-conn-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sites-conn-item svg {
+  flex: 0 0 auto;
+  opacity: 0.75;
 }
 
 .sites-table th.sites-actions-col {

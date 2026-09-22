@@ -4,6 +4,8 @@
  * format a SiteRow/SubscriptionSummary or render a label.
  */
 
+import { FileTextIcon, GlobeIcon, KeyIcon, SlidersIcon, UnlockIcon, UserIcon } from '../../components/MiniIcons.js';
+
 export type SiteSubscriptionSummary = {
   activeCount: number;
   planNames?: string[];
@@ -28,6 +30,110 @@ export function getConfiguredSiteApiEndpoints(site?: Pick<SiteRowLike, 'apiEndpo
   return Array.isArray(site?.apiEndpoints)
     ? site.apiEndpoints.filter((item) => typeof item?.url === 'string' && item.url.trim())
     : [];
+}
+
+/**
+ * Count of custom request headers configured on a site.
+ *
+ * The API hands the row `customHeaders` as the serialized JSON object ('' when
+ * unset), so an empty object and malformed input both count as zero: the list
+ * marker only has to answer "does this site send anything custom".
+ */
+export function countSiteCustomHeaders(customHeaders?: string | null): number {
+  const raw = String(customHeaders ?? '').trim();
+  if (!raw) return 0;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 0;
+    return Object.keys(parsed as Record<string, unknown>).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Whether the site routes upstream traffic through its own outbound proxy. */
+export function hasSiteOutboundProxy(proxyUrl?: string | null): boolean {
+  return String(proxyUrl ?? '').trim().length > 0;
+}
+
+/**
+ * Markers for configuration that silently changes how a site reaches upstream:
+ * its own outbound proxy and custom request headers. Neither was visible in the
+ * list, so locating them meant opening the editor site by site — while a tester
+ * tracking down a site-specific 502 needs exactly that answer in the row.
+ *
+ * Uses the native `title` rather than the app's data-tooltip to match the
+ * connection markers in the same row: these are 12px inline icons, and the
+ * styled tooltip's 220px floor reads as a panel instead of a label.
+ */
+export function SiteOutboundFlags(props: {
+  proxyUrl?: string | null;
+  customHeaders?: string | null;
+  customHeadersOverrideRequestHeaders?: boolean | null;
+}) {
+  const { proxyUrl, customHeaders, customHeadersOverrideRequestHeaders } = props;
+  const hasProxy = hasSiteOutboundProxy(proxyUrl);
+  const headerCount = countSiteCustomHeaders(customHeaders);
+  if (!hasProxy && headerCount === 0) return null;
+
+  return (
+    <span className="sites-name-flags">
+      {hasProxy ? (
+        <span className="sites-name-flag" title="已配置出站代理">
+          <GlobeIcon size={12} />
+        </span>
+      ) : null}
+      {headerCount > 0 ? (
+        <span
+          className="sites-name-flag"
+          title={`已配置自定义请求头 ${headerCount} 项${customHeadersOverrideRequestHeaders ? '，覆盖上游同名请求头' : ''}`}
+        >
+          <SlidersIcon size={12} />
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+export type SiteConnectionStatsLike = {
+  sessions: number;
+  apiKeys: number;
+  tokens: number;
+  oauth: number;
+};
+
+/**
+ * Connection counts as icon+number markers. Shared by the sites table row and
+ * the mobile card so the two surfaces cannot drift apart.
+ *
+ * The icons replace the 👤/🔑/🎫/🔓 glyphs these counts used to be: emoji
+ * presentation depends on the installed emoji font, so the markers rendered as
+ * colour glyphs at a different optical size than the rest of the UI. Hidden
+ * counts stay hidden — a zero count is not a signal.
+ */
+export function SiteConnectionStats(props: { stats?: SiteConnectionStatsLike | null }) {
+  const stats = props.stats;
+  const markers = [
+    { key: 'sessions', label: 'Session 账号', count: stats?.sessions || 0, Icon: UserIcon },
+    { key: 'apiKeys', label: 'API Key', count: stats?.apiKeys || 0, Icon: KeyIcon },
+    { key: 'tokens', label: '令牌', count: stats?.tokens || 0, Icon: FileTextIcon },
+    { key: 'oauth', label: 'OAuth', count: stats?.oauth || 0, Icon: UnlockIcon },
+  ].filter((marker) => marker.count > 0);
+
+  if (markers.length === 0) {
+    return <span style={{ color: 'var(--color-text-muted)' }}>-</span>;
+  }
+
+  return (
+    <>
+      {markers.map(({ key, label, count, Icon }) => (
+        <span key={key} className="sites-conn-item" title={label}>
+          <Icon size={12} />
+          {count}
+        </span>
+      ))}
+    </>
+  );
 }
 
 export function formatUsd(value?: number | null): string {
