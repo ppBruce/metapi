@@ -3,18 +3,19 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 describe('docker workflows', () => {
-  it('publishes armv7 docker images in release workflow only', () => {
+  it('publishes amd64 and arm64 docker images in release workflow only', () => {
     const ciWorkflow = readFileSync(resolve(process.cwd(), '.github/workflows/ci.yml'), 'utf8');
     const releaseWorkflow = readFileSync(resolve(process.cwd(), '.github/workflows/release.yml'), 'utf8');
 
     // Docker publishing moved out of CI entirely (2026-08): only the release
     // workflow on version tags builds and pushes images.
+    // armv7 dropped 2026-09: only amd64 + arm64 remain.
     expect(ciWorkflow).not.toContain('arch: armv7');
     expect(ciWorkflow).not.toContain('publish-docker');
 
-    expect(releaseWorkflow).toContain('arch: armv7');
-    expect(releaseWorkflow).toContain('platform: linux/arm/v7');
-    expect(releaseWorkflow).toContain('"${tag}-armv7"');
+    expect(releaseWorkflow).not.toContain('arch: armv7');
+    expect(releaseWorkflow).toContain('arch: amd64');
+    expect(releaseWorkflow).toContain('arch: arm64');
   });
 
   it('derives Docker Hub image names from the configured username secret', () => {
@@ -24,11 +25,11 @@ describe('docker workflows', () => {
     expect(releaseWorkflow).not.toContain('1467078763/metapi');
   });
 
-  it('uses an armv7-capable node base image in the Dockerfile', () => {
+  it('uses Node 24 LTS base image in the Dockerfile', () => {
     const dockerfile = readFileSync(resolve(process.cwd(), 'docker/Dockerfile'), 'utf8');
 
-    expect(dockerfile).toContain('FROM node:22-bookworm-slim AS builder');
-    expect(dockerfile).toContain('FROM node:22-bookworm-slim');
+    expect(dockerfile).toContain('FROM node:24-bookworm-slim AS builder');
+    expect(dockerfile).toContain('FROM node:24-bookworm-slim');
   });
 
   it('avoids buildkit-only frontend syntax so managed docker builders can parse it reliably', () => {
