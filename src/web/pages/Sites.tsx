@@ -2345,22 +2345,24 @@ export default function Sites() {
                         >
                           编辑
                         </button>
-                        <button
-                          onClick={() => handleToggleStatus(site)}
-                          disabled={togglingSiteId === site.id}
-                          className={`btn btn-link ${site.status === 'disabled' ? 'btn-link-primary' : 'btn-link-warning'}`}
-                        >
-                          {togglingSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.status === 'disabled' ? '启用' : '禁用')}
-                        </button>
                       </>
                     )}
                   >
                     <MobileField
                       label="状态"
                       value={(
-                        <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
-                          {site.status === 'disabled' ? '禁用' : '启用'}
-                        </StatusPill>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleStatus(site)}
+                          disabled={togglingSiteId === site.id}
+                          className="btn-as-badge"
+                          aria-label={`${site.status === 'disabled' ? '启用' : '禁用'}站点 ${site.name}`}
+                          style={{ cursor: togglingSiteId === site.id ? 'not-allowed' : 'pointer', opacity: togglingSiteId === site.id ? 0.6 : 1 }}
+                        >
+                          <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
+                            {togglingSiteId === site.id ? <span className="spinner spinner-sm" style={{ width: 10, height: 10 }} /> : (site.status === 'disabled' ? '禁用' : '启用')}
+                          </StatusPill>
+                        </button>
                       )}
                     />
                     <MobileField
@@ -2585,9 +2587,18 @@ export default function Sites() {
                       />
                     </td>
                     <td>
-                      <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
-                        {site.status === 'disabled' ? '禁用' : '启用'}
-                      </StatusPill>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleStatus(site)}
+                        disabled={togglingSiteId === site.id}
+                        className="btn-as-badge"
+                        aria-label={`${site.status === 'disabled' ? '启用' : '禁用'}站点 ${site.name}`}
+                        style={{ cursor: togglingSiteId === site.id ? 'not-allowed' : 'pointer', opacity: togglingSiteId === site.id ? 0.6 : 1 }}
+                      >
+                        <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
+                          {togglingSiteId === site.id ? <span className="spinner spinner-sm" style={{ width: 10, height: 10 }} /> : (site.status === 'disabled' ? '禁用' : '启用')}
+                        </StatusPill>
+                      </button>
                     </td>
                     <td title={site.healthState?.reason || '尚未检测'}>
                       <StatusPill
@@ -2674,13 +2685,6 @@ export default function Sites() {
                           className="btn btn-link btn-link-primary"
                         >
                           编辑
-                        </button>
-                        <button
-                          onClick={() => handleToggleStatus(site)}
-                          disabled={togglingSiteId === site.id}
-                          className={`btn btn-link ${site.status === 'disabled' ? 'btn-link-primary' : 'btn-link-warning'}`}
-                        >
-                          {togglingSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.status === 'disabled' ? '启用' : '禁用')}
                         </button>
                         <button
                           onClick={() => handleDelete(site)}
