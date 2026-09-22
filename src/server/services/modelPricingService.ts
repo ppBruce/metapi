@@ -9,6 +9,7 @@ import {
   lookupModelsDevPrice,
   modelsDevCostToPricingModel,
 } from './modelPriceCatalogService.js';
+import { evaluateTieredExprInSandbox } from './tieredExprSandbox.js';
 
 const PRICE_CACHE_TTL_MS = 10 * 60 * 1000;
 const PRICE_CACHE_FAILURE_TTL_MS = 60 * 1000;
@@ -734,91 +735,11 @@ interface TieredBillingResult {
 }
 
 function evaluateTieredExpr(expr: string, params: TieredBillingParams): TieredBillingResult {
-  let matchedTier = '';
-  const tier = (name: string, value: number) => {
-    matchedTier = name;
-    return value;
-  };
-  const timeInZone = (timezone?: string): Date => {
-    const normalized = String(timezone || '').trim();
-    if (!normalized) return new Date();
-    try {
-      // Validate the IANA name without introducing a runtime dependency.
-      new Intl.DateTimeFormat('en-US', { timeZone: normalized }).format();
-      return new Date();
-    } catch {
-      return new Date();
-    }
-  };
-  const zonedPart = (timezone: string | undefined, part: 'hour' | 'minute' | 'month' | 'day' | 'weekday'): number => {
-    const value = new Intl.DateTimeFormat('en-US', {
-      timeZone: String(timezone || '').trim() || 'UTC',
-      [part === 'weekday' ? 'weekday' : part]: part === 'weekday' ? 'short' : 'numeric',
-    }).formatToParts(timeInZone(timezone)).find((item) => item.type === part)?.value;
-    if (part === 'weekday') {
-      return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(value || 'Sun');
-    }
-    return Number(value || 0);
-  };
-  const hour = (timezone?: string) => zonedPart(timezone, 'hour');
-  const minute = (timezone?: string) => zonedPart(timezone, 'minute');
-  const weekday = (timezone?: string) => zonedPart(timezone, 'weekday');
-  const month = (timezone?: string) => zonedPart(timezone, 'month');
-  const day = (timezone?: string) => zonedPart(timezone, 'day');
-  const max = Math.max;
-  const min = Math.min;
-  const abs = Math.abs;
-  const ceil = Math.ceil;
-  const floor = Math.floor;
-  // fixed(amount): USD per request — NewAPI scales it by 1_000_000 to its
-  // internal quota unit, and our formula divides back by 1_000_000, so the
-  // value ends up as a real USD price again. Must stay a number literal path.
-  const fixed = (amount: number) => Number(amount) * 1_000_000;
-  const has = (source: unknown, substr: unknown) => String(source).includes(String(substr));
-  // Request-context probes. The pricing evaluator runs without a request body
-  // (routing reference / log billing), so these resolve to neutral values:
-  // a header missing → empty string; a param missing → empty string. Request
-  // rules then evaluate to their `: 1` fallback branch instead of crashing.
-  const header = (_key: string) => '';
-  const param = (_path: string) => '';
-  // safe: expressions come from trusted upstream /api/pricing, not user input
-  const fn = new Function(
-    'p', 'c', 'len', 'cr', 'cc', 'cc1h', 'img', 'img_o', 'ai', 'ao', 'tier',
-    'hour', 'minute', 'weekday', 'month', 'day', 'max', 'min', 'abs', 'ceil', 'floor',
-    'fixed', 'has', 'header', 'param',
-    `return (${expr});`,
-  );
-  const cost = Number(fn(
-    params.p,
-    params.c,
-    params.len,
-    params.cr,
-    params.cc,
-    params.cc1h,
-    params.img,
-    params.img_o,
-    params.ai,
-    params.ao,
-    tier,
-    hour,
-    minute,
-    weekday,
-    month,
-    day,
-    max,
-    min,
-    abs,
-    ceil,
-    floor,
-    fixed,
-    has,
-    header,
-    param,
-  ));
-  if (!Number.isFinite(cost)) {
-    throw new Error('tiered billing expression returned a non-finite value');
-  }
-  return { cost, tier: matchedTier };
+  // Evaluated in a `node:vm` realm, not with `new Function`: the expression is
+  // third-party input from the upstream `/api/pricing` response, and `new
+  // Function` would run it with `process`/`require`/`fetch` in scope.
+  const { cost, tier } = evaluateTieredExprInSandbox(expr, params);
+  return { cost, tier };
 }
 
 function buildTieredParams(usage: {

@@ -3,6 +3,7 @@ import { NewApiAdapter } from './newApi.js';
 import { OneApiAdapter } from './oneApi.js';
 import { MetApiAdapter } from './metapi.js';
 import { withManagementRequestTimeout } from './upstreamRequestTimeout.js';
+import { withSiteProxyRequestInit } from '../siteProxy.js';
 
 import { Sub2ApiAdapter } from './sub2api.js';
 import { OpenAiAdapter } from './openai.js';
@@ -49,7 +50,7 @@ async function looksLikeOpenAiCompatibleGateway(url: string): Promise<boolean> {
   for (const target of candidates) {
     try {
       const { fetch } = await import('undici');
-      const res = await fetch(target, withManagementRequestTimeout({ method: 'GET' }));
+      const res = await fetch(target, await withSiteProxyRequestInit(target, withManagementRequestTimeout({ method: 'GET' })));
       const text = await res.text();
       const lowered = text.toLowerCase();
       if (
@@ -90,7 +91,7 @@ async function looksLikeAnthropicCompatibleGateway(url: string): Promise<boolean
   for (const target of candidates) {
     try {
       const { fetch } = await import('undici');
-      const res = await fetch(target, withManagementRequestTimeout({ method: 'POST' }));
+      const res = await fetch(target, await withSiteProxyRequestInit(target, withManagementRequestTimeout({ method: 'POST' })));
       const text = await res.text();
       const lowered = text.toLowerCase();
       if (

@@ -3,13 +3,38 @@
  * @Project_description: Metapi 站点管理页
  * @Description: 代码是我抄的，不会也是真的
  */
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+
+
+/** Debounce before auto-detecting while the operator is still typing. */
+const AUTO_DETECT_DEBOUNCE_MS = 700;
+
+/**
+ * Only probe once what was typed is host-like. `new URL('htt')` parses fine, so
+ * existence of a hostname is not enough — require a dotted host (or localhost),
+ * and accept the scheme-less form operators actually type (`nih.cc`).
+ */
+function looksLikeDetectableSiteUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === 'localhost' || /^[^./\s]+(\.[^./\s]+)+$/.test(host);
+  } catch {
+    return false;
+  }
+}
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   DndContext,
   KeyboardSensor,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
   closestCenter,
+  useDroppable,
   useSensor,
   useSensors,
   type DragEndEvent,
@@ -40,10 +65,10 @@ import { usePersistedPageSize } from '../components/usePersistedPageSize.js';
 import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import SiteCreatedModal from '../components/SiteCreatedModal.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
-import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
+import { buildSiteFocusSearch, clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
 import {SITE_PLATFORM_OPTIONS, SiteBalanceDisplay, buildSiteConnectionSearchParams, getConfiguredSiteApiEndpoints, platformBadgeClass, resolveSiteCreatedSessionLabel} from './sites/sitePresentation.js';
 import { tr } from '../i18n.js';
-import { buildCustomDragReorderUpdates, buildUnpinMoveToFrontUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
+import { buildCustomDragReorderUpdates, buildCrossPageDropUpdates, buildUnpinMoveToFrontUpdates, canCrossPageDrop, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
 import {
   applyBrowserUaMode,
@@ -125,38 +150,45 @@ type SiteRow = {
 
 type SiteDropPosition = 'before' | 'after' | null;
 
-const SiteSortHandleContext = createContext<Pick<ReturnType<typeof useSortable>, 'attributes' | 'listeners' | 'setActivatorNodeRef'> | null>(null);
-
-function SiteDragHandle({ disabled = false }: { disabled?: boolean }) {
-  const sortable = useContext(SiteSortHandleContext);
-  if (!sortable) return null;
-
+/**
+ * A cross-page drop target: the band at the top/bottom edge of the list, shown
+ * only while a drag is in flight. Dropping on it moves the dragged row to the
+ * far edge of the adjacent page — that is how a row leaves the current page,
+ * since a page only ever contains its own rows.
+ */
+function SitePageDropBand({
+  direction,
+  active,
+  label,
+}: {
+  direction: 'prev' | 'next';
+  active: boolean;
+  label: string;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: `page-band-${direction}`, disabled: !active });
+  if (!active) return null;
   return (
-    <button
-      ref={sortable.setActivatorNodeRef}
-      type="button"
-      className="site-drag-handle"
-      disabled={disabled}
-      aria-label="拖拽调整站点顺序"
-      title="按住拖拽调整站点顺序"
-      {...sortable.attributes}
-      {...sortable.listeners}
+    <div
+      ref={setNodeRef}
+      className={`site-page-drop-band site-page-drop-band-${direction} ${isOver ? 'is-over' : ''}`}
+      data-testid={`site-page-band-${direction}`}
     >
-      <svg aria-hidden viewBox="0 0 16 16" width="14" height="14">
-        <circle cx="5" cy="3" r="1.2" />
-        <circle cx="11" cy="3" r="1.2" />
-        <circle cx="5" cy="8" r="1.2" />
-        <circle cx="11" cy="8" r="1.2" />
-        <circle cx="5" cy="13" r="1.2" />
-        <circle cx="11" cy="13" r="1.2" />
-      </svg>
-      <span>拖拽</span>
-    </button>
+      <span className="site-page-drop-band-label">{label}</span>
+    </div>
   );
 }
 
+/**
+ * The whole row/card is the drag surface — there is no handle button.
+ * `setActivatorNodeRef`/`attributes`/`listeners` therefore land on the row
+ * itself; the sensor constraints below are what keep that from fighting the
+ * row's own buttons and the mobile scroll.
+ */
+type SiteSortable = ReturnType<typeof useSortable>;
+
 function SortableSiteTableRow({
   id,
+  label,
   disabled,
   dropPosition,
   className,
@@ -164,6 +196,7 @@ function SortableSiteTableRow({
   children,
 }: {
   id: number;
+  label?: string | null;
   disabled: boolean;
   dropPosition: SiteDropPosition;
   className: string;
@@ -176,54 +209,81 @@ function SortableSiteTableRow({
     : null;
 
   return (
-    <SiteSortHandleContext.Provider value={sortable}>
+    <SiteSortableContext.Provider value={sortable}>
       <tr
         ref={(node) => {
           sortable.setNodeRef(node);
           rowRef(node);
         }}
+        // NOT `{...sortable.attributes}`: that carries role="button", which
+        // would turn the <tr> into a button and destroy the table semantics for
+        // screen readers. Keyboard dragging only needs the listeners plus a
+        // focusable element, so those are set explicitly.
+        {...sortable.listeners}
+        tabIndex={disabled ? undefined : 0}
+        aria-roledescription={disabled ? undefined : '可拖拽排序的站点行'}
+        aria-describedby={sortable.attributes['aria-describedby']}
+        aria-label={disabled || !label ? undefined : `拖拽调整「${label}」的顺序`}
         data-testid={`site-row-${id}`}
-        className={`${className} ${sortable.isDragging ? 'site-sort-dragging' : ''} ${dropPosition ? `site-sort-drop-${dropPosition}` : ''}`.trim()}
+        className={`${className} ${sortable.isDragging ? 'site-sort-dragging' : ''} ${dropPosition ? `site-sort-drop-${dropPosition}` : ''} ${!disabled ? 'site-row-draggable' : ''}`.trim()}
         style={{
+          // The row itself travels with the pointer at its own size — no copy,
+          // no scaling. Neighbours are shifted by the sorting strategy, and the
+          // moving row must not carry a transition or it lags behind the cursor.
           transform: CSS.Translate.toString(translatedTransform),
-          transition: sortable.transition || undefined,
+          transition: sortable.isDragging ? undefined : (sortable.transition || undefined),
           position: 'relative',
-          zIndex: sortable.isDragging ? 2 : undefined,
+          zIndex: sortable.isDragging ? 3 : undefined,
         }}
       >
         {children}
       </tr>
-    </SiteSortHandleContext.Provider>
+    </SiteSortableContext.Provider>
   );
 }
 
+/**
+ * Exposes the sortable state to descendants (e.g. the drop indicator) without
+ * threading it through props.
+ */
+const SiteSortableContext = createContext<SiteSortable | null>(null);
+
 function SortableSiteMobileItem({
   id,
+  label,
   disabled,
   dropPosition,
   children,
 }: {
   id: number;
+  label?: string | null;
   disabled: boolean;
   dropPosition: SiteDropPosition;
   children: ReactNode;
 }) {
   const sortable = useSortable({ id, disabled });
   return (
-    <SiteSortHandleContext.Provider value={sortable}>
+    <SiteSortableContext.Provider value={sortable}>
       <div
         ref={sortable.setNodeRef}
-        className={`${sortable.isDragging ? 'site-sort-dragging' : ''} ${dropPosition ? `site-sort-drop-${dropPosition}` : ''}`.trim()}
+        {...sortable.listeners}
+        // Same reasoning as the table row: no role="button" on a container that
+        // already holds buttons and links inside it.
+        tabIndex={disabled ? undefined : 0}
+        aria-roledescription={disabled ? undefined : '可拖拽排序的站点卡片'}
+        aria-describedby={sortable.attributes['aria-describedby']}
+        aria-label={disabled || !label ? undefined : `拖拽调整「${label}」的顺序`}
+        className={`${sortable.isDragging ? 'site-sort-dragging' : ''} ${dropPosition ? `site-sort-drop-${dropPosition}` : ''} ${!disabled ? 'site-card-draggable' : ''}`.trim()}
         style={{
           transform: CSS.Translate.toString(sortable.transform),
-          transition: sortable.transition || undefined,
+          transition: sortable.isDragging ? undefined : (sortable.transition || undefined),
           position: 'relative',
-          zIndex: sortable.isDragging ? 2 : undefined,
+          zIndex: sortable.isDragging ? 3 : undefined,
         }}
       >
         {children}
       </div>
-    </SiteSortHandleContext.Provider>
+    </SiteSortableContext.Provider>
   );
 }
 
@@ -287,8 +347,14 @@ export default function Sites() {
   const sitesTableWrapRef = useRef<HTMLDivElement | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
   const toast = useToast();
+  // The whole row is the drag surface, so the sensors must not steal gestures
+  // the row already needs:
+  //  - mouse: a 6px move before a drag starts, so clicking 详情/编辑/禁用 still
+  //    lands as a click and only a real drag lifts the row;
+  //  - touch: a 180ms hold, so a swipe scrolls the list instead of dragging.
   const siteSortSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 180, tolerance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   const [disabledModels, setDisabledModels] = useState<string[]>([]);
@@ -305,6 +371,7 @@ export default function Sites() {
   const [probeLog, setProbeLog] = useState<ProbeLogEntry[]>([]);
   const [probeCompleted, setProbeCompleted] = useState(false);
   const probeAbortRef = useRef<AbortController | null>(null);
+  const autoDetectTimerRef = useRef<number | null>(null);
   const probeLogEndRef = useRef<HTMLDivElement | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [disabledModelSearch, setDisabledModelSearch] = useState('');
@@ -314,7 +381,13 @@ export default function Sites() {
   );
   const primarySiteUrlAnalysis = useMemo(() => analyzePrimarySiteUrl(form.url), [form.url]);
   const latestPrimarySiteUrlRef = useRef(form.url);
+  const latestProxyUrlRef = useRef(form.proxyUrl);
   const latestPlatformRef = useRef(form.platform);
+  // Platform that came from detection (as opposed to a manual pick): it may be
+  // overwritten by a later detection, a hand-picked one may not.
+  const autoDetectedPlatformRef = useRef<string | null>(null);
+  const autoDetectSignatureRef = useRef<string | null>(null);
+  const handleDetectRef = useRef<(options?: { silent?: boolean }) => Promise<void>>(async () => {});
   const latestInitializationPresetIdRef = useRef(selectedInitializationPresetId);
 
   useEffect(() => {
@@ -326,6 +399,10 @@ export default function Sites() {
   useEffect(() => {
     latestPrimarySiteUrlRef.current = form.url;
   }, [form.url]);
+
+  useEffect(() => {
+    latestProxyUrlRef.current = form.proxyUrl;
+  }, [form.proxyUrl]);
 
   useEffect(() => {
     latestPlatformRef.current = form.platform;
@@ -450,6 +527,32 @@ export default function Sites() {
   }, [location.search, safePage, setPage]);
 
   const normalizedFormPlatform = String(form.platform ?? '').trim();
+
+  // Auto-detect once the URL (or the proxy) settles, instead of only when the
+  // field loses focus — typing a URL and going straight to Save skipped
+  // detection entirely. The proxy is part of the trigger because a site that is
+  // only reachable through a proxy cannot be detected without it: filling the
+  // proxy in has to re-run the probe.
+  useEffect(() => {
+    if (!editor) return;
+    const url = String(form.url ?? '').trim();
+    const platformPinned = Boolean(normalizedFormPlatform)
+      && normalizedFormPlatform !== autoDetectedPlatformRef.current;
+    if (!url || platformPinned || !looksLikeDetectableSiteUrl(url)) return;
+    if (autoDetectSignatureRef.current === `${url}\n${String(form.proxyUrl ?? '').trim()}`) return;
+
+    const timer = window.setTimeout(() => {
+      autoDetectTimerRef.current = null;
+      void handleDetectRef.current({ silent: true });
+    }, AUTO_DETECT_DEBOUNCE_MS);
+    autoDetectTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (autoDetectTimerRef.current === timer) autoDetectTimerRef.current = null;
+    };
+    // handleDetect is reached through a ref: depending on it directly would
+    // restart the timer on every re-render it causes.
+  }, [editor, form.url, form.proxyUrl, normalizedFormPlatform]);
   const platformOptions = useMemo(() => {
     const current = normalizedFormPlatform;
     const options = SITE_PLATFORM_OPTIONS
@@ -984,26 +1087,33 @@ export default function Sites() {
     load();
   };
 
-  const handleDetect = async () => {
+  const handleDetect = async (options?: { silent?: boolean }) => {
     const requestedUrl = String(form.url ?? '').trim();
+    const requestedProxyUrl = String(form.proxyUrl ?? '').trim();
     const requestedPlatform = normalizedFormPlatform;
     const requestedInitializationPresetId = selectedInitializationPresetId;
+    const requestedSignature = `${requestedUrl}\n${requestedProxyUrl}`;
     if (!requestedUrl) {
-      toast.error('请先输入 URL');
+      if (!options?.silent) toast.error('请先输入 URL');
       return;
     }
     const requestedPrimarySiteUrl = analyzePrimarySiteUrl(requestedUrl);
     setDetecting(true);
     try {
-      const result = await api.detectSite(requestedUrl);
+      const result = requestedProxyUrl
+        ? await api.detectSite(requestedUrl, requestedProxyUrl)
+        : await api.detectSite(requestedUrl);
       if (
         String(latestPrimarySiteUrlRef.current ?? '').trim() !== requestedUrl
+        || String(latestProxyUrlRef.current ?? '').trim() !== requestedProxyUrl
         || String(latestPlatformRef.current ?? '').trim() !== requestedPlatform
         || latestInitializationPresetIdRef.current !== requestedInitializationPresetId
       ) {
         return;
       }
       if (result?.platform) {
+        autoDetectedPlatformRef.current = result.platform;
+        autoDetectSignatureRef.current = requestedSignature;
         const detectedPreset = getSiteInitializationPreset(result?.initializationPresetId);
         setForm((prev) => ({
           ...prev,
@@ -1033,15 +1143,34 @@ export default function Sites() {
             : `检测到平台: ${result.platform}`,
         );
       } else {
-        toast.error(result?.error || '无法识别平台类型');
+        // Leave the signature unset so a later edit (e.g. filling in the proxy
+        // the site needs) retries the probe instead of being skipped.
+        if (autoDetectSignatureRef.current === requestedSignature) {
+          autoDetectSignatureRef.current = null;
+        }
+        if (!options?.silent) toast.error(result?.error || '无法识别平台类型');
       }
     } catch (e) {
+      if (autoDetectSignatureRef.current === requestedSignature) {
+        autoDetectSignatureRef.current = null;
+      }
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '自动检测失败');
+      if (!options?.silent) toast.error(eMessage || '自动检测失败');
     } finally {
       setDetecting(false);
     }
   };
+
+  useEffect(() => {
+    handleDetectRef.current = handleDetect;
+  });
+
+  useEffect(() => () => {
+    if (autoDetectTimerRef.current !== null) {
+      window.clearTimeout(autoDetectTimerRef.current);
+      autoDetectTimerRef.current = null;
+    }
+  }, []);
 
   const handleDelete = async (site: SiteRow) => {
     setDeleteConfirm({ mode: 'single', siteId: site.id, siteName: site.name });
@@ -1102,39 +1231,18 @@ export default function Sites() {
   const clearSiteDragState = () => {
     setActiveDragSiteId(null);
     setOverDragSiteId(null);
+    if (typeof document !== 'undefined') document.body.classList.remove('site-drag-active');
   };
 
-  const handleSiteDragStart = (event: DragStartEvent) => {
-    const siteId = Number(event.active.id);
-    setActiveDragSiteId(Number.isFinite(siteId) ? siteId : null);
-    setOverDragSiteId(Number.isFinite(siteId) ? siteId : null);
-  };
-
-  const handleSiteDragOver = (event: DragOverEvent) => {
-    const siteId = event.over ? Number(event.over.id) : null;
-    setOverDragSiteId(siteId != null && Number.isFinite(siteId) ? siteId : null);
-  };
-
-  const handleSiteDragEnd = async (event: DragEndEvent) => {
-    const activeId = Number(event.active.id);
-    const overId = event.over ? Number(event.over.id) : null;
-    clearSiteDragState();
-    if (!Number.isFinite(activeId) || overId == null || !Number.isFinite(overId) || activeId === overId) return;
-
-    const activeSite = sites.find((site) => site.id === activeId);
-    const overSite = sites.find((site) => site.id === overId);
-    if (!activeSite || !overSite) return;
-    if (
-      !!activeSite.isPinned !== !!overSite.isPinned
-      || (activeSite.status === 'disabled') !== (overSite.status === 'disabled')
-    ) {
-      toast.info('置顶、普通和禁用站点需在各自分组内排序');
-      return;
-    }
-
-    const updates = buildCustomDragReorderUpdates(sites, activeId, overId);
-    if (updates.length === 0) return;
-
+  /**
+   * Persist a computed reorder: paint it optimistically, write every changed
+   * sortOrder, then reload. Shared by the in-page drop and the cross-page band
+   * drop so both behave identically on failure.
+   */
+  const applySiteOrderUpdates = async (
+    activeId: number,
+    updates: Array<{ id: number; sortOrder: number }>,
+  ) => {
     const orderById = new Map(updates.map((update) => [update.id, update.sortOrder]));
     setOrderingSiteId(activeId);
     setSites((current) => current.map((site) => (
@@ -1150,6 +1258,89 @@ export default function Sites() {
     } finally {
       setOrderingSiteId(null);
     }
+  };
+
+  const crossPageDrop = useMemo(
+    () => canCrossPageDrop(sortedSites, activeDragSiteId, pageSize, safePage),
+    [sortedSites, activeDragSiteId, pageSize, safePage],
+  );
+  const canDropToPrevPage = crossPageDrop.prev;
+  const canDropToNextPage = crossPageDrop.next;
+  /**
+   * The page's own rows. The cross-page bands are plain droppables, so they are
+   * registered with the DndContext on their own and must stay out of here —
+   * they are not sortable items and would perturb the sorting strategy.
+   */
+  const sortableContextItems = useMemo(
+    () => pagedSites.map((site) => site.id),
+    [pagedSites],
+  );
+
+  const handleSiteDragStart = (event: DragStartEvent) => {
+    const siteId = Number(event.active.id);
+    setActiveDragSiteId(Number.isFinite(siteId) ? siteId : null);
+    setOverDragSiteId(Number.isFinite(siteId) ? siteId : null);
+    // Whole-row drag: keep the grabbing cursor wherever the pointer travels,
+    // not just over the floating copy.
+    if (typeof document !== 'undefined') document.body.classList.add('site-drag-active');
+  };
+
+  const handleSiteDragOver = (event: DragOverEvent) => {
+    const overRaw = event.over ? String(event.over.id) : null;
+    if (overRaw === 'page-band-prev' || overRaw === 'page-band-next') {
+      // A page band is not a row: keep the drop indicator off the rows.
+      setOverDragSiteId(null);
+      return;
+    }
+    const siteId = overRaw == null ? null : Number(overRaw);
+    setOverDragSiteId(siteId != null && Number.isFinite(siteId) ? siteId : null);
+  };
+
+  const handleSiteDragEnd = async (event: DragEndEvent) => {
+    const activeId = Number(event.active.id);
+    const overRaw = event.over ? String(event.over.id) : null;
+    const pageBand = overRaw === 'page-band-prev' || overRaw === 'page-band-next'
+      ? (overRaw === 'page-band-prev' ? 'prev' as const : 'next' as const)
+      : null;
+    const overId = pageBand ? null : (overRaw == null ? null : Number(overRaw));
+    clearSiteDragState();
+    if (!Number.isFinite(activeId)) return;
+
+    if (pageBand) {
+      const activeSite = sites.find((site) => site.id === activeId);
+      if (!activeSite) return;
+      const targetPage = pageBand === 'prev' ? safePage - 1 : safePage + 1;
+      if (targetPage < 1 || targetPage > totalPages) return;
+      const updates = buildCrossPageDropUpdates(sites, activeId, pageBand, pageSize, safePage);
+      if (updates.length === 0) return;
+      await applySiteOrderUpdates(activeId, updates);
+      // Show where it landed: jump to the adjacent page (the URL carries the
+      // page too, or the page-sync effect pulls the view back) and highlight the
+      // moved row.
+      setPage(targetPage);
+      navigate(
+        { pathname: location.pathname, search: buildSiteFocusSearch(location.search, activeId, targetPage) },
+        { replace: true },
+      );
+      return;
+    }
+
+    if (overId == null || !Number.isFinite(overId) || activeId === overId) return;
+
+    const activeSite = sites.find((site) => site.id === activeId);
+    const overSite = sites.find((site) => site.id === overId);
+    if (!activeSite || !overSite) return;
+    if (
+      !!activeSite.isPinned !== !!overSite.isPinned
+      || (activeSite.status === 'disabled') !== (overSite.status === 'disabled')
+    ) {
+      toast.info('置顶、普通和禁用站点需在各自分组内排序');
+      return;
+    }
+
+    const updates = buildCustomDragReorderUpdates(sites, activeId, overId);
+    if (updates.length === 0) return;
+    await applySiteOrderUpdates(activeId, updates);
   };
 
   const toggleSiteDetails = (siteId: number) => {
@@ -1369,13 +1560,13 @@ export default function Sites() {
                   onChange={(e) => setForm((prev) => ({ ...prev, url: e.target.value }))}
                   onBlur={() => {
                     if (String(form.url ?? '').trim() && !normalizedFormPlatform) {
-                      handleDetect();
+                      handleDetect({ silent: true });
                     }
                   }}
                   style={{ ...formInputStyle, flex: 1 }}
                 />
                 <button
-                  onClick={handleDetect}
+                  onClick={() => { void handleDetect(); }}
                   disabled={detecting || !String(form.url ?? '').trim()}
                   className="btn btn-ghost"
                   style={{ padding: '10px 14px', minWidth: 96, border: '1px solid var(--color-border)' }}
@@ -2049,6 +2240,8 @@ export default function Sites() {
           <ResponsiveFormGrid>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <input
+                aria-label="站点代理"
+                data-testid="site-proxy-url-input"
                 placeholder="站点代理（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
                 value={form.proxyUrl}
                 onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
@@ -2083,20 +2276,25 @@ export default function Sites() {
             onDragCancel={clearSiteDragState}
             onDragEnd={handleSiteDragEnd}
           >
-            <SortableContext items={pagedSites.map((site) => site.id)} strategy={verticalListSortingStrategy}>
+            <SortableContext items={sortableContextItems} strategy={verticalListSortingStrategy}>
           {isMobile ? (
             <div className="mobile-card-list">
+              <SitePageDropBand
+                direction="prev"
+                active={canDropToPrevPage}
+                label={`放到上一页末尾（第 ${safePage - 1} 页）`}
+              />
               {pagedSites.map((site) => {
                 const isExpanded = expandedSiteIds.includes(site.id);
                 return (
                   <SortableSiteMobileItem
                     key={site.id}
                     id={site.id}
+                    label={site.name}
                     disabled={sortMode !== 'custom' || orderingSiteId !== null}
                     dropPosition={getSiteDropPosition(site.id)}
                   >
                   <MobileCard
-                    headerActions={sortMode === 'custom' ? <SiteDragHandle disabled={orderingSiteId !== null} /> : null}
                     title={(
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                         <span>{site.name || '-'}</span>
@@ -2299,8 +2497,19 @@ export default function Sites() {
                   </SortableSiteMobileItem>
                 );
               })}
+              <SitePageDropBand
+                direction="next"
+                active={canDropToNextPage}
+                label={`放到下一页开头（第 ${safePage + 1} 页）`}
+              />
             </div>
           ) : (
+            <div className="sites-sort-area">
+            <SitePageDropBand
+              direction="prev"
+              active={canDropToPrevPage}
+              label={`放到上一页末尾（第 ${safePage - 1} 页）`}
+            />
             <div className="sites-desktop-table-wrap" ref={sitesTableWrapRef}>
             <table className="data-table sites-table">
               <thead>
@@ -2321,6 +2530,7 @@ export default function Sites() {
                   <SortableSiteTableRow
                     key={site.id}
                     id={site.id}
+                    label={site.name}
                     disabled={sortMode !== 'custom' || orderingSiteId !== null}
                     dropPosition={getSiteDropPosition(site.id)}
                     rowRef={(node) => {
@@ -2375,19 +2585,9 @@ export default function Sites() {
                       />
                     </td>
                     <td>
-                      <button
-                        onClick={() => handleToggleStatus(site)}
-                        disabled={togglingSiteId === site.id}
-                        className="btn-as-badge"
-                        style={{
-                          cursor: togglingSiteId === site.id ? 'not-allowed' : 'pointer',
-                          opacity: togglingSiteId === site.id ? 0.6 : 1,
-                        }}
-                      >
-                        <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
-                          {togglingSiteId === site.id ? <span className="spinner spinner-sm" style={{ width: 10, height: 10 }} /> : (site.status === 'disabled' ? '禁用' : '启用')}
-                        </StatusPill>
-                      </button>
+                      <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
+                        {site.status === 'disabled' ? '禁用' : '启用'}
+                      </StatusPill>
                     </td>
                     <td title={site.healthState?.reason || '尚未检测'}>
                       <StatusPill
@@ -2463,9 +2663,6 @@ export default function Sites() {
                         >
                           {pinningSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.isPinned ? '取消置顶' : '置顶')}
                         </button>
-                        {sortMode === 'custom' && (
-                          <SiteDragHandle disabled={orderingSiteId !== null} />
-                        )}
                         <button
                           onClick={() => handleOpenSiteApiKey(site)}
                           className="btn btn-link btn-link-primary"
@@ -2477,6 +2674,13 @@ export default function Sites() {
                           className="btn btn-link btn-link-primary"
                         >
                           编辑
+                        </button>
+                        <button
+                          onClick={() => handleToggleStatus(site)}
+                          disabled={togglingSiteId === site.id}
+                          className={`btn btn-link ${site.status === 'disabled' ? 'btn-link-primary' : 'btn-link-warning'}`}
+                        >
+                          {togglingSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.status === 'disabled' ? '启用' : '禁用')}
                         </button>
                         <button
                           onClick={() => handleDelete(site)}
@@ -2492,6 +2696,12 @@ export default function Sites() {
                 ))}
               </tbody>
             </table>
+            </div>
+            <SitePageDropBand
+              direction="next"
+              active={canDropToNextPage}
+              label={`放到下一页开头（第 ${safePage + 1} 页）`}
+            />
             </div>
           )}
             </SortableContext>

@@ -1699,4 +1699,16 @@ export const zhToEnSupplemental: Record<string, string> = {
 
   '站点分布': 'Site Distribution',
 
+  // Update-center panel strings. Without an explicit entry these are neither
+  // translated nor phrase-replaced (a short pure-Han string leaves nothing
+  // behind after Han removal), so strict English mode rendered the literal
+  // "Untranslated" in the update panel.
+  '基于真实流量学习': 'Learned from real traffic',
+  '从未检查': 'Never checked',
+  '已发起回滚': 'Rollback started',
+  '当前版本': 'Current version',
+  '上次检查': 'Last checked',
+  '回滚到更新前版本': 'Roll back to the previous version',
+  '上次检查出错': 'Last check failed',
+
 };

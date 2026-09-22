@@ -175,12 +175,30 @@ jobs:
         if: "!startsWith(matrix.platform, 'mac-')"
         run: npx electron-builder --config electron-builder.yml --publish never
 
+      - name: Disable Spotlight indexing (keeps hdiutil detach from failing with "Resource busy")
+        if: startsWith(matrix.platform, 'mac-')
+        shell: bash
+        run: sudo mdutil -a -i off
+
       - name: Package (macOS)
         if: startsWith(matrix.platform, 'mac-')
-        run: ${{ matrix.packageCommand }}
+        shell: bash
         env:
           ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
           npm_config_electron_builder_binaries_mirror: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+          PACKAGE_COMMAND: ${{ matrix.packageCommand }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            echo "Desktop build (${PACKAGE_COMMAND}) attempt ${attempt}/2"
+            if eval "${PACKAGE_COMMAND}"; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              exit 1
+            fi
+            sleep 90
+          done
 
       - name: Verify macOS architecture
         if: startsWith(matrix.platform, 'mac-')

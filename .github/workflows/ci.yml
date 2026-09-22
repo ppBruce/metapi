@@ -192,6 +192,27 @@ jobs:
       - name: Run repo drift check
         run: npm run repo:drift-check
 
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Run lint
+        run: npm run lint
+
   schema-sqlite:
     name: Schema Check (SQLite)
     runs-on: ubuntu-latest

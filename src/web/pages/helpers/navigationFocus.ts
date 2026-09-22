@@ -55,6 +55,27 @@ export function readFocusSiteId(search: string): number | null {
   return normalizePositiveId(params.get(FOCUS_SITE_ID_KEY));
 }
 
+/**
+ * Same query string with the site-focus flag set. Used after a cross-page drop
+ * so the moved row is scrolled to and highlighted on the page it landed on.
+ * `page` (1-based) is written too when given: the page is persisted in the URL
+ * and the page-sync effect would otherwise drag the view back to the page the
+ * drop started on.
+ */
+export function buildSiteFocusSearch(search: string, siteId: number, page?: number): string {
+  const normalizedId = normalizePositiveId(siteId);
+  const params = new URLSearchParams(search);
+  if (!normalizedId) {
+    params.delete(FOCUS_SITE_ID_KEY);
+  } else {
+    params.set(FOCUS_SITE_ID_KEY, String(normalizedId));
+  }
+  const normalizedPage = normalizePositiveId(page);
+  if (normalizedPage) params.set('page', String(normalizedPage));
+  const next = params.toString();
+  return next ? `?${next}` : '';
+}
+
 export function readFocusAnnouncementId(search: string): number | null {
   const params = new URLSearchParams(search);
   return normalizePositiveId(params.get(FOCUS_ANNOUNCEMENT_ID_KEY));

@@ -487,4 +487,37 @@ describe('site favicon proxy routing', () => {
     expect(response.body).toBe('ico');
     expect(response.headers['x-favicon-source']).toBe('https://absurd.example.com/favicon.ico');
   });
+
+  it('collapses concurrent cold requests for one site into a single upstream resolution', async () => {
+    await db.insert(schema.sites).values({
+      name: 'burst-site', url: 'https://site.example.com', platform: 'new-api',
+    }).run();
+    const requestUrl = '/api/site-favicon?url=https%3A%2F%2Fsite.example.com';
+    // The usage-log page renders one badge per row: ten rows of the same site
+    // used to mean ten page fetches (measured ~6-8s wall before this).
+    const responses = await Promise.all(Array.from({ length: 8 }, () => app.inject(requestUrl)));
+    expect(responses.every((response) => response.statusCode === 200)).toBe(true);
+    // One page read + one /favicon.ico hit for the whole burst — not eight.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers from the on-disk cache after the in-memory cache is dropped (restart)', async () => {
+    await db.insert(schema.sites).values({
+      name: 'restart-site', url: 'https://site.example.com', platform: 'new-api',
+    }).run();
+    const requestUrl = '/api/site-favicon?url=https%3A%2F%2Fsite.example.com';
+    const first = await app.inject(requestUrl);
+    expect(first.headers['x-favicon-cache']).toBe('MISS');
+    const callsAfterFirst = fetchMock.mock.calls.length;
+
+    // Simulate a process restart: memory gone, DATA_DIR (and its icon-cache) kept.
+    (await import('../../services/iconProxyService.js')).__clearIconMemoryCacheForTests();
+
+    const second = await app.inject(requestUrl);
+    expect(second.statusCode).toBe(200);
+    expect(second.headers['x-favicon-cache']).toBe('HIT');
+    expect(second.rawPayload.equals(first.rawPayload)).toBe(true);
+    // No upstream traffic at all — the disk layer answered.
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+  });
 });

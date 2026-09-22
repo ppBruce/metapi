@@ -1091,6 +1091,7 @@ html[data-layout="desktop"] .main-content {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  position: relative;
 }
 
 .mobile-card {
@@ -2066,6 +2067,12 @@ html[data-layout="desktop"] .main-content {
   min-width: 100%; /* prevent width jitter when rows change height and scrollbar appears/disappears */
 }
 
+/* Anchor for the cross-page drop bands, which are overlays and must not be
+   clipped by the table wrap's own horizontal scroll container. */
+.sites-sort-area {
+  position: relative;
+}
+
 .inventory-name-title {
   display: block;
   overflow: hidden;
@@ -2380,50 +2387,47 @@ html[data-layout="desktop"] .main-content {
   font-size: 11px;
 }
 
-.site-drag-handle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  min-height: 26px;
-  padding: 3px 7px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-card);
-  color: var(--color-text-secondary);
-  font: inherit;
-  font-size: 11px;
-  white-space: nowrap;
+/* The whole row is the drag surface — no handle button. */
+.sites-table tbody tr.site-row-draggable {
   cursor: grab;
-  touch-action: none;
-  user-select: none;
+  touch-action: manipulation;
 }
 
-.site-drag-handle:hover:not(:disabled),
-.site-drag-handle:focus-visible {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-  background: color-mix(in srgb, var(--color-primary) 7%, var(--color-bg-card));
-  outline: none;
-}
-
-.site-drag-handle:active:not(:disabled) {
+.sites-table tbody tr.site-row-draggable:active {
   cursor: grabbing;
 }
 
-.site-drag-handle:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
+.mobile-card-list > .site-card-draggable {
+  cursor: grab;
 }
 
-.site-drag-handle svg {
-  flex: 0 0 auto;
-  fill: currentColor;
+/* While a drag is in flight the cursor must stay "grabbing" everywhere the
+   pointer can travel, not just over the dragged row. */
+body.site-drag-active,
+body.site-drag-active * {
+  cursor: grabbing !important;
 }
 
-.site-sort-dragging {
-  opacity: 0.48;
-  filter: saturate(0.7);
+/*
+ * The dragged row travels with the pointer at its own size — no scaling, no
+ * copy. The lift is a shadow plus a solid background, because a <tr> is
+ * transparent: without it the rows underneath bleed through while it moves.
+ * Nothing here changes layout, so the row's box stays exactly the same size.
+ */
+.sites-table tbody tr.site-sort-dragging > td {
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-bg-card));
+  box-shadow: 0 12px 26px -8px rgba(0, 0, 0, 0.38);
+}
+
+.mobile-card-list > .site-sort-dragging {
+  background: var(--color-bg-card);
+  box-shadow: 0 12px 26px -8px rgba(0, 0, 0, 0.38);
+}
+
+/* Moving at the pointer's own pace: the dragged row must not lag behind it. */
+.sites-table tbody tr.site-sort-dragging,
+.mobile-card-list > .site-sort-dragging {
+  transition: none;
 }
 
 .sites-table tr.site-sort-drop-before > td {
@@ -2453,6 +2457,49 @@ html[data-layout="desktop"] .main-content {
 
 .mobile-card-list > .site-sort-drop-after::after {
   bottom: -6px;
+}
+
+/* Cross-page drop bands.
+   Absolutely positioned overlays at the top/bottom edge of the list, so the
+   rows keep their measured positions while a drag is in flight (inserting them
+   into the flow mid-drag would shift every row and desync dnd-kit's rects).
+   They render only while a drag is in flight and only when the adjacent page's
+   boundary slot is reachable inside the dragged item's own group. */
+.site-page-drop-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  border: 1px dashed color-mix(in srgb, var(--color-primary) 55%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-bg-card));
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: auto;
+}
+
+.site-page-drop-band-prev {
+  top: -2px;
+}
+
+.site-page-drop-band-next {
+  bottom: -2px;
+}
+
+.site-page-drop-band.is-over {
+  border-style: solid;
+  background: color-mix(in srgb, var(--color-primary) 18%, var(--color-bg-card));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 22%, transparent);
+}
+
+.site-page-drop-band-label {
+  padding: 0 8px;
 }
 
 .token-table {
@@ -7860,23 +7907,6 @@ textarea {
   color: var(--color-text-muted);
   pointer-events: none;
   white-space: nowrap;
-}
-
-/* ===== Clickable badge button ===== */
-.btn-as-badge {
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  transition: opacity 0.15s ease;
-}
-
-.btn-as-badge:not(:disabled):hover {
-  opacity: 0.8;
-}
-
-.btn-as-badge:disabled {
-  cursor: not-allowed;
 }
 
 /* ===== Motion preferences ===== */

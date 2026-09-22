@@ -142,3 +142,27 @@ export function blendRecentOutcomeSnapshots(
     (globalSnapshot.failureCount * globalWeight) + (modelSnapshot.failureCount * normalizedModelWeight),
   );
 }
+
+/**
+ * Timestamp comparison for candidate ordering. Moved here from `tokenRouter.ts`
+ * because the extracted stable-first planner needs them too and this module is
+ * the dependency-free home for shared numeric helpers.
+ */
+export function parseIsoTimeMs(value?: string | null): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+export function compareNullableTimeAsc(left?: string | null, right?: string | null): number {
+  const leftMs = parseIsoTimeMs(left);
+  const rightMs = parseIsoTimeMs(right);
+  if (leftMs == null && rightMs == null) return 0;
+  if (leftMs == null) return -1;
+  if (rightMs == null) return 1;
+  return leftMs - rightMs;
+}
+
+export function compareNullableTimeDesc(left?: string | null, right?: string | null): number {
+  return compareNullableTimeAsc(right, left);
+}

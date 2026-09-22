@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { buildCustomDragReorderUpdates, buildCustomReorderUpdates, buildUnpinMoveToFrontUpdates, sortItemsForDisplay, type SortMode } from './listSorting.js';
+import {
+  buildCrossPageDropUpdates,
+  buildCustomDragReorderUpdates,
+  buildCustomReorderUpdates,
+  buildUnpinMoveToFrontUpdates,
+  canCrossPageDrop,
+  sortItemsForDisplay,
+  type SortMode,
+} from './listSorting.js';
 
 type Item = {
   id: number;
@@ -136,5 +144,105 @@ describe('buildUnpinMoveToFrontUpdates', () => {
     const updates = buildUnpinMoveToFrontUpdates(offsetList, 1);
     // 10→1 (already 1, skip), 11→2 (already 2, skip), 12→3 (already 3, skip)
     expect(updates).toEqual([]);
+  });
+});
+
+describe('buildCrossPageDropUpdates', () => {
+  // 12 unpinned custom-ordered sites across two pages of 10.
+  const twelve: Item[] = Array.from({ length: 12 }, (_, i) => ({
+    id: i + 1,
+    isPinned: false,
+    sortOrder: i,
+    status: 'enabled',
+  }));
+
+  it('moves the first row of page 2 to the last slot of page 1', () => {
+    // Page 2 holds ids 11,12. Dropping id 11 on the "prev page" band lands it on
+    // page 1's final slot (index 9), pushing id 10 up to index 10.
+    const updates = buildCrossPageDropUpdates(twelve, 11, 'prev', 10, 2);
+    const byId = new Map(updates.map((u) => [u.id, u.sortOrder]));
+    expect(byId.get(11)).toBe(9);
+    expect(byId.get(10)).toBe(10);
+  });
+
+  it('moves the last row of page 1 to the first slot of page 2', () => {
+    // Page 1 holds ids 1..10. Dropping id 10 on the "next page" band makes it
+    // the first row of page 2 (index 10).
+    const updates = buildCrossPageDropUpdates(twelve, 10, 'next', 10, 1);
+    const byId = new Map(updates.map((u) => [u.id, u.sortOrder]));
+    expect(byId.get(10)).toBe(10);
+  });
+
+  it('returns no updates when the row is already at the boundary slot', () => {
+    expect(buildCrossPageDropUpdates(twelve, 10, 'prev', 10, 2)).toEqual([]);
+  });
+
+  it('never crosses a group: a pinned boundary clamps to the group edge', () => {
+    // 3 pinned rows occupy indices 0-2; page size 2 puts page 1's last slot at
+    // index 1, which belongs to the pinned group, so an unpinned row cannot use
+    // that boundary — it stays put instead of jumping into another group.
+    const mixed: Item[] = [
+      { id: 1, isPinned: true, sortOrder: 0, status: 'enabled' },
+      { id: 2, isPinned: true, sortOrder: 1, status: 'enabled' },
+      { id: 3, isPinned: true, sortOrder: 2, status: 'enabled' },
+      { id: 4, isPinned: false, sortOrder: 0, status: 'enabled' },
+      { id: 5, isPinned: false, sortOrder: 1, status: 'enabled' },
+      { id: 6, isPinned: false, sortOrder: 2, status: 'enabled' },
+      { id: 7, isPinned: false, sortOrder: 3, status: 'enabled' },
+    ];
+    // Unpinned group occupies sorted indices 3-6, so target index 1 clamps to 3,
+    // which is where id 4 already sits.
+    expect(buildCrossPageDropUpdates(mixed, 4, 'prev', 4, 2)).toEqual([]);
+  });
+
+  it('ignores a bad page size or page number', () => {
+    expect(buildCrossPageDropUpdates(twelve, 11, 'prev', 0, 2)).toEqual([]);
+    expect(buildCrossPageDropUpdates(twelve, 11, 'prev', 10, 0)).toEqual([]);
+  });
+});
+
+describe('canCrossPageDrop', () => {
+  const twelve: Item[] = Array.from({ length: 12 }, (_, i) => ({
+    id: i + 1,
+    isPinned: false,
+    sortOrder: i,
+    status: 'enabled',
+  }));
+
+  it('offers both bands from a middle page', () => {
+    // 25 rows / 10 per page = 3 pages, so page 2 has neighbours on both sides.
+    const threePages: Item[] = Array.from({ length: 25 }, (_, i) => ({
+      id: i + 1,
+      isPinned: false,
+      sortOrder: i,
+      status: 'enabled',
+    }));
+    expect(canCrossPageDrop(threePages, 11, 10, 2)).toEqual({ prev: true, next: true });
+  });
+
+  it('offers no next band on the last page', () => {
+    expect(canCrossPageDrop(twelve, 11, 10, 2)).toEqual({ prev: true, next: false });
+  });
+
+  it('offers only the next band from the first page', () => {
+    expect(canCrossPageDrop(twelve, 3, 10, 1)).toEqual({ prev: false, next: true });
+  });
+
+  it('offers nothing while no drag is in flight', () => {
+    expect(canCrossPageDrop(twelve, null, 10, 2)).toEqual({ prev: false, next: false });
+  });
+
+  it('hides the band whose boundary falls outside the active item group', () => {
+    // Page size 2: page 1's last slot (index 1) is pinned, so the unpinned row 4
+    // must not be offered the "previous page" band.
+    const mixed: Item[] = [
+      { id: 1, isPinned: true, sortOrder: 0, status: 'enabled' },
+      { id: 2, isPinned: true, sortOrder: 1, status: 'enabled' },
+      { id: 3, isPinned: false, sortOrder: 0, status: 'enabled' },
+      { id: 4, isPinned: false, sortOrder: 1, status: 'enabled' },
+      { id: 5, isPinned: false, sortOrder: 2, status: 'enabled' },
+      { id: 6, isPinned: false, sortOrder: 3, status: 'enabled' },
+    ];
+    expect(canCrossPageDrop(mixed, 3, 2, 2)).toEqual({ prev: false, next: true });
   });
 });

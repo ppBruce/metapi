@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { BrandGlyph, brandBadgeColors, clampBadgeColor, getBrand, hashColor, perturbBadgeColor, useIconCdn } from './BrandIcon.js';
+import { BrandGlyph, brandBadgeColors, brandIconBadgeColor, clampBadgeColor, getBrand, hashColor, perturbBadgeColor, useIconCdn } from './BrandIcon.js';
+import { buildFaviconUrl } from './siteFavicon.js';
 
 type SiteBadgeLinkProps = {
   siteId?: number | null;
@@ -10,19 +11,6 @@ type SiteBadgeLinkProps = {
   badgeStyle?: React.CSSProperties;
   tone?: 'primary';
 };
-
-function buildFaviconUrl(rawUrl?: string | null, siteId?: number | null): string | null {
-  if (!rawUrl) return null;
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-    const siteQuery = typeof siteId === 'number' && Number.isSafeInteger(siteId) && siteId > 0
-      ? `&siteId=${siteId}` : '';
-    return `/api/site-favicon?url=${encodeURIComponent(url.origin)}${siteQuery}`;
-  } catch {
-    return null;
-  }
-}
 
 function relativeLuminance(r: number, g: number, b: number): number {
   return 0.2126 * (r / 255) + 0.7152 * (g / 255) + 0.0722 * (b / 255);
@@ -89,6 +77,10 @@ export function SiteIcon({
   const faviconUrl = buildFaviconUrl(url, siteId);
   const [faviconFailed, setFaviconFailed] = useState(false);
   const [imgLoaded, setImgLoaded] = useState(false);
+  // The brand-key guess can 404 too (a site whose last token is not a brand),
+  // and without this the <img> would sit there blank instead of falling
+  // through to the letter glyph.
+  const [brandKeyFailed, setBrandKeyFailed] = useState(false);
   const theme = useIconCdn() as 'dark' | 'light';
   const [faviconLum, setFaviconLum] = useState<number | null>(null);
 
@@ -105,6 +97,10 @@ export function SiteIcon({
     const candidate = tokens[tokens.length - 1];
     return candidate && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(candidate) ? candidate : null;
   }, [faviconFailed, name]);
+
+  useEffect(() => {
+    setBrandKeyFailed(false);
+  }, [brandFallbackKey]);
 
   // Dark logo on a dark theme: wrap the img in a light background circle so it
   // doesn't vanish (like DeepSeek's website does for its black whale logo).
@@ -159,7 +155,7 @@ export function SiteIcon({
   if (brand) {
     return <BrandGlyph brand={brand} size={size} fallbackText={brand.name} />;
   }
-  if (brandFallbackKey) {
+  if (brandFallbackKey && !brandKeyFailed) {
     return (
       <img
         src={`/api/brand-icon?icon=${encodeURIComponent(brandFallbackKey)}&theme=${theme}`}
@@ -167,6 +163,7 @@ export function SiteIcon({
         height={size}
         alt=""
         aria-hidden="true"
+        onError={() => setBrandKeyFailed(true)}
         style={{ width: size, height: size, borderRadius: 4, objectFit: 'contain', flexShrink: 0, display: 'inline-block', opacity: 1 }}
       />
     );
@@ -219,7 +216,7 @@ export default function SiteBadgeLink({
     if (!siteColors) {
       const brand = getBrand(label);
       if (brand) {
-        siteColors = brandBadgeColors(brand.color, theme, label);
+        siteColors = brandBadgeColors(brandIconBadgeColor([brand.modelIcon, brand.icon], brand.color), theme, label);
       } else {
         const { bg, text } = hashColor(label);
         const rgb = hexToRgb(text);

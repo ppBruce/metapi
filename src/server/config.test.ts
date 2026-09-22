@@ -167,6 +167,35 @@ describe('buildConfig', () => {
     expect(response.json()).toEqual({ ip: '203.0.113.5' });
     await app.close();
   });
+
+  it('applies TRUST_PROXY_HOPS as a hop-count window', async () => {
+    // Distinct addresses so the window is unambiguous: the socket peer is
+    // 10.0.0.8, then one proxy hop per forwarded entry (rightmost = nearest).
+    // hops=N must resolve the client to the address N hops back.
+    const xff = '203.0.113.5, 198.51.100.7';
+
+    const app1 = Fastify(buildFastifyOptions(buildConfig({ TRUST_PROXY: 'true', TRUST_PROXY_HOPS: '1' })));
+    app1.get('/ip', async (request) => ({ ip: request.ip }));
+    const one = await app1.inject({
+      method: 'GET',
+      url: '/ip',
+      remoteAddress: '10.0.0.8',
+      headers: { 'x-forwarded-for': xff },
+    });
+    expect(one.json()).toEqual({ ip: '198.51.100.7' });
+    await app1.close();
+
+    const app2 = Fastify(buildFastifyOptions(buildConfig({ TRUST_PROXY: 'true', TRUST_PROXY_HOPS: '2' })));
+    app2.get('/ip', async (request) => ({ ip: request.ip }));
+    const two = await app2.inject({
+      method: 'GET',
+      url: '/ip',
+      remoteAddress: '10.0.0.8',
+      headers: { 'x-forwarded-for': xff },
+    });
+    expect(two.json()).toEqual({ ip: '203.0.113.5' });
+    await app2.close();
+  });
 });
 
 

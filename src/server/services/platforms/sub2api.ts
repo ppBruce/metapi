@@ -10,6 +10,7 @@ import {
   type SiteAnnouncement,
   UserInfo,
 } from './base.js';
+import { withSiteProxyRequestInit } from '../siteProxy.js';
 import { stripTrailingSlashes } from '../urlNormalization.js';
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -566,10 +567,10 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     const { fetch } = await import('undici');
     const probeEndpoint = async (path: string) => {
       try {
-        return await fetch(`${base}${path}`, {
+        return await fetch(`${base}${path}`, await withSiteProxyRequestInit(`${base}${path}`, {
           method: 'GET',
           signal: AbortSignal.timeout(5000),
-        });
+        }));
       } catch {
         return null;
       }

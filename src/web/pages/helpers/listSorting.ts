@@ -119,6 +119,108 @@ export function buildCustomDragReorderUpdates<T extends SortableBase>(
 }
 
 /**
+ * Cross-page move: drop the active item on the band at the top/bottom of the
+ * current page, landing it on the adjacent page's far edge.
+ *
+ * `page` is 1-based and `pageSize` is the rendered page size, so the two
+ * targets are ordinary positions in the full list:
+ *   - 'prev' → the LAST slot of the previous page  = (page - 1) * pageSize - 1
+ *   - 'next' → the FIRST slot of the next page     = page * pageSize
+ * Both reduce to "the active item's final index in the full list", which is also
+ * its insertion index in the group (removing the active item shifts nothing
+ * across that index).
+ *
+ * The move is clamped into the active item's own group (pinned / normal /
+ * disabled are contiguous ranges and never mix), so a boundary that falls in a
+ * different group lands on that group's nearest edge instead of crossing it.
+ */
+export function buildCrossPageDropUpdates<T extends SortableBase>(
+  items: T[],
+  activeId: number,
+  direction: 'prev' | 'next',
+  pageSize: number,
+  page: number,
+): Array<{ id: number; sortOrder: number }> {
+  if (!Number.isFinite(pageSize) || pageSize <= 0 || !Number.isFinite(page) || page < 1) return [];
+
+  const sorted = sortItemsForDisplay(items, 'custom', () => 0);
+  const active = sorted.find((item) => item.id === activeId);
+  if (!active) return [];
+
+  const activeDisabled = active.status === 'disabled';
+  const group = sorted.filter((item) => (
+    !!item.isPinned === !!active.isPinned
+    && (item.status === 'disabled') === activeDisabled
+  ));
+  const activeIndex = group.findIndex((item) => item.id === activeId);
+  if (activeIndex < 0) return [];
+
+  const groupStart = sorted.findIndex((item) => item.id === group[0]?.id);
+  if (groupStart < 0) return [];
+
+  const targetAbsolute = direction === 'prev'
+    ? (page - 1) * pageSize - 1
+    : page * pageSize;
+  const desiredIndex = Math.max(0, Math.min(group.length - 1, targetAbsolute - groupStart));
+  if (desiredIndex === activeIndex) return [];
+
+  const next = [...group];
+  const [moved] = next.splice(activeIndex, 1);
+  next.splice(desiredIndex, 0, moved);
+
+  return next.flatMap((item, index) => {
+    const previous = Number.isFinite(item.sortOrder as number)
+      ? Number(item.sortOrder)
+      : Number.MAX_SAFE_INTEGER;
+    return previous === index ? [] : [{ id: item.id, sortOrder: index }];
+  });
+}
+
+/**
+ * Which cross-page bands the active item may actually use. A band is offered
+ * only when the adjacent page's boundary slot falls inside the active item's own
+ * group (pinned / normal / disabled are contiguous and never mix), so the UI
+ * never advertises a drop the reorder would have to clamp.
+ */
+export function canCrossPageDrop<T extends SortableBase>(
+  items: T[],
+  activeId: number | null,
+  pageSize: number,
+  page: number,
+): { prev: boolean; next: boolean } {
+  const none = { prev: false, next: false };
+  if (activeId == null || !Number.isFinite(pageSize) || pageSize <= 0 || !Number.isFinite(page) || page < 1) {
+    return none;
+  }
+
+  const sorted = sortItemsForDisplay(items, 'custom', () => 0);
+  const active = sorted.find((item) => item.id === activeId);
+  if (!active) return none;
+
+  const activeDisabled = active.status === 'disabled';
+  const indexOf = new Map(sorted.map((item, index) => [item.id, index]));
+  const activeIndex = indexOf.get(activeId) ?? -1;
+  if (activeIndex < 0) return none;
+
+  const groupIndices = sorted
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => (
+      !!item.isPinned === !!active.isPinned
+      && (item.status === 'disabled') === activeDisabled
+    ))
+    .map(({ index }) => index);
+  const min = Math.min(...groupIndices);
+  const max = Math.max(...groupIndices);
+
+  const prevTarget = (page - 1) * pageSize - 1;
+  const nextTarget = page * pageSize;
+  return {
+    prev: page > 1 && prevTarget >= min && prevTarget <= max && prevTarget !== activeIndex,
+    next: nextTarget >= min && nextTarget <= max && nextTarget !== activeIndex,
+  };
+}
+
+/**
  * When unpinning an item, place it at the front of the unpinned group
  * (sortOrder=0) and shift all existing unpinned items down by one so the
  * item stays at the top position instead of jumping back to its original

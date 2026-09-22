@@ -4,6 +4,7 @@ import { config } from '../config.js';
 import { authorizeDownstreamToken, checkManagedKeyRpmLimit, consumeManagedKeyRequest, releaseManagedKeyInflight, tryAcquireManagedKeyInflight } from '../services/downstreamApiKeyService.js';
 import { EMPTY_DOWNSTREAM_ROUTING_POLICY, type DownstreamRoutingPolicy } from '../services/downstreamPolicyTypes.js';
 import { getTrustedClientIp, isIpAllowed } from './clientIp.js';
+import { adminAuthThrottle } from './authFailureThrottle.js';
 
 export {
   extractClientIp,
@@ -88,15 +89,32 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
   }
 
   const auth = request.headers.authorization;
+  const token = auth ? auth.replace('Bearer ', '') : '';
+  if (auth && secretsEqual(token, config.authToken)) {
+    // The credential is evaluated BEFORE the failure budget, so a valid token is
+    // never refused. That matters here: every client arriving through the tunnel
+    // reads as the connector's address, so a "block the address" rule that ran
+    // first would let a stranger lock the operator out of their own console.
+    await adminAuthThrottle.clear(clientIp);
+    return;
+  }
+
+  // Rejected attempt: spend one of the address's failures and refuse outright
+  // once the budget is gone, so guessing cannot continue indefinitely.
+  const verdict = await adminAuthThrottle.recordFailure(clientIp);
+  if (verdict.blocked) {
+    reply
+      .code(429)
+      .header('retry-after', String(verdict.retryAfterSec))
+      .send({ error: 'Too many failed authentication attempts' });
+    return;
+  }
+
   if (!auth) {
     reply.code(401).send({ error: 'Missing Authorization header' });
     return;
   }
-  const token = auth.replace('Bearer ', '');
-  if (!secretsEqual(token, config.authToken)) {
-    reply.code(403).send({ error: 'Invalid token' });
-    return;
-  }
+  reply.code(403).send({ error: 'Invalid token' });
 }
 
 export async function proxyAuthMiddleware(request: FastifyRequest, reply: FastifyReply) {

@@ -735,10 +735,12 @@ export const api = {
   deleteSite: (id: number) => request(`/api/sites/${id}`, { method: 'DELETE' }),
   batchUpdateSites: (data: SiteBatchPayload) =>
     request('/api/sites/batch', { method: 'POST', body: JSON.stringify(data) }),
-  detectSite: (url: string) =>
+  detectSite: (url: string, proxyUrl?: string) =>
     request('/api/sites/detect', {
       method: 'POST',
-      body: JSON.stringify({ url }),
+      body: JSON.stringify(
+        proxyUrl && proxyUrl.trim() ? { url, proxyUrl: proxyUrl.trim() } : { url },
+      ),
     }),
   getSiteDisabledModels: (siteId: number) =>
     request(`/api/sites/${siteId}/disabled-models`),

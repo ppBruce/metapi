@@ -819,7 +819,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     const canonicalPlatform = normalizeSitePlatform(platform);
     let detectedPlatform = canonicalPlatform;
     if (!detectedPlatform) {
-      const detected = await detectSite(detectionUrl);
+      const detected = await detectSite(detectionUrl, normalizedProxyUrl.proxyUrl ? { proxyUrl: normalizedProxyUrl.proxyUrl } : undefined);
       detectedPlatform = detected?.platform ?? null;
     }
     if (!detectedPlatform) {
@@ -1342,7 +1342,16 @@ export async function sitesRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsedBody.error });
     }
 
-    const result = await detectSite(parsedBody.data.url);
+    // The operator may be probing a site that is only reachable through the
+    // proxy they are typing into the form, so detection has to run through it.
+    const normalizedProxyUrl = parseSiteProxyUrlInput(parsedBody.data.proxyUrl);
+    if (!normalizedProxyUrl.valid) {
+      return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
+    }
+    const result = await detectSite(
+      parsedBody.data.url,
+      normalizedProxyUrl.proxyUrl ? { proxyUrl: normalizedProxyUrl.proxyUrl } : undefined,
+    );
     return result || { error: 'Could not detect platform' };
   });
 
