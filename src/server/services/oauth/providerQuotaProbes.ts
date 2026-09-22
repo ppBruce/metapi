@@ -22,6 +22,8 @@ const GITHUB_COPILOT_USER_URL = 'https://api.github.com/copilot_internal/user';
 const GITHUB_API_VERSION = '2022-11-28';
 const GITHUB_USER_AGENT = 'GitHubCopilotChat/0.26.7';
 const QODER_QUOTA_URL = 'https://openapi.qoder.sh/api/v2/quota/usage';
+const KIMI_CODING_BASE_URL = 'https://api.kimi.com/coding/v1';
+const KIMI_USER_AGENT = 'KimiCLI/1.6';
 /** Antigravity publishes per-model buckets; the UI only needs the headliners. */
 const ANTIGRAVITY_HEADLINE_MODELS = [
   'gemini-3-flash-agent',
@@ -586,6 +588,158 @@ export async function probeQoderQuota(input: {
   };
 }
 
+/**
+ * Kimi Code (Moonshot): GET /coding/v1/usages with the OAuth bearer returns
+ * the subscription's rolling windows and per-model limits.
+ *
+ * Two shapes are accepted, both seen in the wild:
+ * - `{ usage: {used,limit,resetTime}, limits: [{ detail:{used,limit}, window:{duration,timeUnit} }] }`
+ * - `{ data: [{ model_name, used, limit, resetTime }] }` where `model_name:"all"` is the summary.
+ */
+function kimiLimitLabel(window: Record<string, unknown>, index: number): string {
+  const duration = asFiniteNumber(window.duration);
+  const unit = (asTrimmedString(window.timeUnit) || asTrimmedString(window.time_unit) || '').toUpperCase();
+  if (duration !== undefined) {
+    if (unit.includes('MINUTE')) {
+      return duration >= 60 && duration % 60 === 0 ? `${duration / 60}h 窗口` : `${duration}m 窗口`;
+    }
+    if (unit.includes('HOUR')) return `${duration}h 窗口`;
+    if (unit.includes('DAY')) return `${duration}d 窗口`;
+    if (unit.includes('MONTH')) return `${duration}mo 窗口`;
+    return `${duration}s 窗口`;
+  }
+  return `额度 ${index + 1}`;
+}
+
+/** Build an entry from anything carrying used/limit/remaining (+ optional reset). */
+function kimiEntryFrom(
+  data: Record<string, unknown>,
+  key: string,
+  label: string,
+  kind: OauthQuotaEntrySnapshot['kind'],
+): OauthQuotaEntrySnapshot | null {
+  const limit = asFiniteNumber(data.limit) ?? asFiniteNumber(data.limit_amount);
+  let used = asFiniteNumber(data.used) ?? asFiniteNumber(data.used_amount);
+  if (used === undefined) {
+    const remaining = asFiniteNumber(data.remaining);
+    if (remaining !== undefined && limit !== undefined) used = limit - remaining;
+  }
+  if (used === undefined && limit === undefined) return null;
+  const usedValue = used ?? null;
+  const limitValue = limit ?? null;
+  const resetAt = asIsoDateTime(data.resetTime) || asIsoDateTime(data.reset_at) || asIsoDateTime(data.reset_time);
+  return {
+    key,
+    label,
+    kind,
+    used: usedValue,
+    limit: limitValue,
+    remaining: limitValue != null && usedValue != null ? Math.max(0, limitValue - usedValue) : null,
+    ...(resetAt ? { resetAt } : {}),
+  };
+}
+
+export async function probeKimiQuota(input: {
+  accessToken: string;
+  proxyUrl: string | null;
+  syncedAt: string;
+}): Promise<OauthQuotaSnapshot | null> {
+  const accessToken = asTrimmedString(input.accessToken);
+  if (!accessToken) return null;
+
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: 'application/json',
+    'User-Agent': KIMI_USER_AGENT,
+  };
+  // The subscription endpoint is /usages; /usage is the documented fallback.
+  let { ok, status, body } = await fetchJson({
+    url: `${KIMI_CODING_BASE_URL}/usages`,
+    init: { method: 'GET', headers },
+    proxyUrl: input.proxyUrl,
+  });
+  if (status === 404) {
+    ({ ok, status, body } = await fetchJson({
+      url: `${KIMI_CODING_BASE_URL}/usage`,
+      init: { method: 'GET', headers },
+      proxyUrl: input.proxyUrl,
+    }));
+  }
+  if (!ok) {
+    return buildUnsupportedSnapshot('kimi', `Kimi 额度查询失败（HTTP ${status}）`);
+  }
+
+  const payload = asRecord(body);
+  if (!payload) return null;
+
+  const entries: OauthQuotaEntrySnapshot[] = [];
+  let summary: OauthQuotaEntrySnapshot | null = null;
+
+  const dataList = payload.data;
+  if (Array.isArray(dataList)) {
+    for (const item of dataList) {
+      const row = asRecord(item);
+      if (!row) continue;
+      const isSummary = asTrimmedString(row.model_name) === 'all';
+      const label = isSummary
+        ? '周额度'
+        : asTrimmedString(row.model_name) || asTrimmedString(row.name) || '模型额度';
+      const key = isSummary ? 'summary' : `model:${label}`;
+      const entry = kimiEntryFrom(row, key, label, isSummary ? 'window' : 'bucket');
+      if (!entry) continue;
+      if (isSummary) summary = entry;
+      else entries.push(entry);
+    }
+  } else {
+    const usage = asRecord(payload.usage);
+    if (usage) summary = kimiEntryFrom(usage, 'summary', '周额度', 'window');
+    const rawLimits = payload.limits;
+    if (Array.isArray(rawLimits)) {
+      rawLimits.forEach((item, index) => {
+        const container = asRecord(item);
+        if (!container) return;
+        const detail = asRecord(container.detail) || container;
+        const window = asRecord(container.window) || {};
+        const label = asTrimmedString(detail.name) || asTrimmedString(detail.title) || kimiLimitLabel(window, index);
+        const entry = kimiEntryFrom(detail, `limit:${index}`, label, 'bucket');
+        if (entry) entries.push(entry);
+      });
+    }
+  }
+
+  if (summary) entries.unshift(summary);
+  if (!entries.length) {
+    return buildUnsupportedSnapshot('kimi', 'Kimi 未返回可识别的额度数据');
+  }
+
+  // The summary row is the weekly (7d) rolling window. Whether the upstream
+  // expresses it as a percentage or a raw count, used/limit gives the percent.
+  const summaryPercent = summary && summary.limit != null && summary.limit > 0 && summary.used != null
+    ? clampPercent((summary.used / summary.limit) * 100)
+    : null;
+  const sevenDay: OauthQuotaWindowSnapshot = summaryPercent != null
+    ? {
+      supported: true,
+      used: summaryPercent,
+      limit: 100,
+      remaining: clampPercent(100 - summaryPercent),
+      ...(summary?.resetAt ? { resetAt: summary.resetAt } : {}),
+    }
+    : buildUnsupportedWindow('Kimi 未返回 7d 百分比窗口，按请求额度返回');
+
+  return {
+    status: 'supported',
+    source: 'official',
+    lastSyncAt: input.syncedAt,
+    providerMessage: 'kimi coding quota fetched from official /coding/v1/usages endpoint',
+    windows: {
+      fiveHour: buildUnsupportedWindow('Kimi 不提供 5h 百分比窗口，按请求额度返回'),
+      sevenDay,
+    },
+    entries,
+  };
+}
+
 /** Providers with a dedicated official quota probe implemented above. */
 export const PROVIDER_QUOTA_PROBES = new Set([
   'claude',
@@ -593,4 +747,5 @@ export const PROVIDER_QUOTA_PROBES = new Set([
   'antigravity',
   'github',
   'qoder',
+  'kimi',
 ]);

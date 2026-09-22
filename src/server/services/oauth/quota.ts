@@ -20,6 +20,7 @@ import {
   probeAntigravityQuota,
   probeGithubCopilotQuota,
   probeQoderQuota,
+  probeKimiQuota,
 } from './providerQuotaProbes.js';
 
 type CodexJwtClaims = {
@@ -944,6 +945,8 @@ export async function refreshOauthQuotaSnapshot(accountId: number): Promise<Oaut
         probed = await probeGithubCopilotQuota(probeInput);
       } else if (provider === 'qoder') {
         probed = await probeQoderQuota(probeInput);
+      } else if (provider === 'kimi') {
+        probed = await probeKimiQuota(probeInput);
       }
       if (probed) return persistQuotaSnapshot(accountId, probed);
     } catch (error) {

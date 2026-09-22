@@ -13,6 +13,7 @@ const {
   probeAntigravityQuota,
   probeGithubCopilotQuota,
   probeQoderQuota,
+  probeKimiQuota,
   PROVIDER_QUOTA_PROBES,
 } = await import('./providerQuotaProbes.js');
 
@@ -37,7 +38,7 @@ describe('provider quota probes', () => {
 
   it('covers exactly the providers wired into refreshOauthQuotaSnapshot', () => {
     expect([...PROVIDER_QUOTA_PROBES].sort()).toEqual([
-      'antigravity', 'claude', 'gemini-cli', 'github', 'qoder',
+      'antigravity', 'claude', 'gemini-cli', 'github', 'kimi', 'qoder',
     ]);
   });
 
@@ -268,12 +269,88 @@ describe('provider quota probes', () => {
     expect(snapshot?.entries?.[0]?.resetAt).toBe(new Date(1790000000000).toISOString());
   });
 
+  it('parses kimi coding usage/limits into a weekly window plus rows', async () => {
+    undiciFetchMock.mockResolvedValue(jsonResponse({
+      usage: { limit: 100, used: 96, resetTime: '2026-09-25T00:00:00.000Z' },
+      limits: [
+        { window: { duration: 5, timeUnit: 'HOUR' }, detail: { limit: 1000, remaining: 250 } },
+        { window: { duration: 300, timeUnit: 'MINUTE' }, detail: { limit: 1000, used: 100 } },
+      ],
+    }));
+
+    const snapshot = await probeKimiQuota({
+      accessToken: 'kimi-token',
+      proxyUrl: null,
+      syncedAt: SYNCED_AT,
+    });
+
+    expect(snapshot?.status).toBe('supported');
+    // 96/100 -> 96% weekly window.
+    expect(snapshot?.windows.sevenDay).toMatchObject({ supported: true, used: 96, limit: 100, remaining: 4 });
+    expect(snapshot?.entries?.find((entry) => entry.key === 'summary')).toMatchObject({
+      kind: 'window',
+      used: 96,
+      limit: 100,
+    });
+    expect(snapshot?.entries?.find((entry) => entry.label === '5h 窗口')).toMatchObject({
+      kind: 'bucket',
+      used: 750,
+      limit: 1000,
+    });
+    expect(snapshot?.entries?.find((entry) => entry.label === '5h 窗口')?.resetAt).toBeUndefined();
+  });
+
+  it('parses the kimi data[] shape with a model_name=all summary', async () => {
+    undiciFetchMock.mockResolvedValue(jsonResponse({
+      data: [
+        { model_name: 'all', limit: 5000, used: 3200, resetTime: 1790000000 },
+        { model_name: 'kimi-k2.7-code', limit: 1200, used: 300 },
+      ],
+    }));
+
+    const snapshot = await probeKimiQuota({
+      accessToken: 'kimi-token',
+      proxyUrl: null,
+      syncedAt: SYNCED_AT,
+    });
+
+    expect(snapshot?.status).toBe('supported');
+    // 3200/5000 -> 64%.
+    expect(snapshot?.windows.sevenDay).toMatchObject({ supported: true, used: 64, limit: 100 });
+    expect(snapshot?.entries?.[0]).toMatchObject({ key: 'summary', label: '周额度', kind: 'window' });
+    expect(snapshot?.entries?.find((entry) => entry.key === 'model:kimi-k2.7-code')).toMatchObject({
+      kind: 'bucket',
+      used: 300,
+      limit: 1200,
+      remaining: 900,
+    });
+    expect(snapshot?.entries?.[0]?.resetAt).toBe(new Date(1790000000 * 1000).toISOString());
+  });
+
+  it('falls back to /usage when /usages returns 404', async () => {
+    undiciFetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: 'not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse({ usage: { limit: 100, used: 10 } }));
+
+    const snapshot = await probeKimiQuota({
+      accessToken: 'kimi-token',
+      proxyUrl: null,
+      syncedAt: SYNCED_AT,
+    });
+
+    expect(undiciFetchMock).toHaveBeenCalledTimes(2);
+    expect(String(undiciFetchMock.mock.calls[0]?.[0])).toContain('/usages');
+    expect(String(undiciFetchMock.mock.calls[1]?.[0])).toContain('/usage');
+    expect(snapshot?.status).toBe('supported');
+  });
+
   it('never calls upstream without an access token', async () => {
     for (const probe of [
       probeClaudeQuota,
       probeAntigravityQuota,
       probeGithubCopilotQuota,
       probeQoderQuota,
+      probeKimiQuota,
     ]) {
       const snapshot = await probe({ accessToken: '  ', proxyUrl: null, syncedAt: SYNCED_AT });
       expect(snapshot).toBeNull();
