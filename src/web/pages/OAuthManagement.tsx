@@ -9,7 +9,7 @@ import { useToast } from '../components/Toast.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import OAuthModelsModal, { type OAuthModelItem } from './oauth/OAuthModelsModal.js';
 import AutoRefreshCountdown from './oauth/AutoRefreshCountdown.js';
-import {QuotaWindowRow, SideDrawer, SiteWeightEditor, compactAccountKey, hasOauthProxySelection, renderCodeBlock, renderGuideCard, resolveConnectionEmailLabel, resolveConnectionPrimaryTitle, resolveConnectionRouteParticipation, resolveConnectionStatusLabel, resolveModelSyncDetail, resolveModelSyncStatusText, resolveProxyDisplayText, resolveProxyProjectSummary, resolveQuotaSourceLabel, resolveQuotaStatusLabel, resolveQuotaSyncDetail, resolveQuotaSyncStatusText, resolveRouteParticipationSummary, resolveRouteUnitStrategyLabel} from './oauth/connectionPresentation.js';
+import {QuotaEntryRow, QuotaWindowRow, SideDrawer, SiteWeightEditor, compactAccountKey, hasOauthProxySelection, renderCodeBlock, renderGuideCard, resolveConnectionEmailLabel, resolveConnectionPrimaryTitle, resolveConnectionRouteParticipation, resolveConnectionStatusLabel, resolveModelSyncDetail, resolveModelSyncStatusText, resolveProxyDisplayText, resolveProxyProjectSummary, resolveQuotaSourceLabel, resolveQuotaStatusLabel, resolveQuotaSyncDetail, resolveQuotaSyncStatusText, resolveRouteParticipationSummary, resolveRouteUnitStrategyLabel} from './oauth/connectionPresentation.js';
 import {api, type OAuthConnectionInfo, type OAuthProviderInfo, type OAuthRouteUnitStrategy, type OAuthStartInstructions} from '../api.js';
 import {copyText} from '../clipboard.js';
 import { StatusText, StatusPill } from '../components/StatusText.js';
@@ -1552,6 +1552,9 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
                       </div>
                       <QuotaWindowRow label="5h" window={quota.windows?.fiveHour} />
                       <QuotaWindowRow label="7d" window={quota.windows?.sevenDay} />
+                      {quota.entries?.map((entry) => (
+                        <QuotaEntryRow key={entry.key} entry={entry} />
+                      ))}
                     </div>
                   ) : (
                     <span className="oauth-cell-secondary">--</span>
@@ -1715,6 +1718,9 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
                   </div>
                   <QuotaWindowRow label="5h" window={quota.windows?.fiveHour} />
                   <QuotaWindowRow label="7d" window={quota.windows?.sevenDay} />
+                  {quota.entries?.map((entry) => (
+                    <QuotaEntryRow key={entry.key} entry={entry} />
+                  ))}
                 </>
               ) : (
                 <div className="oauth-cell-secondary">--</div>

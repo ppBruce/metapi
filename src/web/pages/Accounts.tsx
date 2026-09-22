@@ -2894,11 +2894,21 @@ export default function Accounts({ siteId: filterSiteId }: AccountsProps = {}) {
                                 const oauthInfo = parseOauthAccountInfo(a);
                                 if (oauthInfo) {
                                   // OAuth 账号：显示 planType + 配额窗口
-                                  const windowLabel = oauthInfo.quota?.fiveHour
-                                    ? `5h ${oauthInfo.quota.fiveHour.used ?? '-'}%`
-                                    : oauthInfo.quota?.sevenDay
-                                      ? `7d ${oauthInfo.quota.sevenDay.used ?? '-'}%`
-                                      : null;
+                                  const supportedWindows = [
+                                    oauthInfo.quota?.fiveHour?.supported ? `5h ${oauthInfo.quota.fiveHour.used ?? '-'}%` : null,
+                                    oauthInfo.quota?.sevenDay?.supported ? `7d ${oauthInfo.quota.sevenDay.used ?? '-'}%` : null,
+                                  ].filter(Boolean);
+                                  // 非窗口型 provider（按模型桶 / 积分池）回落到额度明细首行
+                                  const windowLabel = supportedWindows.length
+                                    ? supportedWindows.join(' / ')
+                                    : (() => {
+                                      const firstEntry = oauthInfo.entries[0];
+                                      if (!firstEntry) return null;
+                                      const value = typeof firstEntry.remaining === 'number' && typeof firstEntry.limit === 'number'
+                                        ? `${firstEntry.remaining}/${firstEntry.limit}`
+                                        : firstEntry.label;
+                                      return `${firstEntry.label} ${value}`;
+                                    })();
                                   return (
                                     <>
                                       <StatusPill tone="info" style={{ fontSize: 10 }}>

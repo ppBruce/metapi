@@ -1172,6 +1172,62 @@ describe('OAuthManagement page', () => {
     }
   });
 
+  it('renders provider quota entries when upstream exposes no 5h/7d windows', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({ providers: [] });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 92,
+          provider: 'claude',
+          email: 'claude-user@example.com',
+          planType: 'max',
+          modelCount: 3,
+          modelsPreview: ['claude-opus-4-6'],
+          status: 'healthy',
+          quota: {
+            status: 'supported',
+            source: 'official',
+            lastSyncAt: '2026-09-22T06:00:00.000Z',
+            windows: {
+              fiveHour: { supported: false, message: 'official 5h quota window is unavailable for this provider' },
+              sevenDay: { supported: false, message: 'official 7d quota window is unavailable for this provider' },
+            },
+            entries: [
+              { key: 'seven_day_sonnet', label: '7d sonnet', kind: 'window', used: 91, limit: 100, remaining: 9 },
+              { key: 'user', label: '用户额度', kind: 'credits', used: 250, limit: 1000, remaining: 750, unit: 'credits' },
+            ],
+          },
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        const text = collectText(root.root);
+        // Extra rows must be visible with their real numbers, not hidden.
+        expect(text).toContain('7d sonnet');
+        expect(text).toContain('用户额度');
+        expect(text).toContain('750 / 1000 credits');
+      });
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('previews native oauth json in the workbench modal and closes after adding', async () => {
     apiMock.getOAuthProviders.mockResolvedValue({
       providers: [

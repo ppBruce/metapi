@@ -638,7 +638,21 @@ export type OAuthQuotaInfo = {
     fiveHour: OAuthQuotaWindowInfo;
     sevenDay: OAuthQuotaWindowInfo;
   };
+  entries?: OAuthQuotaEntryInfo[];
   lastLimitResetAt?: string | null;
+};
+
+export type OAuthQuotaEntryInfo = {
+  key: string;
+  label: string;
+  kind: 'window' | 'bucket' | 'credits';
+  used?: number | null;
+  limit?: number | null;
+  remaining?: number | null;
+  remainingPercent?: number | null;
+  unit?: string | null;
+  resetAt?: string | null;
+  unlimited?: boolean;
 };
 
 export type OAuthConnectionInfo = {

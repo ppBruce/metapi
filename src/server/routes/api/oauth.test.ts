@@ -2047,6 +2047,18 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       }),
     );
 
+    // Antigravity now has a real official probe: mock loadCodeAssist +
+    // fetchAvailableModels so the refresh returns actual per-model buckets.
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      cloudaicompanionProject: 'ag-project-1',
+      currentTier: { name: 'Pro' },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      models: {
+        'gemini-3-flash-agent': { displayName: 'Gemini 3.5 Flash', quotaInfo: { remainingFraction: 0.4 } },
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
     const antigravityRefresh = await app.inject({
       method: 'POST',
       url: `/api/oauth/connections/${antigravityAccount.id}/quota/refresh`,
@@ -2055,8 +2067,56 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     expect(antigravityRefresh.json()).toMatchObject({
       success: true,
       quota: expect.objectContaining({
+        status: 'supported',
+        source: 'official',
+        subscription: expect.objectContaining({ planType: 'Pro' }),
+        entries: [
+          expect.objectContaining({
+            key: 'gemini-3-flash-agent',
+            kind: 'bucket',
+            remainingPercent: 40,
+            used: 60,
+          }),
+        ],
+      }),
+    });
+  });
+
+  it('marks providers without a quota probe as unsupported', async () => {
+    const kilocodeSite = await db.insert(schema.sites).values({
+      name: 'Kilocode OAuth',
+      url: 'https://example.com/kilocode',
+      platform: 'kilocode',
+      status: 'active',
+    }).returning().get();
+
+    const kilocodeAccount = await db.insert(schema.accounts).values({
+      siteId: kilocodeSite.id,
+      username: 'kc-user@example.com',
+      accessToken: 'kc-access-token',
+      status: 'active',
+      oauthProvider: 'kilocode',
+      oauthAccountKey: 'kc-account-123',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: {
+          provider: 'kilocode',
+          accountId: 'kc-account-123',
+          email: 'kc-user@example.com',
+        },
+      }),
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/oauth/connections/${kilocodeAccount.id}/quota/refresh`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      quota: expect.objectContaining({
         status: 'unsupported',
-        providerMessage: 'official quota windows are not exposed for antigravity oauth',
+        providerMessage: 'official quota windows are not exposed for kilocode oauth',
       }),
     });
   });
