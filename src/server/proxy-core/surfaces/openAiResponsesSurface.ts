@@ -1,6 +1,6 @@
 import { TextDecoder } from 'node:util';
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { config } from '../../config.js';
+import { config, resolveProxyStreamIdleTimeoutMs } from '../../config.js';
 import { resolveRequestContextRequirement } from '../../shared/requestContextEstimate.js';
 import { reportProxyAllFailed } from '../../services/alertService.js';
 import { hasProxyUsagePayload, mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
@@ -43,6 +43,7 @@ import {
 } from '../../transformers/gemini/generate-content/cliBridge.js';
 import { isCodexResponsesSurface } from '../cliProfiles/codexProfile.js';
 import { getObservedResponseMeta } from '../firstByteTimeout.js';
+import { createIdleGuardedStreamReader } from '../streamIdleTimeout.js';
 import { getRuntimeResponseReader, readRuntimeResponseText } from '../executors/types.js';
 import { runCodexHttpSessionTask } from '../runtime/codexHttpSessionQueue.js';
 import {buildCodexSessionResponseStoreKey, clearCodexSessionResponseId, getCodexSessionResponseId} from '../runtime/codexSessionResponseStore.js';
@@ -1220,21 +1221,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
           let rawText = '';
           const decoder = new TextDecoder();
           const reader = baseReader
-            ? {
-              async read() {
-                const result = await baseReader.read();
-                if (result.value) {
-                  rawText += decoder.decode(result.value, { stream: true });
-                }
-                return result;
+            ? createIdleGuardedStreamReader({
+              reader: baseReader,
+              timeoutMs: resolveProxyStreamIdleTimeoutMs(),
+              onChunk: (value) => {
+                rawText += decoder.decode(value, { stream: true });
               },
-              async cancel(reason?: unknown) {
-                return baseReader.cancel(reason);
-              },
-              releaseLock() {
-                return baseReader.releaseLock();
-              },
-            }
+            })
             : baseReader;
           const unwireStreamCancel = wireStreamCancelOnClientDisconnect(
             reply,

@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { TextDecoder } from 'node:util';
 import { fetch } from 'undici';
 import { and, eq } from 'drizzle-orm';
-import { config } from '../../config.js';
+import { config, resolveProxyStreamIdleTimeoutMs } from '../../config.js';
 import { db, schema } from '../../db/index.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
@@ -43,6 +43,7 @@ import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/conversationFileCapabilities.js';
 import { getRuntimeResponseReader, readRuntimeResponseText } from '../executors/types.js';
 import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../firstByteTimeout.js';
+import { createIdleGuardedStreamReader } from '../streamIdleTimeout.js';
 import { wireStreamCancelOnClientDisconnect } from './sharedSurface.js';
 import {
   getProxyMaxChannelRetries,
@@ -865,9 +866,13 @@ export async function geminiProxyRoute(app: FastifyInstance) {
 
           if (geminiGenerateContentTransformer.stream.isSseContentType(contentType)) {
             const upstreamReader = getRuntimeResponseReader(upstream);
-            const reader = isInternalGemini && !isGeminiCliDownstream && upstreamReader
+            let reader = isInternalGemini && !isGeminiCliDownstream && upstreamReader
               ? createGeminiCliStreamReader(upstreamReader)
               : upstreamReader;
+            reader = reader ? createIdleGuardedStreamReader({
+              reader,
+              timeoutMs: resolveProxyStreamIdleTimeoutMs(),
+            }) : reader;
             const captureStreamChunks = debugTrace?.options.captureStreamChunks === true;
             if (!reader) {
               const latency = Date.now() - startTime;

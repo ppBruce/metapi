@@ -1,6 +1,6 @@
 import { TextDecoder } from 'node:util';
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { config } from '../../config.js';
+import { config, resolveProxyStreamIdleTimeoutMs } from '../../config.js';
 import { resolveRequestContextRequirement } from '../../shared/requestContextEstimate.js';
 import { resolveSiteProtocolProfile } from '../../shared/siteProtocolProfile.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
@@ -55,6 +55,7 @@ import {
 } from '../../transformers/gemini/generate-content/cliBridge.js';
 import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/conversationFileCapabilities.js';
 import { getObservedResponseMeta } from '../firstByteTimeout.js';
+import { createIdleGuardedStreamReader } from '../streamIdleTimeout.js';
 import { getRuntimeResponseReader, readRuntimeResponseText } from '../executors/types.js';
 import { detectDownstreamClientContext } from '../downstreamClientContext.js';
 import {
@@ -1089,21 +1090,13 @@ export async function handleChatSurfaceRequest(
             : upstreamReader;
           const decoder = new TextDecoder();
           const reader = baseReader
-            ? {
-              async read() {
-                const result = await baseReader.read();
-                if (result.value) {
-                  rawText += decoder.decode(result.value, { stream: true });
-                }
-                return result;
+            ? createIdleGuardedStreamReader({
+              reader: baseReader,
+              timeoutMs: resolveProxyStreamIdleTimeoutMs(),
+              onChunk: (value) => {
+                rawText += decoder.decode(value, { stream: true });
               },
-              async cancel(reason?: unknown) {
-                return baseReader.cancel(reason);
-              },
-              releaseLock() {
-                return baseReader.releaseLock();
-              },
-            }
+            })
             : baseReader;
           const unwireStreamCancel = wireStreamCancelOnClientDisconnect(
             reply,

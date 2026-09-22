@@ -567,7 +567,14 @@ export default function Sites() {
       ];
   }, [normalizedFormPlatform]);
   const selectedOauthProvider = useMemo(
-    () => oauthProviders.find((provider) => provider.platform === normalizedFormPlatform) || null,
+    () => {
+      if (!normalizedFormPlatform) return null;
+      // Platforms in the manual dropdown are manual-entry. OAuth-only platforms
+      // (codex, gemini-cli, antigravity, …) reach the form via auto-detect or
+      // the OAuth flow and map to an OAuth provider.
+      if (SITE_PLATFORM_OPTIONS.some((o) => o.value === normalizedFormPlatform)) return null;
+      return oauthProviders.find((provider) => provider.platform === normalizedFormPlatform) || null;
+    },
     [normalizedFormPlatform, oauthProviders],
   );
   const platformSelectValue = form.platform;
@@ -1056,7 +1063,7 @@ export default function Sites() {
     });
 
     if (input.choice === 'session') {
-      if (platform === 'codex' || platform === 'claude' || platform === 'gemini-cli' || platform === 'antigravity') {
+      if (platform === 'codex' || platform === 'gemini-cli' || platform === 'antigravity') {
         params.set('provider', platform);
         navigate(`/oauth?${params.toString()}`);
         return;

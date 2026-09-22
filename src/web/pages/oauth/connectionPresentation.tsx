@@ -6,6 +6,8 @@
  */
 import {
   useEffect,
+  useRef,
+  useState,
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -341,10 +343,37 @@ export function SiteWeightEditor({
   onChange: (next: string) => void;
   onSave: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  if (!editing) {
+    return (
+      <div className="oauth-cell-inline oauth-site-weight-editor">
+        <span className="oauth-cell-tertiary">权重</span>
+        <button
+          type="button"
+          className="oauth-weight-display"
+          title="点击修改站点权重"
+          onClick={() => setEditing(true)}
+        >
+          {value || '1'}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="oauth-cell-inline oauth-site-weight-editor">
       <span className="oauth-cell-tertiary">权重</span>
       <input
+        ref={inputRef}
         data-oauth-setting="site-weight"
         className="oauth-input oauth-weight-input"
         type="number"
@@ -352,15 +381,33 @@ export function SiteWeightEditor({
         max="100"
         step="0.001"
         value={value}
+        autoFocus
         onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !saving) {
+            onSave();
+            setEditing(false);
+          } else if (event.key === 'Escape') {
+            setEditing(false);
+          }
+        }}
+        onBlur={() => {
+          if (!saving) setEditing(false);
+        }}
+        disabled={saving}
       />
       <button
         type="button"
-        className="btn btn-link btn-link-info oauth-inline-trigger"
+        className="btn btn-link btn-link-info oauth-inline-trigger oauth-weight-save"
+        onMouseDown={(event) => {
+          // Keep focus on the input so its blur handler doesn't close the
+          // editor before this click lands.
+          event.preventDefault();
+        }}
         onClick={onSave}
         disabled={saving}
       >
-        {saving ? '保存中...' : '保存'}
+        {saving ? '保存中' : '保存'}
       </button>
     </div>
   );
