@@ -66,7 +66,7 @@ import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import SiteCreatedModal from '../components/SiteCreatedModal.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { buildSiteFocusSearch, clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
-import {SITE_PLATFORM_OPTIONS, SiteBalanceDisplay, SiteConnectionStats, SiteOutboundFlags, buildSiteConnectionSearchParams, getConfiguredSiteApiEndpoints, platformBadgeClass, resolveSiteCreatedSessionLabel} from './sites/sitePresentation.js';
+import {SITE_PLATFORM_OPTIONS, SiteBalanceDisplay, SiteConnectionStats, SiteOutboundFlags, buildSiteConnectionSearchParams, findOauthProviderForPlatform, getConfiguredSiteApiEndpoints, platformBadgeClass, resolveSiteCreatedSessionLabel} from './sites/sitePresentation.js';
 import { tr } from '../i18n.js';
 import { buildCustomDragReorderUpdates, buildCrossPageDropUpdates, buildUnpinMoveToFrontUpdates, canCrossPageDrop, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
@@ -567,14 +567,7 @@ export default function Sites() {
       ];
   }, [normalizedFormPlatform]);
   const selectedOauthProvider = useMemo(
-    () => {
-      if (!normalizedFormPlatform) return null;
-      // Platforms in the manual dropdown are manual-entry. OAuth-only platforms
-      // (codex, gemini-cli, antigravity, …) reach the form via auto-detect or
-      // the OAuth flow and map to an OAuth provider.
-      if (SITE_PLATFORM_OPTIONS.some((o) => o.value === normalizedFormPlatform)) return null;
-      return oauthProviders.find((provider) => provider.platform === normalizedFormPlatform) || null;
-    },
+    () => findOauthProviderForPlatform(normalizedFormPlatform, oauthProviders),
     [normalizedFormPlatform, oauthProviders],
   );
   const platformSelectValue = form.platform;
@@ -1595,7 +1588,7 @@ export default function Sites() {
                 data-testid="site-platform-select"
                 value={platformSelectValue}
                 onChange={(value) => {
-                  const oauthProvider = oauthProviders.find((provider) => provider.platform === value);
+                  const oauthProvider = findOauthProviderForPlatform(value, oauthProviders);
                   if (oauthProvider) {
                     setSelectedInitializationPresetId(null);
                     setForm((prev) => ({
@@ -1629,9 +1622,9 @@ export default function Sites() {
                   setForm((prev) => ({
                     ...prev,
                     platform: value,
-                    ...(oauthProviders.some((provider) => provider.platform === value)
+                    ...(findOauthProviderForPlatform(value, oauthProviders)
                       ? {
-                        url: oauthProviders.find((provider) => provider.platform === value)?.siteUrl || prev.url,
+                        url: findOauthProviderForPlatform(value, oauthProviders)?.siteUrl || prev.url,
                         apiEndpoints: [],
                         customHeaders: [],
                         customHeadersOverrideRequestHeaders: false,

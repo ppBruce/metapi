@@ -5,6 +5,7 @@
  */
 
 import { FileTextIcon, GlobeIcon, KeyIcon, SlidersIcon, UnlockIcon, UserIcon } from '../../components/MiniIcons.js';
+import HoverPopover from '../../components/HoverPopover.js';
 
 export type SiteSubscriptionSummary = {
   activeCount: number;
@@ -62,9 +63,9 @@ export function hasSiteOutboundProxy(proxyUrl?: string | null): boolean {
  * list, so locating them meant opening the editor site by site — while a tester
  * tracking down a site-specific 502 needs exactly that answer in the row.
  *
- * Uses the native `title` rather than the app's data-tooltip to match the
- * connection markers in the same row: these are 12px inline icons, and the
- * styled tooltip's 220px floor reads as a panel instead of a label.
+ * Each marker labels itself through HoverPopover — desktop hover, touch tap —
+ * matching the connection markers in the same row. The native `title` reads as
+ * a panel at this icon size and is unavailable on touch devices.
  */
 export function SiteOutboundFlags(props: {
   proxyUrl?: string | null;
@@ -79,16 +80,17 @@ export function SiteOutboundFlags(props: {
   return (
     <span className="sites-name-flags">
       {hasProxy ? (
-        <span className="sites-name-flag" title="已配置出站代理">
-          <GlobeIcon size={12} />
+        <span className="sites-name-flag">
+          <HoverPopover content="已配置出站代理">
+            <GlobeIcon size={12} />
+          </HoverPopover>
         </span>
       ) : null}
       {headerCount > 0 ? (
-        <span
-          className="sites-name-flag"
-          title={`已配置自定义请求头 ${headerCount} 项${customHeadersOverrideRequestHeaders ? '，覆盖上游同名请求头' : ''}`}
-        >
-          <SlidersIcon size={12} />
+        <span className="sites-name-flag">
+          <HoverPopover content={`已配置自定义请求头 ${headerCount} 项${customHeadersOverrideRequestHeaders ? '，覆盖上游同名请求头' : ''}`}>
+            <SlidersIcon size={12} />
+          </HoverPopover>
         </span>
       ) : null}
     </span>
@@ -127,8 +129,10 @@ export function SiteConnectionStats(props: { stats?: SiteConnectionStatsLike | n
   return (
     <>
       {markers.map(({ key, label, count, Icon }) => (
-        <span key={key} className="sites-conn-item" title={label}>
-          <Icon size={12} />
+        <span key={key} className="sites-conn-item">
+          <HoverPopover content={label}>
+            <Icon size={12} />
+          </HoverPopover>
           {count}
         </span>
       ))}
@@ -285,6 +289,38 @@ export function SiteBalanceDisplay(props: {
 export function platformBadgeClass(platform?: string | null): string {
   const key = String(platform || '').trim();
   return platformColors[key] || 'badge-muted';
+}
+
+export type OAuthProviderSiteInfo = {
+  platform: string;
+  siteUrl?: string | null;
+};
+
+/**
+ * Whether a platform reaches the form via auto-detect or the OAuth flow and
+ * may map to an OAuth provider. Platforms in the manual dropdown are
+ * manual-entry and must never resolve to an OAuth provider — doing so prefills
+ * the editor with the provider's own upstream URL instead of a user-entered
+ * Base URL.
+ */
+export function isOauthFlowPlatform(platform?: string | null): boolean {
+  const normalized = String(platform || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return !SITE_PLATFORM_OPTIONS.some((option) => option.value === normalized);
+}
+
+/**
+ * The OAuth provider a platform maps to, or null for manual-entry platforms.
+ * One source of truth for the editor's selected-provider lookup and the
+ * platform-select prefill guard, so the two cannot drift apart again.
+ */
+export function findOauthProviderForPlatform<T extends OAuthProviderSiteInfo>(
+  platform: string | null | undefined,
+  providers: ReadonlyArray<T>,
+): T | null {
+  if (!isOauthFlowPlatform(platform)) return null;
+  const normalized = String(platform || '').trim().toLowerCase();
+  return providers.find((provider) => provider.platform === normalized) || null;
 }
 
 export const platformColors: Record<string, string> = {

@@ -8,7 +8,10 @@ import {
   SiteConnectionStats,
   SiteOutboundFlags,
   countSiteCustomHeaders,
+  findOauthProviderForPlatform,
   hasSiteOutboundProxy,
+  isOauthFlowPlatform,
+  SITE_PLATFORM_OPTIONS,
 } from './sites/sitePresentation.js';
 
 function renderOnce(element: ReactElement): ReactTestRenderer {
@@ -27,8 +30,8 @@ function collectText(node: ReactTestInstance): string {
 
 function collectTooltips(root: ReactTestRenderer): string[] {
   return root.root
-    .findAll((node) => typeof node.props?.title === 'string')
-    .map((node) => String(node.props.title));
+    .findAll((node) => typeof node.props?.content === 'string')
+    .map((node) => String(node.props.content));
 }
 
 describe('site outbound markers', () => {
@@ -106,5 +109,34 @@ describe('site outbound markers', () => {
     // Both surfaces render the shared marker components.
     expect(source.match(/<SiteConnectionStats/g)).toHaveLength(2);
     expect(source.match(/<SiteOutboundFlags/g)).toHaveLength(2);
+  });
+
+  it('never maps a manual-entry platform to an OAuth provider prefill', () => {
+    // SITE_PLATFORM_OPTIONS values are manual-entry: claude must not resolve to
+    // the Claude OAuth provider (which would prefill the official upstream URL).
+    for (const option of SITE_PLATFORM_OPTIONS) {
+      expect(isOauthFlowPlatform(option.value)).toBe(false);
+    }
+    // OAuth-only platforms still resolve through the OAuth flow.
+    expect(isOauthFlowPlatform('codex')).toBe(true);
+    expect(isOauthFlowPlatform('')).toBe(false);
+    expect(isOauthFlowPlatform(null)).toBe(false);
+  });
+
+  it('finds no OAuth provider for the manual claude platform', () => {
+    const providers = [{ platform: 'claude', siteUrl: 'https://api.anthropic.com' }];
+    expect(findOauthProviderForPlatform('claude', providers)).toBeNull();
+    expect(findOauthProviderForPlatform('codex', providers)).toBeNull();
+    const codexProviders = [{ platform: 'codex', siteUrl: 'https://chatgpt.com' }];
+    expect(findOauthProviderForPlatform('codex', codexProviders)?.siteUrl).toBe('https://chatgpt.com');
+  });
+
+  it('keeps every MiniIcon geometry unique across the set', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/web/components/MiniIcons.tsx'), 'utf8');
+    const paths = [...source.matchAll(/<(?:path|rect|circle|polygon|line|polyline)[^>]*?\bd="([^"]+)"/g)].map((m) => m[1]);
+    const attrs = [...source.matchAll(/<(?:rect|circle)[^>]*?(?:x|cx)="(-?[\d.]+)"[^>]*?(?:y|cy)="(-?[\d.]+)"[^>]*?(?:width="([\d.]+)"|r="([\d.]+)")/g)].map((m) => m.slice(1).join(','));
+    const all = [...paths, ...attrs];
+    expect(all.length).toBeGreaterThan(0);
+    expect(new Set(all).size).toBe(all.length);
   });
 });
