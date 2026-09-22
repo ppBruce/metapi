@@ -1926,6 +1926,52 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     expect(accounts).toEqual([]);
   });
 
+  it('deletes many oauth connections in one bulk request and reports the rest as failed', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const oauthAccounts = await db.insert(schema.accounts).values([
+      { siteId: site.id, username: 'bulk-a@example.com', accessToken: 'a', status: 'active', oauthProvider: 'codex', oauthAccountKey: 'bulk-a' },
+      { siteId: site.id, username: 'bulk-b@example.com', accessToken: 'b', status: 'active', oauthProvider: 'codex', oauthAccountKey: 'bulk-b' },
+    ]).returning().all();
+
+    const plainAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'plain-session@example.com',
+      accessToken: 'plain',
+      status: 'active',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/oauth/connections/batch-delete',
+      payload: { ids: [...oauthAccounts.map((item) => item.id), plainAccount.id] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect([...body.successIds].sort()).toEqual(oauthAccounts.map((item) => item.id).sort());
+    expect(body.failedItems).toEqual([{ id: plainAccount.id, message: 'oauth account not found' }]);
+
+    const remaining = await db.select().from(schema.accounts).all();
+    expect(remaining.map((item) => item.id)).toEqual([plainAccount.id]);
+  });
+
+  it('rejects a bulk delete without ids', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/oauth/connections/batch-delete',
+      payload: { ids: [] },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ message: 'ids is required' });
+  });
+
   it('refreshes oauth quota snapshots and marks unsupported providers explicitly', async () => {
     const codexSite = await db.insert(schema.sites).values({
       name: 'ChatGPT Codex OAuth',

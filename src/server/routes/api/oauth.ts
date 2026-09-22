@@ -4,6 +4,7 @@ import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import {
   getOauthProviderDefaults,
   deleteOauthConnection,
+  deleteOauthConnections,
   importOauthConnectionsFromNativeJson,
   getOauthSessionStatus,
   handleOauthCallback,
@@ -85,6 +86,14 @@ let oauthRouteUnitCreateLimiter = createOauthSensitiveRouteLimiter('oauth-connec
 let oauthRouteUnitUpdateLimiter = createOauthSensitiveRouteLimiter('oauth-connection-sensitive-route-unit-update');
 let oauthRouteUnitDeleteLimiter = createOauthSensitiveRouteLimiter('oauth-connection-sensitive-route-unit-delete');
 const MAX_OAUTH_QUOTA_BATCH_SIZE = 100;
+const MAX_OAUTH_BATCH_DELETE_SIZE = 200;
+
+function normalizeBatchIds(input: unknown): number[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((item) => Number.parseInt(String(item), 10))
+    .filter((id) => Number.isFinite(id) && id > 0);
+}
 
 export function resetOauthSensitiveRouteLimiterForTests(options: {
   points?: number;
@@ -378,6 +387,30 @@ export async function oauthRoutes(app: FastifyInstance) {
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         return reply.code(404).send({ message: errorMessage || 'oauth account not found' });
+      }
+    },
+  );
+
+  // Bulk delete: one request for the whole selection. The per-connection DELETE
+  // above stays for single deletions, but a bulk action must not fan out into N
+  // requests — that exhausts the mutate rate limit and rebuilds routes N times.
+  app.post<{ Body: unknown }>(
+    '/api/oauth/connections/batch-delete',
+    { preHandler: [limitOauthConnectionMutate] },
+    async (request, reply) => {
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const ids = normalizeBatchIds(body.ids ?? body.accountIds);
+      if (ids.length === 0) {
+        return reply.code(400).send({ message: 'ids is required' });
+      }
+      if (ids.length > MAX_OAUTH_BATCH_DELETE_SIZE) {
+        return reply.code(400).send({ message: `单次最多删除 ${MAX_OAUTH_BATCH_DELETE_SIZE} 个连接` });
+      }
+      try {
+        return await deleteOauthConnections(ids);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return reply.code(500).send({ message: errorMessage || 'batch delete oauth connections failed' });
       }
     },
   );
