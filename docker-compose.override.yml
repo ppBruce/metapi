@@ -7,5 +7,5 @@ services:
       dockerfile: docker/Dockerfile
       labels:
         org.opencontainers.image.source: https://github.com/ppBruce/metapi
-        org.opencontainers.image.revision: 0ae0b7d08cfb2779cdb2eb73eb25eb232f94941c
+        org.opencontainers.image.revision: 06006085
         org.opencontainers.image.version: 1.8.0-custom
