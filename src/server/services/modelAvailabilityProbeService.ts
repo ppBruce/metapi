@@ -71,6 +71,7 @@ export type ModelAvailabilityProbeExecutionResult = {
 
 let probeSchedulerTimer: ReturnType<typeof setInterval> | null = null;
 const probeAccountLeases = new Set<number>();
+let probeCancellationRequested = false;
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -265,6 +266,7 @@ export async function executeModelAvailabilityProbe(input: {
   accountId?: number;
   rebuildRoutes?: boolean;
 } = {}): Promise<ModelAvailabilityProbeExecutionResult> {
+  probeCancellationRequested = false;
   if (!config.modelAvailabilityProbeAllow || !config.modelAvailabilityProbeEnabled) {
     return summarizeProbeResults([], false);
   }
@@ -279,6 +281,7 @@ export async function executeModelAvailabilityProbe(input: {
   let shouldRebuildRoutes = false;
 
   for (const accountId of accountIds) {
+    if (probeCancellationRequested || !config.modelAvailabilityProbeEnabled) break;
     const context = await loadActiveProbeAccountContext(accountId);
     if (!context) {
       continue;
@@ -314,6 +317,15 @@ export async function executeModelAvailabilityProbe(input: {
         targets,
         config.modelAvailabilityProbeConcurrency,
         async (target) => {
+          if (probeCancellationRequested || !config.modelAvailabilityProbeEnabled) {
+            return {
+              target,
+              probe: { status: 'skipped' as const, latencyMs: null, reason: 'model availability probe stopped' },
+              touched: false,
+              availabilityChanged: false,
+              failed: false,
+            };
+          }
           try {
             const probe = await probeSingleTarget(target);
             const update = await updateProbeRow(target, probe.status, probe.latencyMs);
@@ -451,10 +463,12 @@ export function stopModelAvailabilityProbeScheduler() {
     clearInterval(probeSchedulerTimer);
     probeSchedulerTimer = null;
   }
+  probeCancellationRequested = true;
 }
 
 export function __resetModelAvailabilityProbeExecutionStateForTests(): void {
   probeAccountLeases.clear();
+  probeCancellationRequested = false;
 }
 
 export type SingleModelProbeResult = {

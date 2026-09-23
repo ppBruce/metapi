@@ -148,6 +148,8 @@ export default function ProbeLogs() {
   const [total, setTotal] = useState(0);
   const [selectedLog, setSelectedLog] = useState<ProbeLog | null>(null);
   const [showFilters, setShowFilters] = useState(false);
+  const [probeEnabled, setProbeEnabled] = useState(false);
+  const [probeToggleLoading, setProbeToggleLoading] = useState(false);
 
   // 过滤条件
   const [siteId, setSiteId] = useState(searchParams.get('siteId') || '');
@@ -239,6 +241,26 @@ export default function ProbeLogs() {
       // 静默失败，不影响页面使用
     });
   }, []);
+
+  useEffect(() => {
+    api.getRuntimeSettings().then((settings) => {
+      setProbeEnabled(!!settings.modelAvailabilityProbeEnabled);
+    }).catch(() => undefined);
+  }, []);
+
+  const toggleProbe = async () => {
+    setProbeToggleLoading(true);
+    const nextEnabled = !probeEnabled;
+    try {
+      const settings = await api.updateRuntimeSettings({ modelAvailabilityProbeEnabled: nextEnabled });
+      setProbeEnabled(!!settings.modelAvailabilityProbeEnabled);
+      toast.success(nextEnabled ? '测活已开启' : '测活已停止');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '更新测活状态失败');
+    } finally {
+      setProbeToggleLoading(false);
+    }
+  };
 
   const updateSearchParams = (key: string, value: string) => {
     const newParams = new URLSearchParams(searchParams);
@@ -431,6 +453,15 @@ export default function ProbeLogs() {
             }}
           >
             刷新
+          </button>
+          <button
+            type="button"
+            className={probeEnabled ? 'btn btn-danger' : 'btn btn-primary'}
+            onClick={toggleProbe}
+            disabled={probeToggleLoading}
+            title={probeEnabled ? '停止后台模型可用性测活' : '开启后台模型可用性测活'}
+          >
+            {probeToggleLoading ? '处理中...' : probeEnabled ? '停止测活' : '开启测活'}
           </button>
         </div>
       </div>
