@@ -268,6 +268,16 @@ describe('siteFailureClassification', () => {
     expect(timeout.cascadeEndpoint).toBe(false);
     expect(timeout.retryChannel).toBe(true);
 
+    // The mid-stream idle watchdog reuses the timeout vocabulary so a stalled
+    // stream is recorded as a timeout (with channel cooldown) rather than an
+    // unclassified transport error.
+    const streamIdle = classifyProxyFailure({
+      status: 0,
+      errorText: 'stream idle timeout (90s)',
+    });
+    expect(streamIdle.class).toBe('timeout');
+    expect(streamIdle.retryChannel).toBe(true);
+
     expect(isLowValueFailoverFailureClass('waf_blocked')).toBe(false);
     expect(isLowValueFailoverFailureClass('timeout')).toBe(true);
     expect(isLowValueFailoverFailureClass('transient_upstream')).toBe(true);

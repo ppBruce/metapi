@@ -1,4 +1,4 @@
-import { pbkdf2Sync, randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import {
   CODEX_CLIENT_VERSION,
   CODEX_CLI_USER_AGENT,
@@ -57,8 +57,23 @@ function normalizeLowerCaseHeaderMap(
   return normalized;
 }
 
+const HEADER_SEED_KEY = 'metapi-runtime-header-seed';
+
+/**
+ * Derive a stable, opaque UUID (RFC-4122 v5-shaped) from a seed.
+ *
+ * The seed can embed a secret — `deriveCodexSessionCacheKey` builds it from the
+ * downstream proxy token — so the derivation stays one-way and keyed
+ * (HMAC-SHA256 under a fixed server key). This replaces a PBKDF2-SHA256
+ * derivation (10k rounds, ~1.4ms of *blocking* CPU on every codex request):
+ * an identifier does not need a password-hardening KDF, so the cost bought
+ * nothing but a stalled event loop.
+ *
+ * The output is deterministic — a given seed always yields the same id — so it
+ * survives restarts. Changing this derivation changes every derived id.
+ */
 export function uuidFromSeed(seed: string): string {
-  const derived = pbkdf2Sync(seed, 'metapi-runtime-header-seed', 10_000, 16, 'sha256');
+  const derived = createHmac('sha256', HEADER_SEED_KEY).update(seed).digest().subarray(0, 16);
   const bytes = new Uint8Array(derived);
   bytes[6] = (bytes[6]! & 0x0f) | 0x50;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;

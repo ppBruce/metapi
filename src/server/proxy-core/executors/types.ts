@@ -1,13 +1,14 @@
 import {
-  brotliDecompressSync,
+  brotliDecompress,
   createBrotliDecompress,
   createGunzip,
   createInflate,
   createZstdDecompress,
-  gunzipSync,
-  inflateSync,
-  zstdDecompressSync,
+  gunzip,
+  inflate,
+  zstdDecompress,
 } from 'node:zlib';
+import { promisify } from 'node:util';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import {
@@ -17,6 +18,11 @@ import {
   type RequestInit as UndiciRequestInit,
   type Response as UndiciResponse,
 } from 'undici';
+
+const gunzipAsync = promisify(gunzip);
+const inflateAsync = promisify(inflate);
+const brotliDecompressAsync = promisify(brotliDecompress);
+const zstdDecompressAsync = promisify(zstdDecompress);
 
 export type ProxyRuntimeRequest = {
   endpoint: 'chat' | 'messages' | 'responses';
@@ -227,29 +233,17 @@ function looksLikeZstdFrame(buffer: Buffer): boolean {
     && buffer[3] === 0xfd;
 }
 
-function decodeRuntimeResponseBuffer(buffer: Buffer, contentEncoding: string | null): Buffer {
+async function decodeRuntimeResponseBuffer(buffer: Buffer, contentEncoding: string | null): Promise<Buffer> {
   if (!contentEncoding) return buffer;
 
   let decoded = buffer;
   const encodings = getContentEncodings(contentEncoding).reverse();
 
   for (const encoding of encodings) {
-    if (encoding === 'zstd') {
-      decoded = zstdDecompressSync(decoded);
-      continue;
-    }
-    if (encoding === 'br') {
-      decoded = brotliDecompressSync(decoded);
-      continue;
-    }
-    if (encoding === 'gzip' || encoding === 'x-gzip') {
-      decoded = gunzipSync(decoded);
-      continue;
-    }
-    if (encoding === 'deflate') {
-      decoded = inflateSync(decoded);
-      continue;
-    }
+    if (encoding === 'zstd') { decoded = await zstdDecompressAsync(decoded); continue; }
+    if (encoding === 'br') { decoded = await brotliDecompressAsync(decoded); continue; }
+    if (encoding === 'gzip' || encoding === 'x-gzip') { decoded = await gunzipAsync(decoded); continue; }
+    if (encoding === 'deflate') { decoded = await inflateAsync(decoded); continue; }
   }
 
   return decoded;
@@ -315,7 +309,7 @@ export async function readRuntimeResponseText(
   const rawBuffer = Buffer.from(await response.arrayBuffer());
   try {
     return truncateRuntimeResponseText(
-      decodeRuntimeResponseBuffer(rawBuffer, contentEncoding).toString('utf8'),
+      (await decodeRuntimeResponseBuffer(rawBuffer, contentEncoding)).toString('utf8'),
     );
   } catch {
     return looksLikeZstdFrame(rawBuffer) ? '' : truncateRuntimeResponseText(rawBuffer.toString('utf8'));

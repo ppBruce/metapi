@@ -66,7 +66,7 @@ import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import SiteCreatedModal from '../components/SiteCreatedModal.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { buildSiteFocusSearch, clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
-import {SITE_PLATFORM_OPTIONS, SiteBalanceDisplay, buildSiteConnectionSearchParams, getConfiguredSiteApiEndpoints, platformBadgeClass, resolveSiteCreatedSessionLabel} from './sites/sitePresentation.js';
+import {SITE_PLATFORM_OPTIONS, SiteBalanceDisplay, SiteConnectionStats, SiteOutboundFlags, buildSiteConnectionSearchParams, findOauthProviderForPlatform, getConfiguredSiteApiEndpoints, platformBadgeClass, resolveSiteCreatedSessionLabel} from './sites/sitePresentation.js';
 import { tr } from '../i18n.js';
 import { buildCustomDragReorderUpdates, buildCrossPageDropUpdates, buildUnpinMoveToFrontUpdates, canCrossPageDrop, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
@@ -567,7 +567,7 @@ export default function Sites() {
       ];
   }, [normalizedFormPlatform]);
   const selectedOauthProvider = useMemo(
-    () => oauthProviders.find((provider) => provider.platform === normalizedFormPlatform) || null,
+    () => findOauthProviderForPlatform(normalizedFormPlatform, oauthProviders),
     [normalizedFormPlatform, oauthProviders],
   );
   const platformSelectValue = form.platform;
@@ -1056,7 +1056,7 @@ export default function Sites() {
     });
 
     if (input.choice === 'session') {
-      if (platform === 'codex' || platform === 'claude' || platform === 'gemini-cli' || platform === 'antigravity') {
+      if (platform === 'codex' || platform === 'gemini-cli' || platform === 'antigravity') {
         params.set('provider', platform);
         navigate(`/oauth?${params.toString()}`);
         return;
@@ -1588,7 +1588,7 @@ export default function Sites() {
                 data-testid="site-platform-select"
                 value={platformSelectValue}
                 onChange={(value) => {
-                  const oauthProvider = oauthProviders.find((provider) => provider.platform === value);
+                  const oauthProvider = findOauthProviderForPlatform(value, oauthProviders);
                   if (oauthProvider) {
                     setSelectedInitializationPresetId(null);
                     setForm((prev) => ({
@@ -1622,9 +1622,9 @@ export default function Sites() {
                   setForm((prev) => ({
                     ...prev,
                     platform: value,
-                    ...(oauthProviders.some((provider) => provider.platform === value)
+                    ...(findOauthProviderForPlatform(value, oauthProviders)
                       ? {
-                        url: oauthProviders.find((provider) => provider.platform === value)?.siteUrl || prev.url,
+                        url: findOauthProviderForPlatform(value, oauthProviders)?.siteUrl || prev.url,
                         apiEndpoints: [],
                         customHeaders: [],
                         customHeadersOverrideRequestHeaders: false,
@@ -2297,7 +2297,14 @@ export default function Sites() {
                   <MobileCard
                     title={(
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <span>{site.name || '-'}</span>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          <span>{site.name || '-'}</span>
+                          <SiteOutboundFlags
+                            proxyUrl={site.proxyUrl}
+                            customHeaders={site.customHeaders}
+                            customHeadersOverrideRequestHeaders={site.customHeadersOverrideRequestHeaders}
+                          />
+                        </span>
                         {site.url ? (
                           <a
                             href={site.url}
@@ -2414,16 +2421,14 @@ export default function Sites() {
                     <MobileField label="权重" value={(site.globalWeight || 1).toFixed(2)} />
                     <MobileField
                       label="连接"
-                      value={(() => {
-                        const stats = site.connectionStats;
-                        if (!stats) return '-';
-                        const parts = [];
-                        if (stats.sessions > 0) parts.push(`👤${stats.sessions}`);
-                        if (stats.apiKeys > 0) parts.push(`🔑${stats.apiKeys}`);
-                        if (stats.tokens > 0) parts.push(`🎫${stats.tokens}`);
-                        if (stats.oauth > 0) parts.push(`🔓${stats.oauth}`);
-                        return parts.length > 0 ? parts.join(' ') : '-';
-                      })()}
+                      value={(
+                        <span
+                          className="sites-connection-summary"
+                          style={{ fontSize: 11, color: 'var(--color-text-secondary)' }}
+                        >
+                          <SiteConnectionStats stats={site.connectionStats} />
+                        </span>
+                      )}
                     />
                     {isExpanded ? (
                       <div className="mobile-card-extra">
@@ -2553,6 +2558,11 @@ export default function Sites() {
                           >
                             {site.name}
                           </a>
+                          <SiteOutboundFlags
+                            proxyUrl={site.proxyUrl}
+                            customHeaders={site.customHeaders}
+                            customHeadersOverrideRequestHeaders={site.customHeadersOverrideRequestHeaders}
+                          />
                         </div>
                         {(() => {
                           const endpoints = getConfiguredSiteApiEndpoints(site);
@@ -2642,21 +2652,7 @@ export default function Sites() {
                         className="sites-connection-summary"
                         style={{ fontSize: 11, color: 'var(--color-text-secondary)' }}
                       >
-                        {site.connectionStats && site.connectionStats.sessions > 0 && (
-                          <span title="Session 账号">👤{site.connectionStats.sessions}</span>
-                        )}
-                        {site.connectionStats && site.connectionStats.apiKeys > 0 && (
-                          <span title="API Key">🔑{site.connectionStats.apiKeys}</span>
-                        )}
-                        {site.connectionStats && site.connectionStats.tokens > 0 && (
-                          <span title="令牌">🎫{site.connectionStats.tokens}</span>
-                        )}
-                        {site.connectionStats && site.connectionStats.oauth > 0 && (
-                          <span title="OAuth">🔓{site.connectionStats.oauth}</span>
-                        )}
-                        {(!site.connectionStats || (site.connectionStats.sessions === 0 && site.connectionStats.apiKeys === 0 && site.connectionStats.tokens === 0 && site.connectionStats.oauth === 0)) && (
-                          <span style={{ color: 'var(--color-text-muted)' }}>-</span>
-                        )}
+                        <SiteConnectionStats stats={site.connectionStats} />
                       </div>
                     </td>
                     <td className="sites-actions-cell">

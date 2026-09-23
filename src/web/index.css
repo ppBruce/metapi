@@ -2306,7 +2306,24 @@ html[data-layout="desktop"] .main-content {
   max-width: 100%;
 }
 
-.sites-name-tag {
+/*
+ * Outbound markers (proxy / custom headers) in the name cell. Fixed-size slots
+ * so a row does not change height or shift its name when a marker appears.
+ */
+.sites-name-flags {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+}
+
+.sites-name-flag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
 }
 
@@ -2355,6 +2372,18 @@ html[data-layout="desktop"] .main-content {
   gap: 6px;
   white-space: nowrap;
   min-height: 24px;
+}
+
+/* One icon+count marker; the icon is a fixed 12px box so digits stay aligned. */
+.sites-conn-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sites-conn-item svg {
+  flex: 0 0 auto;
+  opacity: 0.75;
 }
 
 .sites-table th.sites-actions-col {
@@ -3429,8 +3458,6 @@ textarea {
 }
 
 .oauth-toolbar-meta,
-.oauth-summary-note,
-.oauth-page-message-text,
 .oauth-mobile-section-label,
 .oauth-workbench-meta,
 .oauth-field-label,
@@ -3475,49 +3502,6 @@ textarea {
   gap: 8px;
   font-size: 13px;
   color: var(--color-text-primary);
-}
-
-.oauth-page-message {
-  padding: 14px;
-  margin-bottom: 16px;
-}
-
-.oauth-page-message-info {
-  border: 1px solid color-mix(in srgb, var(--color-primary) 18%, var(--color-border-light));
-  background: color-mix(in srgb, var(--color-primary) 6%, var(--color-bg-card));
-}
-
-.oauth-page-message-success {
-  border: 1px solid color-mix(in srgb, var(--color-success) 22%, var(--color-border-light));
-  background: color-mix(in srgb, var(--color-success) 8%, var(--color-bg-card));
-}
-
-.oauth-page-message-error {
-  border: 1px solid color-mix(in srgb, var(--color-danger) 22%, var(--color-border-light));
-  background: color-mix(in srgb, var(--color-danger) 7%, var(--color-bg-card));
-}
-
-.oauth-page-message-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.oauth-page-message-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
-.oauth-page-message-detail {
-  width: 100%;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--color-text-secondary);
 }
 
 .oauth-workbench-card {
@@ -3867,6 +3851,60 @@ textarea {
 
 .oauth-form-field {
   display: grid;
+  gap: 6px;
+}
+
+/* Weight input: hide the native number spinners (chromium renders oversized
+   arrows that clash with the compact row); entry via keyboard or the save
+   link. Enter submits (see SiteWeightEditor). */
+/* Weight display button (idle state): borderless text like the other cell
+   values — no persistent input chrome in the stack. Click to edit. */
+.oauth-weight-display {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  text-decoration: underline dotted transparent;
+  text-underline-offset: 3px;
+  transition: color 0.15s ease, text-decoration-color 0.15s ease;
+}
+
+.oauth-weight-display:hover {
+  color: var(--color-primary);
+  text-decoration-color: currentColor;
+}
+
+.oauth-input.oauth-weight-input {
+  width: 44px;
+  padding: 2px 5px;
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: right;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.oauth-input.oauth-weight-input::-webkit-outer-spin-button,
+.oauth-input.oauth-weight-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.oauth-input.oauth-weight-input:focus {
+  border-color: color-mix(in srgb, var(--color-primary) 45%, var(--color-border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 14%, transparent);
+  outline: none;
+}
+
+.oauth-weight-save {
+  flex-shrink: 0;
+}
+
+.oauth-site-weight-editor {
   gap: 6px;
 }
 

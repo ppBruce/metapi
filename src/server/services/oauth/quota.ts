@@ -11,8 +11,17 @@ import {
   type OauthInfo,
 } from './oauthAccount.js';
 import { resolveOauthAccountProxyUrl } from './requestProxy.js';
-import type { OauthQuotaSnapshot, OauthQuotaWindowSnapshot } from './quotaTypes.js';
+import type { OauthQuotaEntrySnapshot, OauthQuotaSnapshot, OauthQuotaWindowSnapshot } from './quotaTypes.js';
 import { CODEX_CLIENT_VERSION, CODEX_CLI_USER_AGENT } from '../../shared/codexClientFamily.js';
+import {
+  PROVIDER_QUOTA_PROBES,
+  probeClaudeQuota,
+  probeGeminiCliQuota,
+  probeAntigravityQuota,
+  probeGithubCopilotQuota,
+  probeQoderQuota,
+  probeKimiQuota,
+} from './providerQuotaProbes.js';
 
 type CodexJwtClaims = {
   'https://api.openai.com/auth'?: {
@@ -308,6 +317,36 @@ function normalizeStoredWindow(value: unknown): OauthQuotaWindowSnapshot | undef
   return normalized;
 }
 
+function normalizeStoredQuotaEntry(value: unknown): OauthQuotaEntrySnapshot | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const key = asTrimmedString(raw.key);
+  const label = asTrimmedString(raw.label);
+  const kind = raw.kind === 'window' || raw.kind === 'bucket' || raw.kind === 'credits'
+    ? raw.kind
+    : undefined;
+  if (!key || !label || !kind) return undefined;
+  const pickNumber = (field: string) => {
+    const item = raw[field];
+    return typeof item === 'number' && Number.isFinite(item) ? item : undefined;
+  };
+  const normalized: OauthQuotaEntrySnapshot = { key, label, kind };
+  const used = pickNumber('used');
+  const limit = pickNumber('limit');
+  const remaining = pickNumber('remaining');
+  const remainingPercent = pickNumber('remainingPercent');
+  const resetAt = asIsoDateTime(raw.resetAt);
+  const unit = asTrimmedString(raw.unit);
+  if (used !== undefined) normalized.used = used;
+  if (limit !== undefined) normalized.limit = limit;
+  if (remaining !== undefined) normalized.remaining = remaining;
+  if (remainingPercent !== undefined) normalized.remainingPercent = remainingPercent;
+  if (resetAt) normalized.resetAt = resetAt;
+  if (unit) normalized.unit = unit;
+  if (raw.unlimited === true) normalized.unlimited = true;
+  return normalized;
+}
+
 function normalizeStoredQuotaSnapshot(value: unknown): OauthQuotaSnapshot | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
@@ -335,6 +374,11 @@ function normalizeStoredQuotaSnapshot(value: unknown): OauthQuotaSnapshot | unde
     }
     : undefined;
 
+  const entriesRaw = raw.entries;
+  const entries = Array.isArray(entriesRaw)
+    ? entriesRaw.map(normalizeStoredQuotaEntry).filter((entry): entry is OauthQuotaEntrySnapshot => !!entry)
+    : undefined;
+
   return {
     status,
     source,
@@ -345,6 +389,7 @@ function normalizeStoredQuotaSnapshot(value: unknown): OauthQuotaSnapshot | unde
       ? { subscription }
       : {}),
     windows: { fiveHour, sevenDay },
+    ...(entries && entries.length ? { entries } : {}),
     ...(asIsoDateTime(raw.lastLimitResetAt) ? { lastLimitResetAt: asIsoDateTime(raw.lastLimitResetAt)! } : {}),
   };
 }
@@ -433,9 +478,35 @@ function buildStoredCodexSnapshot(oauth: Pick<OauthInfo, 'planType' | 'idToken' 
   };
 }
 
+/**
+ * Providers whose stored quota was produced by an official probe: the list
+ * endpoint must echo what was persisted instead of resetting to unsupported.
+ */
+function buildStoredProviderSnapshot(
+  oauth: Pick<OauthInfo, 'provider' | 'planType' | 'quota'>,
+): OauthQuotaSnapshot {
+  const storedQuota = normalizeStoredQuotaSnapshot(oauth.quota);
+  if (!storedQuota) return buildProviderUnsupportedSnapshot(oauth.provider);
+  const planType = storedQuota.subscription?.planType || oauth.planType || undefined;
+  const subscription = {
+    planType,
+    activeStart: storedQuota.subscription?.activeStart,
+    activeUntil: storedQuota.subscription?.activeUntil,
+  };
+  return {
+    ...storedQuota,
+    ...(subscription.planType || subscription.activeStart || subscription.activeUntil
+      ? { subscription }
+      : {}),
+  };
+}
+
 export function buildQuotaSnapshotFromOauthInfo(oauth: Pick<OauthInfo, 'provider' | 'planType' | 'idToken' | 'quota'>): OauthQuotaSnapshot {
   if (oauth.provider === 'codex') {
     return buildStoredCodexSnapshot(oauth);
+  }
+  if (PROVIDER_QUOTA_PROBES.has(oauth.provider)) {
+    return buildStoredProviderSnapshot(oauth);
   }
   return buildProviderUnsupportedSnapshot(oauth.provider);
 }
@@ -850,6 +921,47 @@ export async function refreshOauthQuotaSnapshot(accountId: number): Promise<Oaut
       }));
     }
   }
+  const provider = oauth.provider;
+  if (PROVIDER_QUOTA_PROBES.has(provider)) {
+    const syncedAt = new Date().toISOString();
+    try {
+      const site = await db.select().from(schema.sites).where(eq(schema.sites.id, account.siteId)).get();
+      const proxyUrl = site
+        ? await resolveOauthAccountProxyUrl({
+          siteId: account.siteId,
+          extraConfig: account.extraConfig,
+        })
+        : null;
+      const accessToken = (account.accessToken || '').trim();
+      const probeInput = { accessToken, proxyUrl, syncedAt };
+      let probed: OauthQuotaSnapshot | null = null;
+      if (provider === 'claude') {
+        probed = await probeClaudeQuota(probeInput);
+      } else if (provider === 'gemini-cli') {
+        probed = await probeGeminiCliQuota({ ...probeInput, projectId: oauth.projectId });
+      } else if (provider === 'antigravity') {
+        probed = await probeAntigravityQuota(probeInput);
+      } else if (provider === 'github') {
+        probed = await probeGithubCopilotQuota(probeInput);
+      } else if (provider === 'qoder') {
+        probed = await probeQoderQuota(probeInput);
+      } else if (provider === 'kimi') {
+        probed = await probeKimiQuota(probeInput);
+      }
+      if (probed) return persistQuotaSnapshot(accountId, probed);
+    } catch (error) {
+      const message = error instanceof Error
+        ? (error.message || error.name)
+        : String(error || `${provider} quota probe failed`);
+      return persistQuotaSnapshot(accountId, {
+        ...buildProviderUnsupportedSnapshot(provider),
+        status: 'error',
+        lastSyncAt: syncedAt,
+        lastError: message,
+      });
+    }
+  }
+
   const baseSnapshot = buildQuotaSnapshotFromOauthInfo(oauth);
   const snapshot: OauthQuotaSnapshot = {
     ...baseSnapshot,

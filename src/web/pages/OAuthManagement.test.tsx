@@ -15,7 +15,9 @@ const { apiMock, openMock, focusMock, confirmMock, promptMock } = vi.hoisted(() 
     refreshOAuthConnectionQuotaBatch: vi.fn(),
     rebindOAuthConnection: vi.fn(),
     updateOAuthConnectionProxy: vi.fn(),
+    updateSite: vi.fn(),
     deleteOAuthConnection: vi.fn(),
+    deleteOAuthConnections: vi.fn(),
     importOAuthConnections: vi.fn(),
     createOAuthRouteUnit: vi.fn(),
     deleteOAuthRouteUnit: vi.fn(),
@@ -565,11 +567,7 @@ describe('OAuthManagement page', () => {
       });
       expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
       expect(collectText(root.root)).toContain('已创建路由池');
-      expect(collectText(root.root)).toContain('Codex Pool');
-      expect(collectText(root.root)).toContain('2 个成员');
-      expect(collectText(root.root)).toContain('轮询');
-      expect(collectText(root.root)).toContain('已将选中的 OAuth 账号合并为一个路由池，后续会以单个路由单元参与路由。');
-      expect(collectText(root.root)).toContain('路由池：Codex Pool · 2 个成员 · 轮询');
+      expect(collectText(root.root)).toContain('已创建路由池 · Codex Pool（2 个成员 · 轮询）');
     } finally {
       root?.unmount();
     }
@@ -828,9 +826,7 @@ describe('OAuthManagement page', () => {
       });
       expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
       expect(collectText(root.root)).toContain('已创建路由池，但连接列表刷新失败');
-      expect(collectText(root.root)).toContain('Fallback Pool');
-      expect(collectText(root.root)).toContain('2 个成员');
-      expect(collectText(root.root)).toContain('轮询');
+      expect(collectText(root.root)).toContain('已创建路由池，但连接列表刷新失败 · Fallback Pool（2 个成员 · 轮询）');
       expect(collectText(root.root)).not.toContain('已选 2 项');
     } finally {
       root?.unmount();
@@ -938,9 +934,7 @@ describe('OAuthManagement page', () => {
       expect(apiMock.deleteOAuthRouteUnit).toHaveBeenCalledWith(96);
       expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
       expect(collectText(root.root)).toContain('已拆回单体，但连接列表刷新失败');
-      expect(collectText(root.root)).toContain('Sticky Pool');
-      expect(collectText(root.root)).toContain('2 个成员');
-      expect(collectText(root.root)).toContain('单个用到不可用再切');
+      expect(collectText(root.root)).toContain('已拆回单体，但连接列表刷新失败 · Sticky Pool（2 个成员 · 单个用到不可用再切）');
     } finally {
       root?.unmount();
     }
@@ -1165,6 +1159,62 @@ describe('OAuthManagement page', () => {
         expect(text).not.toContain('81 / 100');
         expect(findHeaders(root, '模型 / 路由')).toHaveLength(0);
         expect(findHeaders(root, '同步')).toHaveLength(0);
+      });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('renders provider quota entries when upstream exposes no 5h/7d windows', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({ providers: [] });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 92,
+          provider: 'claude',
+          email: 'claude-user@example.com',
+          planType: 'max',
+          modelCount: 3,
+          modelsPreview: ['claude-opus-4-6'],
+          status: 'healthy',
+          quota: {
+            status: 'supported',
+            source: 'official',
+            lastSyncAt: '2026-09-22T06:00:00.000Z',
+            windows: {
+              fiveHour: { supported: false, message: 'official 5h quota window is unavailable for this provider' },
+              sevenDay: { supported: false, message: 'official 7d quota window is unavailable for this provider' },
+            },
+            entries: [
+              { key: 'seven_day_sonnet', label: '7d sonnet', kind: 'window', used: 91, limit: 100, remaining: 9 },
+              { key: 'user', label: '用户额度', kind: 'credits', used: 250, limit: 1000, remaining: 750, unit: 'credits' },
+            ],
+          },
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        const text = collectText(root.root);
+        // Extra rows must be visible with their real numbers, not hidden.
+        expect(text).toContain('7d sonnet');
+        expect(text).toContain('用户额度');
+        expect(text).toContain('750 / 1000 credits');
       });
     } finally {
       root?.unmount();
@@ -1804,7 +1854,7 @@ describe('OAuthManagement page', () => {
         const text = collectText(root!.root);
         expect(text).toContain('官方上游连接');
         expect(text).toContain('CLI');
-        expect(text).toContain('API Key');
+        expect(text).not.toContain('连接管理页默认只保留');
       });
 
       await clickButton(root!, '新建 OAuth 连接');
@@ -2665,6 +2715,167 @@ describe('OAuthManagement page', () => {
       expect(collectText(root!.root)).toContain('额度信息已刷新');
       expect(collectText(root!.root)).not.toContain('当前 Codex OAuth 未暴露官方 5h 窗口');
       expect(collectText(root!.root)).not.toContain('当前 Codex OAuth 未暴露官方 7d 窗口');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('edits the site global weight from the connection row', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 7,
+          siteId: 2,
+          provider: 'codex',
+          email: 'codex-user@example.com',
+          accountKey: 'chatgpt-account-123',
+          planType: 'plus',
+          modelCount: 3,
+          modelsPreview: ['gpt-5'],
+          status: 'healthy',
+          site: {
+            id: 2,
+            name: 'ChatGPT Codex OAuth',
+            url: 'https://chatgpt.com/backend-api/codex',
+            platform: 'codex',
+            globalWeight: 3,
+          },
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+    apiMock.updateSite.mockResolvedValue({ success: true });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        expect(collectText(root!.root)).toContain('权重');
+      });
+
+      // Idle state shows the weight as a click-to-edit label; enter edit mode.
+      const weightDisplay = root!.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.className === 'string'
+        && node.props.className.split(' ').includes('oauth-weight-display')
+      ));
+      expect(collectText(weightDisplay)).toContain('3');
+      await act(async () => {
+        weightDisplay.props.onClick();
+      });
+
+      const weightInput = findOauthSettingInput(root!, 'site-weight');
+      expect(weightInput.props.value).toBe('3');
+
+      await act(async () => {
+        weightInput.props.onChange({ target: { value: '2.5' } });
+      });
+      await act(async () => {
+        await findButton(root!, '保存').props.onClick();
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+      });
+
+      expect(apiMock.updateSite).toHaveBeenCalledWith(2, { globalWeight: 2.5 });
+      expect(collectText(root!.root)).toContain('站点权重已更新为 2.5');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('rejects a site global weight that is not a positive number', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({ providers: [] });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 7,
+          siteId: 2,
+          provider: 'codex',
+          email: 'codex-user@example.com',
+          accountKey: 'chatgpt-account-123',
+          planType: 'plus',
+          modelCount: 3,
+          modelsPreview: ['gpt-5'],
+          status: 'healthy',
+          site: {
+            id: 2,
+            name: 'ChatGPT Codex OAuth',
+            url: 'https://chatgpt.com/backend-api/codex',
+            platform: 'codex',
+            globalWeight: 3,
+          },
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        expect(collectText(root!.root)).toContain('权重');
+      });
+
+      const weightDisplay = root!.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.className === 'string'
+        && node.props.className.split(' ').includes('oauth-weight-display')
+      ));
+      await act(async () => {
+        weightDisplay.props.onClick();
+      });
+
+      const weightInput = findOauthSettingInput(root!, 'site-weight');
+      await act(async () => {
+        weightInput.props.onChange({ target: { value: '0' } });
+      });
+      await act(async () => {
+        await findButton(root!, '保存').props.onClick();
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+      });
+
+      expect(apiMock.updateSite).not.toHaveBeenCalled();
+      expect(collectText(root!.root)).toContain('权重必须是大于 0 的数字');
     } finally {
       root?.unmount();
     }

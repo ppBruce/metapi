@@ -913,7 +913,7 @@ describe('refreshModelsForAccount credential discovery', () => {
     ]);
     expect(getModelsMock).not.toHaveBeenCalled();
     expect(undiciFetchMock).toHaveBeenCalledTimes(1);
-    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=1.0.0');
+    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=0.153.4');
     expect(undiciFetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: 'GET',
       headers: expect.objectContaining({
@@ -996,7 +996,7 @@ describe('refreshModelsForAccount credential discovery', () => {
       modelCount: 1,
       modelsPreview: ['gpt-5.3-codex'],
     });
-    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=1.0.0');
+    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=0.153.4');
   });
 
   it('rotates codex cloud discovery across configured ai endpoints after a retryable failure', async () => {
@@ -1068,8 +1068,8 @@ describe('refreshModelsForAccount credential discovery', () => {
       modelCount: 1,
       modelsPreview: ['gpt-5.3-codex'],
     });
-    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex-a/models?client_version=1.0.0');
-    expect(String(undiciFetchMock.mock.calls[1]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex-b/models?client_version=1.0.0');
+    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex-a/models?client_version=0.153.4');
+    expect(String(undiciFetchMock.mock.calls[1]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex-b/models?client_version=0.153.4');
 
     const endpoints = await db.select().from(schema.siteApiEndpoints)
       .where(eq(schema.siteApiEndpoints.siteId, site.id))
@@ -1359,14 +1359,14 @@ describe('refreshModelsForAccount credential discovery', () => {
     });
     expect(refreshOauthAccessTokenSingleflightMock).toHaveBeenCalledWith(account.id);
     expect(undiciFetchMock).toHaveBeenCalledTimes(2);
-    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=1.0.0');
+    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=0.153.4');
     expect(undiciFetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: 'GET',
       headers: expect.objectContaining({
         Authorization: 'Bearer codex-access-token-expired',
       }),
     });
-    expect(String(undiciFetchMock.mock.calls[1]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=1.0.0');
+    expect(String(undiciFetchMock.mock.calls[1]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=0.153.4');
     expect(undiciFetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: 'GET',
       headers: expect.objectContaining({

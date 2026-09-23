@@ -1019,6 +1019,7 @@ export async function listOauthConnections(options: {
         name: row.sites.name,
         url: row.sites.url,
         platform: row.sites.platform,
+        globalWeight: row.sites.globalWeight,
       },
     }];
   });
@@ -1040,6 +1041,43 @@ export async function deleteOauthConnection(accountId: number) {
   await db.delete(schema.accounts).where(eq(schema.accounts.id, accountId)).run();
   await routeRefreshWorkflow.rebuildRoutesOnly();
   return { success: true };
+}
+
+/**
+ * Deletes many OAuth connections in a single call: one existence query, one
+ * bulk delete, one route rebuild. A bulk delete is one user action, so it must
+ * be one request — calling the single-connection endpoint N times trips the
+ * mutate rate limit and rebuilds routes N times.
+ */
+export async function deleteOauthConnections(accountIds: number[]) {
+  const uniqueIds = Array.from(new Set(accountIds.filter((id) => Number.isFinite(id) && id > 0)));
+  const successIds: number[] = [];
+  const failedItems: Array<{ id: number; message: string }> = [];
+  if (uniqueIds.length === 0) {
+    return { success: true, successIds, failedItems };
+  }
+
+  const rows = await db.select().from(schema.accounts)
+    .where(inArray(schema.accounts.id, uniqueIds))
+    .all();
+  const deletableIds = rows
+    .filter((row) => getOauthInfoFromAccount(row))
+    .map((row) => Number(row.id));
+  const deletableSet = new Set(deletableIds);
+
+  for (const id of uniqueIds) {
+    if (!deletableSet.has(id)) {
+      failedItems.push({ id, message: 'oauth account not found' });
+    }
+  }
+
+  if (deletableIds.length > 0) {
+    await db.delete(schema.accounts).where(inArray(schema.accounts.id, deletableIds)).run();
+    successIds.push(...deletableIds);
+    await routeRefreshWorkflow.rebuildRoutesOnly();
+  }
+
+  return { success: failedItems.length === 0, successIds, failedItems };
 }
 
 export async function refreshOauthConnectionQuota(accountId: number) {

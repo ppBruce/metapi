@@ -1,6 +1,6 @@
 {
   "name": "metapi",
-  "version": "1.7.10",
+  "version": "1.8.0",
   "description": "Meta-layer management and unified proxy for AI API aggregation platforms",
   "main": "dist/desktop/main.js",
   "keywords": [
@@ -22,7 +22,7 @@
   },
   "license": "MIT",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=24 <27"
   },
   "type": "module",
   "scripts": {

@@ -117,4 +117,50 @@ describe('oauth quota snapshot helpers', () => {
     expect(buildCodexWhamUsageUrl('http://127.0.0.1:5000/backend-api/codex'))
       .toBe('http://127.0.0.1:5000/backend-api/wham/usage');
   });
+
+  it('echoes a stored provider snapshot instead of dropping probed quota', () => {
+    const snapshot = buildQuotaSnapshotFromOauthInfo({
+      provider: 'claude',
+      planType: 'max',
+      quota: {
+        status: 'supported',
+        source: 'official',
+        lastSyncAt: '2026-09-22T06:00:00.000Z',
+        providerMessage: 'claude usage windows fetched from official oauth/usage endpoint',
+        subscription: { planType: 'Claude Code' },
+        windows: {
+          fiveHour: { supported: true, used: 87.5, limit: 100, remaining: 12.5 },
+          sevenDay: { supported: true, used: 42, limit: 100, remaining: 58 },
+        },
+        entries: [
+          {
+            key: 'seven_day_sonnet',
+            label: '7d sonnet',
+            kind: 'window',
+            used: 91,
+            limit: 100,
+            remaining: 9,
+          },
+        ],
+      },
+    });
+
+    expect(snapshot.status).toBe('supported');
+    expect(snapshot.windows.fiveHour).toMatchObject({ supported: true, used: 87.5 });
+    // entries must survive normalization, otherwise the UI silently loses rows.
+    expect(snapshot.entries).toHaveLength(1);
+    expect(snapshot.entries?.[0]).toMatchObject({ label: '7d sonnet', kind: 'window', used: 91 });
+    expect(snapshot.subscription?.planType).toBe('Claude Code');
+  });
+
+  it('falls back to unsupported when a probed provider has no stored quota', () => {
+    const snapshot = buildQuotaSnapshotFromOauthInfo({
+      provider: 'claude',
+      planType: 'max',
+    });
+
+    expect(snapshot.status).toBe('unsupported');
+    expect(snapshot.providerMessage).toContain('claude');
+    expect(snapshot.entries).toBeUndefined();
+  });
 });

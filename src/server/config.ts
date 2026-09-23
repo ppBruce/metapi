@@ -313,6 +313,23 @@ export function resolveProbeHeartbeatTimeoutMs(): number {
   return resolveProbeTimeoutMs(process.env.PROBE_HEARTBEAT_TIMEOUT_MS, 30_000);
 }
 
+/**
+ * Inter-chunk idle budget for an in-flight upstream stream.
+ *
+ * The first-byte window only covers the wait for the first chunk; this is the
+ * budget for silence *between* chunks, so an upstream that emits one chunk and
+ * then stops ends the request instead of holding it until the client gives up.
+ * Follows `proxyFirstByteTimeoutSec` — the same knob the probe budgets follow,
+ * editable in the UI — instead of introducing a second timeout setting: one
+ * value answers "how long may an upstream stay silent". `proxyFirstByteTimeoutSec
+ * <= 0` returns 0 (no deadline) rather than inventing a budget the operator
+ * explicitly turned off.
+ */
+export function resolveProxyStreamIdleTimeoutMs(): number {
+  const firstByteMs = Math.trunc(Math.max(0, config.proxyFirstByteTimeoutSec || 0) * 1000);
+  return firstByteMs > 0 ? firstByteMs : 0;
+}
+
 export function buildFastifyOptions(
   appConfig: ReturnType<typeof buildConfig>,
 ): FastifyServerOptions {

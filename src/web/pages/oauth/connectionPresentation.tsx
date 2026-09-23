@@ -6,12 +6,15 @@
  */
 import {
   useEffect,
+  useRef,
+  useState,
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useAnimatedVisibility } from '../../components/useAnimatedVisibility.js';
 import type {
   OAuthConnectionInfo,
+  OAuthQuotaEntryInfo,
   OAuthQuotaInfo,
   OAuthQuotaWindowInfo,
   OAuthRouteParticipation,
@@ -267,6 +270,145 @@ export function QuotaWindowRow({
           <span className="oauth-window-reset">重置 {formatResetLabel(window.resetAt)}</span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+export function resolveQuotaEntryPercent(entry: OAuthQuotaEntryInfo): number | null {
+  if (typeof entry.used === 'number' && typeof entry.limit === 'number' && entry.limit > 0) {
+    return Math.max(0, Math.min(100, Math.round((entry.used / entry.limit) * 100)));
+  }
+  if (typeof entry.remaining === 'number' && typeof entry.limit === 'number' && entry.limit > 0) {
+    return Math.max(0, Math.min(100, Math.round(((entry.limit - entry.remaining) / entry.limit) * 100)));
+  }
+  if (typeof entry.remainingPercent === 'number') {
+    return Math.max(0, Math.min(100, Math.round(100 - entry.remainingPercent)));
+  }
+  return null;
+}
+
+export function resolveQuotaEntryValueText(entry: OAuthQuotaEntryInfo): string {
+  if (entry.unlimited) return '不限';
+  const unit = asTrimmedString(entry.unit);
+  const suffix = unit ? ` ${unit}` : '';
+  if (typeof entry.remaining === 'number' && typeof entry.limit === 'number') {
+    return `${entry.remaining} / ${entry.limit}${suffix}`;
+  }
+  if (typeof entry.used === 'number' && typeof entry.limit === 'number') {
+    return `${entry.used} / ${entry.limit}${suffix}`;
+  }
+  if (typeof entry.limit === 'number') return `总量 ${entry.limit}${suffix}`;
+  if (typeof entry.remaining === 'number') return `剩余 ${entry.remaining}${suffix}`;
+  return '官方未提供';
+}
+
+export function QuotaEntryRow({ entry }: { entry: OAuthQuotaEntryInfo }) {
+  const percent = resolveQuotaEntryPercent(entry);
+  const tone = percent != null && percent >= 90
+    ? 'var(--color-danger)'
+    : percent != null && percent >= 70
+      ? 'var(--color-warning)'
+      : 'var(--color-primary)';
+
+  return (
+    <div className="oauth-window-row">
+      <div className="oauth-window-row-header">
+        <span className="oauth-window-pill">{entry.label}</span>
+        <div className="oauth-window-meter">
+          <div
+            className="oauth-window-meter-fill"
+            style={{
+              width: `${percent ?? 0}%`,
+              background: percent == null ? 'var(--color-border)' : tone,
+            }}
+          />
+        </div>
+        <span className="oauth-window-value">{resolveQuotaEntryValueText(entry)}</span>
+        {entry.resetAt ? (
+          <span className="oauth-window-reset">重置 {formatResetLabel(entry.resetAt)}</span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function SiteWeightEditor({
+  value,
+  saving,
+  onChange,
+  onSave,
+}: {
+  value: string;
+  saving: boolean;
+  onChange: (next: string) => void;
+  onSave: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  if (!editing) {
+    return (
+      <div className="oauth-cell-inline oauth-site-weight-editor">
+        <span className="oauth-cell-tertiary">权重</span>
+        <button
+          type="button"
+          className="oauth-weight-display"
+          title="点击修改站点权重"
+          onClick={() => setEditing(true)}
+        >
+          {value || '1'}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="oauth-cell-inline oauth-site-weight-editor">
+      <span className="oauth-cell-tertiary">权重</span>
+      <input
+        ref={inputRef}
+        data-oauth-setting="site-weight"
+        className="oauth-input oauth-weight-input"
+        type="number"
+        min="0.01"
+        max="100"
+        step="0.001"
+        value={value}
+        autoFocus
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !saving) {
+            onSave();
+            setEditing(false);
+          } else if (event.key === 'Escape') {
+            setEditing(false);
+          }
+        }}
+        onBlur={() => {
+          if (!saving) setEditing(false);
+        }}
+        disabled={saving}
+      />
+      <button
+        type="button"
+        className="btn btn-link btn-link-info oauth-inline-trigger oauth-weight-save"
+        onMouseDown={(event) => {
+          // Keep focus on the input so its blur handler doesn't close the
+          // editor before this click lands.
+          event.preventDefault();
+        }}
+        onClick={onSave}
+        disabled={saving}
+      >
+        {saving ? '保存中' : '保存'}
+      </button>
     </div>
   );
 }

@@ -639,7 +639,21 @@ export type OAuthQuotaInfo = {
     fiveHour: OAuthQuotaWindowInfo;
     sevenDay: OAuthQuotaWindowInfo;
   };
+  entries?: OAuthQuotaEntryInfo[];
   lastLimitResetAt?: string | null;
+};
+
+export type OAuthQuotaEntryInfo = {
+  key: string;
+  label: string;
+  kind: 'window' | 'bucket' | 'credits';
+  used?: number | null;
+  limit?: number | null;
+  remaining?: number | null;
+  remainingPercent?: number | null;
+  unit?: string | null;
+  resetAt?: string | null;
+  unlimited?: boolean;
 };
 
 export type OAuthConnectionInfo = {
@@ -661,7 +675,7 @@ export type OAuthConnectionInfo = {
   proxyUrl?: string | null;
   routeUnit?: OAuthRouteUnitSummary | null;
   routeParticipation?: OAuthRouteParticipation | null;
-  site?: { id: number; name: string; url: string; platform: string } | null;
+  site?: { id: number; name: string; url: string; platform: string; globalWeight?: number | null } | null;
 };
 
 export type OAuthConnectionsResponse = {
@@ -1201,6 +1215,15 @@ export const api = {
     request(`/api/oauth/connections/${accountId}`, {
       method: 'DELETE',
     }) as Promise<{ success: true }>,
+  deleteOAuthConnections: (ids: number[]) =>
+    request('/api/oauth/connections/batch-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }) as Promise<{
+      success: boolean;
+      successIds: number[];
+      failedItems: Array<{ id: number; message: string }>;
+    }>,
   importOAuthConnections: (data: Record<string, unknown>) =>
     request('/api/oauth/import', {
       method: 'POST',

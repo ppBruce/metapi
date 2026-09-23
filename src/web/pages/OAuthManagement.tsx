@@ -9,10 +9,10 @@ import { useToast } from '../components/Toast.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import OAuthModelsModal, { type OAuthModelItem } from './oauth/OAuthModelsModal.js';
 import AutoRefreshCountdown from './oauth/AutoRefreshCountdown.js';
-import {QuotaWindowRow, SideDrawer, compactAccountKey, hasOauthProxySelection, renderCodeBlock, renderGuideCard, resolveConnectionEmailLabel, resolveConnectionPrimaryTitle, resolveConnectionRouteParticipation, resolveConnectionStatusLabel, resolveModelSyncDetail, resolveModelSyncStatusText, resolveProxyDisplayText, resolveProxyProjectSummary, resolveQuotaSourceLabel, resolveQuotaStatusLabel, resolveQuotaSyncDetail, resolveQuotaSyncStatusText, resolveRouteParticipationSummary, resolveRouteUnitStrategyLabel} from './oauth/connectionPresentation.js';
+import {QuotaEntryRow, QuotaWindowRow, SideDrawer, SiteWeightEditor, compactAccountKey, hasOauthProxySelection, renderCodeBlock, renderGuideCard, resolveConnectionEmailLabel, resolveConnectionPrimaryTitle, resolveConnectionRouteParticipation, resolveConnectionStatusLabel, resolveModelSyncDetail, resolveModelSyncStatusText, resolveProxyDisplayText, resolveProxyProjectSummary, resolveQuotaSourceLabel, resolveQuotaStatusLabel, resolveQuotaSyncDetail, resolveQuotaSyncStatusText, resolveRouteParticipationSummary, resolveRouteUnitStrategyLabel} from './oauth/connectionPresentation.js';
 import {api, type OAuthConnectionInfo, type OAuthProviderInfo, type OAuthRouteUnitStrategy, type OAuthStartInstructions} from '../api.js';
 import {copyText} from '../clipboard.js';
-import { StatusText, StatusPill } from '../components/StatusText.js';
+import { StatusText } from '../components/StatusText.js';
 const POLL_INTERVAL_MS = 1500;
 const CONNECTION_PAGE_LIMIT = 200;
 const AUTO_REFRESH_OPTIONS = [0, 5, 10, 15, 30] as const;
@@ -98,11 +98,7 @@ type SessionRouteUnitFeedback = {
   strategy: OAuthRouteUnitStrategy;
 };
 
-type SessionFeedback = {
-  message: string;
-  tone: 'info' | 'success' | 'error';
-  routeUnit?: SessionRouteUnitFeedback | null;
-};
+type SessionFeedbackTone = 'info' | 'success' | 'error';
 
 const COLUMN_OPTIONS: Array<{ key: ColumnKey; label: string }> = [
   { key: 'identity', label: '账号 / Provider' },
@@ -324,7 +320,6 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
   const [providers, setProviders] = useState<OAuthProviderInfo[]>([]);
   const [connections, setConnections] = useState<OAuthConnectionInfo[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [sessionFeedback, setSessionFeedback] = useState<SessionFeedback | null>(null);
   const [actionLoadingKey, setActionLoadingKey] = useState('');
   const [selectedConnectionIds, setSelectedConnectionIds] = useState<number[]>([]);
   const [showMobileFilters, setShowMobileFilters] = useState(false);
@@ -332,6 +327,7 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
   const [providerFilter, setProviderFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [siteFilter, setSiteFilter] = useState('');
+  const [siteWeightDrafts, setSiteWeightDrafts] = useState<Record<string, string>>({});
   const [visibleColumns, setVisibleColumns] = useState<Record<ColumnKey, boolean>>({
     identity: true,
     site: true,
@@ -377,17 +373,23 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
 
   const setSessionMessage = useCallback((
     message: string,
-    tone: SessionFeedback['tone'],
+    tone: SessionFeedbackTone,
     options?: {
       routeUnit?: SessionRouteUnitFeedback | null;
     },
   ) => {
-    setSessionFeedback({
-      message,
-      tone,
-      routeUnit: options?.routeUnit ?? null,
-    });
-  }, []);
+    const routeUnit = options?.routeUnit ?? null;
+    const text = routeUnit
+      ? `${message} · ${routeUnit.name}（${routeUnit.memberCount} 个成员 · ${resolveRouteUnitStrategyLabel(routeUnit.strategy)}）`
+      : message;
+    if (tone === 'success') {
+      toast.success(text);
+    } else if (tone === 'error') {
+      toast.error(text);
+    } else {
+      toast.info(text);
+    }
+  }, [toast]);
 
   const setSessionInfo = useCallback((
     message: string,
@@ -889,15 +891,17 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
     }
     setActionLoadingKey('delete:selected');
     try {
-      const results = await Promise.allSettled(selectedConnectionIds.map((accountId) => api.deleteOAuthConnection(accountId)));
-      const failed = results.filter((item) => item.status === 'rejected').length;
+      const result = await api.deleteOAuthConnections(selectedConnectionIds);
       await loadConnections();
       setSelectedConnectionIds([]);
-      if (failed > 0) {
-        setSessionInfo(`批量删除完成，${failed} 个连接删除失败`);
+      if (result.failedItems.length > 0) {
+        setSessionInfo(`批量删除完成，${result.failedItems.length} 个连接删除失败`);
       } else {
-        setSessionSuccess(`已删除 ${results.length} 个 OAuth 连接`);
+        setSessionSuccess(`已删除 ${result.successIds.length} 个 OAuth 连接`);
       }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      setSessionError(errorMessage || '批量删除 OAuth 连接失败');
     } finally {
       setActionLoadingKey('');
     }
@@ -908,11 +912,34 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
     setActionLoadingKey(actionKey);
     try {
       await api.refreshOAuthConnectionQuota(accountId);
-      setSessionSuccess('额度信息已刷新');
+      toast.success('额度信息已刷新');
       await loadConnections();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      setSessionError(errorMessage || '刷新额度失败');
+      toast.error(errorMessage || '刷新额度失败');
+    } finally {
+      setActionLoadingKey('');
+    }
+  };
+
+  const handleUpdateSiteWeight = async (connection: OAuthConnectionInfo) => {
+    const siteId = connection.site?.id || connection.siteId;
+    const rawValue = siteWeightDrafts[String(siteId)] ?? String(connection.site?.globalWeight ?? 1);
+    const weight = Number(rawValue);
+    if (!Number.isFinite(weight) || weight <= 0) {
+      toast.error('权重必须是大于 0 的数字');
+      return;
+    }
+    const normalizedWeight = Math.max(0.01, Math.min(100, Number(weight.toFixed(3))));
+    const actionKey = `weight:${siteId}`;
+    setActionLoadingKey(actionKey);
+    try {
+      await api.updateSite(siteId, { globalWeight: normalizedWeight });
+      toast.success(`站点权重已更新为 ${normalizedWeight}`);
+      await loadConnections();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      toast.error(errorMessage || '更新站点权重失败');
     } finally {
       setActionLoadingKey('');
     }
@@ -925,13 +952,13 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
       const result = await api.refreshOAuthConnectionQuotaBatch(selectedConnectionIds);
       await loadConnections();
       if (result.failed > 0) {
-        setSessionInfo(`批量刷新完成，成功 ${result.refreshed} 个，失败 ${result.failed} 个`);
+        toast.info(`批量刷新完成，成功 ${result.refreshed} 个，失败 ${result.failed} 个`);
       } else {
-        setSessionSuccess(`已批量刷新 ${result.refreshed} 个 OAuth 连接`);
+        toast.success(`已批量刷新 ${result.refreshed} 个 OAuth 连接`);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      setSessionError(errorMessage || '批量刷新额度失败');
+      toast.error(errorMessage || '批量刷新额度失败');
     } finally {
       setActionLoadingKey('');
     }
@@ -1335,9 +1362,6 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
             </div>
           </div>
         </div>
-        <div className="oauth-summary-note">
-          OAuth 账号以后只在这里维护。连接管理页默认只保留普通 Session / API Key / Token 连接。
-        </div>
       </div>
     </div>
   );
@@ -1476,6 +1500,15 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
                     {sitePlatform && sitePlatform !== connection.provider ? (
                       <div className="oauth-cell-secondary">{sitePlatform}</div>
                     ) : null}
+                    <SiteWeightEditor
+                      value={siteWeightDrafts[String(connection.site?.id || connection.siteId)] ?? String(connection.site?.globalWeight ?? 1)}
+                      saving={actionLoadingKey === `weight:${connection.site?.id || connection.siteId}`}
+                      onChange={(next) => setSiteWeightDrafts((current) => ({
+                        ...current,
+                        [String(connection.site?.id || connection.siteId)]: next,
+                      }))}
+                      onSave={() => void handleUpdateSiteWeight(connection)}
+                    />
                   </div>
                 </td>
               ) : null}
@@ -1519,6 +1552,9 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
                       </div>
                       <QuotaWindowRow label="5h" window={quota.windows?.fiveHour} />
                       <QuotaWindowRow label="7d" window={quota.windows?.sevenDay} />
+                      {quota.entries?.map((entry) => (
+                        <QuotaEntryRow key={entry.key} entry={entry} />
+                      ))}
                     </div>
                   ) : (
                     <span className="oauth-cell-secondary">--</span>
@@ -1604,7 +1640,27 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
               />
             )}
           >
-            <MobileField label="站点" value={connection.site?.name || '--'} />
+            <MobileField
+              label="站点"
+              value={(
+                <div className="oauth-cell-stack">
+                  <div className="oauth-cell-primary oauth-site-name">{connection.site?.name || '--'}</div>
+                  {asTrimmedString(connection.site?.platform) && asTrimmedString(connection.site?.platform) !== connection.provider ? (
+                    <div className="oauth-cell-secondary">{asTrimmedString(connection.site?.platform)}</div>
+                  ) : null}
+                  <SiteWeightEditor
+                    value={siteWeightDrafts[String(connection.site?.id || connection.siteId)] ?? String(connection.site?.globalWeight ?? 1)}
+                    saving={actionLoadingKey === `weight:${connection.site?.id || connection.siteId}`}
+                    onChange={(next) => setSiteWeightDrafts((current) => ({
+                      ...current,
+                      [String(connection.site?.id || connection.siteId)]: next,
+                    }))}
+                    onSave={() => void handleUpdateSiteWeight(connection)}
+                  />
+                </div>
+              )}
+              stacked
+            />
             <MobileField label="邮箱" value={resolveConnectionEmailLabel(connection) || '--'} />
             <MobileField label="计划 / 项目" value={connection.projectId ? `${connection.planType || '--'} · ${connection.projectId}` : (connection.planType || '--')} />
             <MobileField label="路由参与" value={resolveRouteParticipationSummary(connection)} />
@@ -1662,6 +1718,9 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
                   </div>
                   <QuotaWindowRow label="5h" window={quota.windows?.fiveHour} />
                   <QuotaWindowRow label="7d" window={quota.windows?.sevenDay} />
+                  {quota.entries?.map((entry) => (
+                    <QuotaEntryRow key={entry.key} entry={entry} />
+                  ))}
                 </>
               ) : (
                 <div className="oauth-cell-secondary">--</div>
@@ -1697,7 +1756,7 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
         <div>
           <h2 className="page-title">OAuth 管理</h2>
           <div className="page-subtitle">
-            统一管理需要浏览器授权的官方上游连接。OAuth 账号以后只在这里维护，不再和普通连接管理页重复显示。
+            统一管理需要浏览器授权的官方上游连接。
           </div>
         </div>
         {!isMobile ? (
@@ -1712,29 +1771,6 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
         ) : null}
       </div>
       )}
-
-      {sessionFeedback ? (
-        <div className={`card oauth-page-message oauth-page-message-${sessionFeedback.tone}`.trim()}>
-          <div className="oauth-page-message-head">
-            <div className="oauth-page-message-text">{sessionFeedback.message}</div>
-            <span className={`badge ${sessionFeedback.tone === 'success' ? 'badge-success' : sessionFeedback.tone === 'error' ? 'badge-danger' : 'badge-info'}`}>
-              {sessionFeedback.tone === 'success' ? '成功' : sessionFeedback.tone === 'error' ? '失败' : '提示'}
-            </span>
-          </div>
-          {sessionFeedback.routeUnit ? (
-            <div className="oauth-page-message-meta">
-              <StatusPill tone="info">{sessionFeedback.routeUnit.name}</StatusPill>
-              <span className="badge badge-muted">{sessionFeedback.routeUnit.memberCount} 个成员</span>
-              <span className="badge badge-muted">{resolveRouteUnitStrategyLabel(sessionFeedback.routeUnit.strategy)}</span>
-              <div className="oauth-page-message-detail">
-                {sessionFeedback.routeUnit.action === 'created'
-                  ? '已将选中的 OAuth 账号合并为一个路由池，后续会以单个路由单元参与路由。'
-                  : '该路由池已拆分回单体账号，后续会分别参与路由。'}
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
 
       <ResponsiveFilterPanel
         isMobile={isMobile}
