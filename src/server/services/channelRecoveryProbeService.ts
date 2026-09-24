@@ -284,6 +284,9 @@ function compareProbeCandidatePriority(left: ProbeCandidate, right: ProbeCandida
 }
 
 async function runProbeCandidate(candidate: ProbeCandidate, nowMs: number): Promise<void> {
+  if (!config.modelAvailabilityProbeAllow || !config.modelAvailabilityProbeEnabled) {
+    return;
+  }
   const key = buildProbeKey(candidate.channelId, candidate.modelName);
   probeInFlightKeys.add(key);
   probeLastStartedAtByKey.set(key, nowMs);
@@ -332,6 +335,13 @@ async function runProbeCandidate(candidate: ProbeCandidate, nowMs: number): Prom
 }
 
 export async function runChannelProbeSweep(nowMs = Date.now()): Promise<void> {
+  // The runtime setting is the single switch for automatic model calls. Site
+  // connectivity checks and explicit model refreshes remain available, but a
+  // disabled model probe must not start any background request that invokes a
+  // model (including channel recovery probes).
+  if (!config.modelAvailabilityProbeAllow || !config.modelAvailabilityProbeEnabled) {
+    return;
+  }
   if (probeSweepInFlight) {
     await probeSweepInFlight;
     return;
@@ -385,6 +395,9 @@ export async function runChannelProbeSweep(nowMs = Date.now()): Promise<void> {
 
 export function startChannelProbeScheduler(intervalMs = PROBE_SWEEP_INTERVAL_MS): { enabled: boolean; intervalMs: number } {
   stopChannelProbeScheduler();
+  if (!config.modelAvailabilityProbeAllow || !config.modelAvailabilityProbeEnabled) {
+    return { enabled: false, intervalMs: 0 };
+  }
   const safeIntervalMs = Math.max(60_000, Math.trunc(intervalMs || 0)); // 最小 60s
   probeSchedulerTimer = setInterval(() => {
     void runChannelProbeSweep().catch((error) => {

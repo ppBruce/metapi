@@ -459,9 +459,9 @@ export default function ProbeLogs() {
             className={probeEnabled ? 'btn btn-danger' : 'btn btn-primary'}
             onClick={toggleProbe}
             disabled={probeToggleLoading}
-            title={probeEnabled ? '停止后台模型可用性测活' : '开启后台模型可用性测活'}
+            title={probeEnabled ? '停止后台自动模型测活' : '开启后台自动模型测活'}
           >
-            {probeToggleLoading ? '处理中...' : probeEnabled ? '停止测活' : '开启测活'}
+            {probeToggleLoading ? '处理中...' : probeEnabled ? '停止自动测活' : '开启自动测活'}
           </button>
         </div>
       </div>

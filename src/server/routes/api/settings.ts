@@ -48,6 +48,10 @@ import {
   startModelAvailabilityProbeScheduler,
   stopModelAvailabilityProbeScheduler,
 } from '../../services/modelAvailabilityProbeService.js';
+import {
+  startChannelProbeScheduler,
+  stopChannelProbeScheduler,
+} from '../../services/channelRecoveryProbeService.js';
 import { parsePayloadRulesConfigInput } from '../../services/payloadRules.js';
 
 type RoutingWeights = typeof config.routingWeights;
@@ -1026,12 +1030,12 @@ export async function settingsRoutes(app: FastifyInstance) {
     if (body.modelAvailabilityProbeEnabled !== undefined) {
       let nextValue = false;
       try {
-        nextValue = parseBooleanFlag(body.modelAvailabilityProbeEnabled, '批量测活开关');
+        nextValue = parseBooleanFlag(body.modelAvailabilityProbeEnabled, '自动模型测活开关');
       } catch (err) {
         const errMessage = err instanceof Error ? err.message : String(err);
         return reply.code(400).send({
           success: false,
-          message: errMessage || '批量测活开关格式无效',
+          message: errMessage || '自动模型测活开关格式无效',
         });
       }
 
@@ -1044,14 +1048,16 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
 
       if (nextValue !== config.modelAvailabilityProbeEnabled) {
-        changedLabels.push(nextValue ? '开启批量测活' : '关闭批量测活');
+        changedLabels.push(nextValue ? '开启自动模型测活' : '关闭自动模型测活');
       }
       await upsertSetting('model_availability_probe_enabled', nextValue);
       config.modelAvailabilityProbeEnabled = nextValue && config.modelAvailabilityProbeAllow;
       if (config.modelAvailabilityProbeEnabled) {
         startModelAvailabilityProbeScheduler();
+        startChannelProbeScheduler();
       } else {
         stopModelAvailabilityProbeScheduler();
+        stopChannelProbeScheduler();
       }
     }
 

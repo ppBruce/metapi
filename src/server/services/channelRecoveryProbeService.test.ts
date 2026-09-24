@@ -61,6 +61,8 @@ describe('channelRecoveryProbeService', () => {
       latencyMs: 320,
       reason: 'probe succeeded',
     });
+    config.modelAvailabilityProbeAllow = true;
+    config.modelAvailabilityProbeEnabled = true;
     config.proxySessionChannelConcurrencyLimit = 1;
     resetChannelProbeState();
     resetProxyChannelCoordinatorState();
@@ -73,6 +75,14 @@ describe('channelRecoveryProbeService', () => {
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
+  });
+
+  it('does not run automatic channel probes when model probing is disabled', async () => {
+    config.modelAvailabilityProbeEnabled = false;
+
+    await runChannelProbeSweep();
+
+    expect(probeRuntimeModelMock).not.toHaveBeenCalled();
   });
 
   afterAll(() => {

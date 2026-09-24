@@ -14,6 +14,12 @@ make small, consistent changes without re-learning the codebase each time.
 - Keep changes narrow and reviewable. Land one coherent slice at a time and
   avoid bundling unrelated cleanup into the same patch.
 
+- Treat every code change as a recorded work item: it must have a focused
+  commit, be pushed to the matching custom branch, be built into the matching
+  custom image, and be deployed/restarted before handoff. The handoff must
+  state the pushed revision, deployment result, active branch, and how many
+  commits it is ahead of its upstream base.
+
 ## Upstream Sync And Verification
 
 - Treat upstream syncs as incremental maintenance. Compare against the last
@@ -47,6 +53,23 @@ make small, consistent changes without re-learning the codebase each time.
   after confirming the current container, source, and data paths. Avoid
   repeating historical investigations or building a new deployment framework
   for each update. Keep progress notes and handoff evidence concise.
+- Keep upstream-derived releases on version-matched custom branches. When the
+  adopted upstream release is `vX.Y.Z`, use branch `X.Y.Z-custom`, Git tag
+  `vX.Y.Z-custom`, and image tag `metapi:X.Y.Z-custom`. The next upstream
+  release gets a new matching branch/tag/image; do not silently reuse an older
+  custom branch for a new upstream base.
+- The standard upstream-update workflow is: record the current revision and
+  rollback image/config/database material; fetch and inspect the upstream
+  release; merge it into the matching `X.Y.Z-custom` branch while preserving
+  local commits; run focused verification and `npm run repo:drift-check`; commit
+  the complete change; push the branch and tag; build `metapi:X.Y.Z-custom`;
+  deploy/restart with that exact image; run the deployed version/readiness and
+  one relevant management endpoint check; then report Git push, build,
+  deployment/restart, branch name, and ahead-of-upstream commit count.
+- Do not describe an upstream merge as complete until the Git push and the
+  matching image deployment have both succeeded. If a Git host or deployment
+  target is unavailable, report the exact blocked stage and keep the work item
+  clearly unfinished.
 - Documentation and agent-instruction-only edits require a diff/content
   review and `git diff --check`; do not run application tests, builds, or
   database rehearsals unless executable code or contracts also changed.
