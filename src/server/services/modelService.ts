@@ -1750,7 +1750,19 @@ export async function rebuildTokenRoutesFromAvailability() {
         }
       }
 
-      if (forceRemoveDisabled || !channel.manualOverride) {
+      const channelSourceModel = (channel.sourceModel || route.modelPattern).trim();
+      const channelSourceModelKey = canonicalizeModelName(channelSourceModel) || channelSourceModel;
+      const channelSourceCandidates = modelCandidates.get(channelSourceModelKey);
+      const hasAvailableSourceCandidate = Array.from(channelSourceCandidates?.values() || []).some((candidate) => (
+        candidate.accountId === channel.accountId
+        && (!candidate.tokenId || candidate.tokenId === (channel.tokenId ?? null))
+        && candidate.oauthRouteUnitId === (channel.oauthRouteUnitId ?? null)
+        && (canonicalizeModelName(candidate.sourceModel) || candidate.sourceModel).toLowerCase() === channelSourceModelKey.toLowerCase()
+      ));
+      const staleManualModelChannel = channel.manualOverride
+        && isExactModelPattern(route.modelPattern)
+        && !hasAvailableSourceCandidate;
+      if (forceRemoveDisabled || !channel.manualOverride || staleManualModelChannel) {
         await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
         removedChannels++;
       }

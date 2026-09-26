@@ -465,6 +465,100 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     expect(patternChannels.map((channel: any) => channel.sourceModel)).toEqual(['gpt-5-current']);
   });
 
+  it('removes manually adjusted channels when their source model is no longer available', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-stale-manual-channel',
+      url: 'https://site-stale-manual-channel.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'user-stale-manual-channel',
+      accessToken: 'access-stale-manual-channel',
+      status: 'active',
+    }).returning().get();
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-stale-manual-channel',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+    const staleRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gemini-3.8-flash',
+      enabled: true,
+    }).returning().get();
+    const staleChannel = await db.insert(schema.routeChannels).values({
+      routeId: staleRoute.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gemini-3.8-flash',
+      priority: 2,
+      weight: 10,
+      enabled: true,
+      manualOverride: true,
+    }).returning().get();
+    const healthySite = await db.insert(schema.sites).values({
+      name: 'site-current-gemini-model',
+      url: 'https://site-current-gemini-model.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const healthyAccount = await db.insert(schema.accounts).values({
+      siteId: healthySite.id,
+      username: 'user-current-gemini-model',
+      accessToken: 'access-current-gemini-model',
+      status: 'active',
+    }).returning().get();
+    const healthyToken = await db.insert(schema.accountTokens).values({
+      accountId: healthyAccount.id,
+      name: 'default',
+      token: 'sk-current-gemini-model',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: healthyToken.id,
+      modelName: 'gemini-3.8-flash',
+      available: true,
+    }).run();
+    const healthyChannel = await db.insert(schema.routeChannels).values({
+      routeId: staleRoute.id,
+      accountId: healthyAccount.id,
+      tokenId: healthyToken.id,
+      sourceModel: 'gemini-3.8-flash',
+      priority: 3,
+      weight: 10,
+      enabled: true,
+      manualOverride: true,
+    }).returning().get();
+    const groupRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gemini-3.8-flash-group',
+      displayName: 'gemini-3.8-flash-group',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: groupRoute.id,
+      sourceRouteId: staleRoute.id,
+    }).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.removedRoutes).toBe(0);
+    expect(await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.id, staleRoute.id)).get()).toBeDefined();
+    expect(await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, staleChannel.id)).get()).toBeUndefined();
+    expect(await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, healthyChannel.id)).get()).toBeDefined();
+    expect(await db.select().from(schema.routeGroupSources)
+      .where(eq(schema.routeGroupSources.groupRouteId, groupRoute.id)).all()).toEqual([
+      expect.objectContaining({ groupRouteId: groupRoute.id, sourceRouteId: staleRoute.id }),
+    ]);
+  });
+
   it('adds matching pattern-group channels when automatic rebuild creates exact routes', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-new-pattern',

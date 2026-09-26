@@ -248,6 +248,33 @@ export async function rebuildAutomaticRouteChannelsByModelPattern(
   modelPattern: string,
   options: RebuildPatternRouteOptions = {},
 ): Promise<PatternRouteChannelSyncResult> {
+  const excludedExactModelNames = new Set(
+    (options.excludeExactModelPatterns || []).map(normalizeModelKey).filter(Boolean),
+  );
+  const routeCandidates = await getMatchedExactRouteChannelCandidates(modelPattern, excludedExactModelNames);
+  const availabilityExclusions = isExactModelPattern(modelPattern)
+    ? excludedExactModelNames
+    : routeCandidates.exactModelNames;
+  const availabilityCandidates = await getPatternTokenCandidates(modelPattern, availabilityExclusions);
+  const desiredPairs = new Set([...routeCandidates.candidates, ...availabilityCandidates].map(buildChannelPairKey));
+  const existingManualChannels = await db.select().from(schema.routeChannels)
+    .where(and(eq(schema.routeChannels.routeId, routeId), eq(schema.routeChannels.manualOverride, true)))
+    .all();
+  const staleManualChannels = existingManualChannels.filter((channel: any) => {
+    const sourceModel = String(channel.sourceModel || '').trim();
+    if (!sourceModel || !matchesModelPattern(sourceModel, modelPattern)) return false;
+    return !desiredPairs.has(buildChannelPairKey({
+      accountId: channel.accountId,
+      tokenId: channel.tokenId ?? null,
+      oauthRouteUnitId: channel.oauthRouteUnitId ?? null,
+      sourceModel,
+    }));
+  });
+  if (staleManualChannels.length > 0) {
+    await db.delete(schema.routeChannels)
+      .where(inArray(schema.routeChannels.id, staleManualChannels.map((channel: any) => channel.id)))
+      .run();
+  }
   const removableChannels = await db.select().from(schema.routeChannels)
     .where(
       and(
@@ -264,14 +291,14 @@ export async function rebuildAutomaticRouteChannelsByModelPattern(
   }
 
   const createdChannels = await populateRouteChannelsByModelPattern(routeId, modelPattern, options);
-  if (removableChannels.length > 0 || createdChannels > 0) {
+  if (staleManualChannels.length > 0 || removableChannels.length > 0 || createdChannels > 0) {
     await clearRouteDecisionSnapshot(routeId);
   }
 
   return {
     rebuiltRoutes: 1,
     routeIds: [routeId],
-    removedChannels: removableChannels.length,
+    removedChannels: removableChannels.length + staleManualChannels.length,
     createdChannels,
   };
 }
