@@ -36,6 +36,7 @@ import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService
 import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
 import { migrateSiteApiKeysToAccounts } from './services/siteApiKeyMigrationService.js';
+import { migrateDownstreamKeyExclusionsToAllowLists } from './services/downstreamApiKeyAllowListMigration.js';
 import { stopDispatcherCacheSweep } from './services/siteProxy.js';
 
 function installProcessCrashHandlers(): void {
@@ -67,10 +68,6 @@ import { ensureOauthIdentityBackfill } from './services/oauth/oauthIdentityBackf
 import { startOAuthLoopbackCallbackServers, stopOAuthLoopbackCallbackServers } from './services/oauth/localCallbackServer.js';
 import { startSiteAnnouncementPolling, stopSiteAnnouncementPolling } from './services/siteAnnouncementPollingService.js';
 import {
-  startModelAvailabilityProbeScheduler,
-  stopModelAvailabilityProbeScheduler,
-} from './services/modelAvailabilityProbeService.js';
-import {
   startChannelProbeScheduler,
   stopChannelProbeScheduler,
 } from './services/channelRecoveryProbeService.js';
@@ -93,6 +90,8 @@ import {
   startRouteDecisionRefreshScheduler,
   stopRouteDecisionRefreshScheduler,
 } from './services/routeDecisionRefreshScheduler.js';
+import { fanoutSiteWideDisabledModels } from './services/siteDisabledModels.js';
+import { migrateLegacyNotifyChannels } from './services/notifyService.js';
 import {
   startOauthTokenRefreshScheduler,
   stopOauthTokenRefreshScheduler,
@@ -135,6 +134,10 @@ import {
   switchRuntimeDatabase,
   type RuntimeDbDialect,
 } from './db/index.js';
+import { installBoundedPlatformDispatcher } from './services/platforms/platformHttpDispatcher.js';
+
+// Bound upstream connection lifetime before any request path runs (see platformHttpDispatcher).
+installBoundedPlatformDispatcher();
 
 function toSettingsMap(rows: Array<{ key: string; value: string }>) {
   return new Map(rows.map((row) => [row.key, row.value]));
@@ -224,6 +227,10 @@ try {
   }
 
   await ensureSiteCompatibilityColumns();
+  // Disabled models are keyed per account: legacy site-wide rows (account_id
+  // NULL) are fanned out to every key of their site, then removed. Idempotent.
+  await fanoutSiteWideDisabledModels();
+  await migrateLegacyNotifyChannels();
   await ensureRouteGroupingCompatibilityColumns();
   await ensureProxyFileCompatibilityColumns();
   await ensureProxyLogStreamTimingColumns();
@@ -243,6 +250,11 @@ try {
   await ensureProxyLogReasoningEffortColumn();
   await repairStoredCreatedAtValues();
   await migrateSiteApiKeysToAccounts();
+  // Downstream keys used to store site/credential *exclusions*; they now store
+  // allow-lists (empty = no restriction). Legacy rows are converted once, then
+  // the legacy columns are cleared. Data-driven so a restored old backup is
+  // converted on the next boot instead of staying on the old semantics.
+  await migrateDownstreamKeyExclusionsToAllowLists();
   await ensureDefaultSitesSeeded();
   await ensureOauthIdentityBackfill();
   await routeRefreshWorkflow.rebuildRoutesOnly();
@@ -392,7 +404,6 @@ if (existsSync(webDir)) {
 await startScheduler();
 await reloadBackupWebdavScheduler();
 startSiteAnnouncementPolling();
-startModelAvailabilityProbeScheduler();
 startChannelProbeScheduler();
 startSub2ApiManagedRefreshScheduler();
 startUpdateCenterPolling();
@@ -415,7 +426,6 @@ app.addHook('onClose', async () => {
   stopUpdateCenterPolling();
   stopProxyFileRetentionService();
   stopProxyLogRetentionService();
-  stopModelAvailabilityProbeScheduler();
   stopChannelProbeScheduler();
   await stopUsageAggregationProjectorScheduler();
   await stopAdminSnapshotWarmScheduler();

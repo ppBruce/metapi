@@ -216,7 +216,6 @@ describe('buildSiteSaveAction', () => {
   });
 });
 
-
 describe('codex client profile helpers', () => {
   it('applies and detects the preset headers', () => {
     const enabled = applyCodexClientProfile([], true);
@@ -243,6 +242,7 @@ describe('codex client profile helpers', () => {
     expect(isCodexClientProfileEnabled(enabled.customHeaders)).toBe(true);
     expect(enabled.protocolProfile).toEqual({
       preferResponses: true,
+      preferMessages: false,
       requireCodexClient: true,
       credentialMode: 'auto',
     });

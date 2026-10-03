@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { copyText } from '../clipboard.js';
+import { useTunnelClientView } from './helpers/useTunnelClientView.js';
 import { formatCompactTokenMetric } from '../numberFormat.js';
 import { availabilityColor } from '../components/charts/chartShared.js';
 import { ErrorBoundary } from '../components/ErrorBoundary.js';
@@ -277,12 +278,9 @@ export default function Dashboard({
   const [tunnel, setTunnel] = useState<any>(null);
   const [tunnelBusy, setTunnelBusy] = useState(false);
   const [tunnelError, setTunnelError] = useState<string | null>(null);
+  const [serverTunnelClientView, setServerTunnelClientView] = useState<boolean | null>(null);
+  const isTunnelClientView = useTunnelClientView(serverTunnelClientView);
   const [localAddress, setLocalAddress] = useState<{ baseUrl: string; port: number } | null>(null);
-  const isTunnelClientView = typeof window !== 'undefined'
-    && (
-      window.location.hostname.endsWith('.trycloudflare.com')
-      || window.location.hostname.endsWith('.abc-tunnel.us')
-    );
 
   const [insightsLoading, setInsightsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -440,11 +438,14 @@ export default function Dashboard({
     };
   }, []);
 
-
   const refreshTunnel = useCallback(async () => {
     try {
       const res = await api.getTunnelStatus() as any;
       setTunnel(res?.tunnel || res || null);
+      // Server is authoritative about whether this browser reached the console
+      // through the public tunnel; the hostname heuristic only covers the
+      // window before the first status response arrives.
+      setServerTunnelClientView(typeof res?.tunnelClientView === 'boolean' ? res.tunnelClientView : null);
       setTunnelError(null);
     } catch (err) {
       const errMessage = err instanceof Error ? err.message : String(err);
@@ -908,7 +909,6 @@ export default function Dashboard({
           </div>
         </div>
       </div>
-
 
       {!loading && !siteLoading && (sites.length === 0 || totalAccounts === 0) && (
         <div

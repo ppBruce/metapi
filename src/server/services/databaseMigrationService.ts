@@ -389,10 +389,11 @@ function buildStatements(
   for (const row of snapshot.accounts.siteDisabledModels) {
     statements.push({
       table: 'site_disabled_models',
-      columns: ['id', 'site_id', 'model_name', 'created_at'],
+      columns: ['id', 'site_id', 'account_id', 'model_name', 'created_at'],
       values: [
         asNumber(row.id, 0),
         asNumber(row.siteId, 0),
+        row.accountId == null ? null : asNumber(row.accountId, 0),
         asNullableString(row.modelName),
         asNullableString(row.createdAt),
       ],
@@ -672,7 +673,7 @@ function buildStatements(
   for (const row of snapshot.accounts.downstreamApiKeys) {
     statements.push({
       table: 'downstream_api_keys',
-      columns: ['id', 'name', 'key', 'description', 'enabled', 'expires_at', 'max_cost', 'used_cost', 'max_requests', 'used_requests', 'supported_models', 'allowed_route_ids', 'site_weight_multipliers', 'excluded_site_ids', 'excluded_credential_refs', 'last_used_at', 'created_at', 'updated_at'],
+      columns: ['id', 'name', 'key', 'description', 'enabled', 'expires_at', 'max_cost', 'used_cost', 'max_requests', 'used_requests', 'supported_models', 'allowed_route_ids', 'site_weight_multipliers', 'allowed_site_ids', 'allowed_credential_refs', 'last_used_at', 'created_at', 'updated_at'],
       values: [
         asNumber(row.id, 0),
         asNullableString(row.name),
@@ -687,8 +688,8 @@ function buildStatements(
         serializeColumnValue('downstream_api_keys', 'supported_models', row.supportedModels, contract),
         serializeColumnValue('downstream_api_keys', 'allowed_route_ids', row.allowedRouteIds, contract),
         serializeColumnValue('downstream_api_keys', 'site_weight_multipliers', row.siteWeightMultipliers, contract),
-        serializeColumnValue('downstream_api_keys', 'excluded_site_ids', row.excludedSiteIds, contract),
-        serializeColumnValue('downstream_api_keys', 'excluded_credential_refs', row.excludedCredentialRefs, contract),
+        serializeColumnValue('downstream_api_keys', 'allowed_site_ids', row.allowedSiteIds, contract),
+        serializeColumnValue('downstream_api_keys', 'allowed_credential_refs', row.allowedCredentialRefs, contract),
         asNullableString(row.lastUsedAt),
         asNullableString(row.createdAt),
         asNullableString(row.updatedAt),

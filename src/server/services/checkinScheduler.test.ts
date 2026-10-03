@@ -8,8 +8,14 @@ const validateMock = vi.fn(() => true);
 const allMock = vi.fn();
 const refreshAllBalancesMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
+const recoverAccountSessionMock = vi.fn();
 const startModelsDevPriceSyncMock = vi.fn();
 const stopModelsDevPriceSyncMock = vi.fn();
+const sendNotificationMock = vi.fn(async () => undefined);
+const intervalAccounts = [
+  { accounts: { id: 201, checkinEnabled: true, status: 'active', lastCheckinAt: null }, sites: { status: 'active' } },
+];
+const selectAllMock = vi.fn();
 
 vi.mock('node-cron', () => ({
   default: {
@@ -22,7 +28,7 @@ vi.mock('../db/index.js', () => {
   const queryChain = {
     where: () => queryChain,
     get: () => undefined,
-    all: () => [],
+    all: () => selectAllMock(),
     from: () => queryChain,
     innerJoin: () => queryChain,
   };
@@ -39,15 +45,27 @@ vi.mock('../db/index.js', () => {
   };
 });
 
-vi.mock('./checkinService.js', () => ({
-  checkinAll: (...args: unknown[]) => allMock(...args),
-}));
+vi.mock('./checkinService.js', async (importOriginal) => {
+  // 只替掉会打网络的 checkinAll；汇总正文用真实实现，测试才有意义
+  const actual = await importOriginal<typeof import('./checkinService.js')>();
+  return {
+    ...actual,
+    checkinAll: (...args: unknown[]) => allMock(...args),
+  };
+});
 
 vi.mock('./balanceService.js', () => ({
   refreshAllBalances: (...args: unknown[]) => refreshAllBalancesMock(...args),
+  recoverAccountSession: (...args: unknown[]) => recoverAccountSessionMock(...args),
 }));
 
 vi.mock('./routeRefreshWorkflow.js', () => ({
+  // The scheduler pass goes through the bounded wrapper; keep delegating to the
+  // shared mock so the dedupe assertions below still observe one call per pass.
+  refreshModelsAndRebuildRoutesWithSchedulerBound: async (...args: any[]) => ({
+    completed: true,
+    result: await (refreshModelsAndRebuildRoutesMock as any)(...args),
+  }),
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
 
@@ -57,7 +75,7 @@ vi.mock('./modelPriceCatalogService.js', () => ({
 }));
 
 vi.mock('./notifyService.js', () => ({
-  sendNotification: vi.fn(async () => undefined),
+  sendNotification: (...args: unknown[]) => sendNotificationMock(...args),
 }));
 
 describe('checkinScheduler', () => {
@@ -71,6 +89,8 @@ describe('checkinScheduler', () => {
     refreshModelsAndRebuildRoutesMock.mockReset();
     startModelsDevPriceSyncMock.mockReset();
     stopModelsDevPriceSyncMock.mockReset();
+    sendNotificationMock.mockReset();
+    selectAllMock.mockReset().mockReturnValue([]);
   });
 
   afterEach(async () => {
@@ -198,7 +218,7 @@ describe('checkinScheduler', () => {
     expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('deduplicates overlapping check-in cron passes and clears the lock after completion', async () => {
+  it('deduplicates overlapping interval check-in passes and sends one summary', async () => {
     let releaseCheckin!: () => void;
     allMock.mockImplementation(() => new Promise<unknown[]>((resolve) => {
       releaseCheckin = () => resolve([]);
@@ -213,13 +233,91 @@ describe('checkinScheduler', () => {
     const first = checkinCallback();
     const second = checkinCallback();
     expect(allMock).toHaveBeenCalledTimes(1);
+    expect(allMock).toHaveBeenCalledWith({ scheduleMode: 'cron' });
     releaseCheckin();
     await Promise.all([first, second]);
+    expect(sendNotificationMock).toHaveBeenCalledTimes(1);
+    expect(sendNotificationMock).toHaveBeenCalledWith(
+      '签到完成（成功0）',
+      '签到汇总:成功 0 / 跳过 0 / 失败 0',
+      'info',
+      expect.objectContaining({ bypassThrottle: true }),
+    );
     expect(allMock).toHaveBeenCalledTimes(1);
 
     // Lock cleared → the next tick runs a fresh pass.
     allMock.mockResolvedValue([]);
     await checkinCallback();
     expect(allMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders one counts line plus non-success rows grouped by reason', async () => {
+    const scheduler = await import('./checkinScheduler.js');
+    const notification = scheduler.buildCheckinSummaryNotification([
+      { accountId: 1, username: 'u1', site: '咕嘎咕嘎公益站', result: { success: false, status: 'failed', message: 'Invalid URL (POST /api/user/sign_in)' } },
+      { accountId: 2, username: 'u2', site: 'CoeeApi', result: { success: false, status: 'failed', message: 'fetch failed' } },
+      { accountId: 3, username: 'u3', site: 'liWAN LAB', result: { success: true, status: 'success' } },
+      { accountId: 4, username: 'u4', site: '大喵喵API', result: { success: false, status: 'skipped', skipped: true, message: '站点开启了 Turnstile 校验，需要人工签到' } },
+    ]);
+
+    expect(notification.title).toBe('签到完成（成功1/失败2）');
+    expect(notification.level).toBe('warning');
+    const [p0, p1, p2, p3, p4, ...tableLines] = notification.message.split('\n');
+    // Counts + one reason line per non-success site (hard breaks = two trailing
+    // spaces before \n), then a narrow status/site table.
+    expect(p0).toBe('签到汇总:成功 1 / 跳过 1 / 失败 2  ');
+    expect(p1).toBe('失败:咕嘎咕嘎公益站(Invalid URL (POST /api/user/sign_in))  ');
+    expect(p2).toBe('失败:CoeeApi(fetch failed)  ');
+    expect(p3).toBe('跳过:大喵喵API(站点开启了 Turnstile 校验，需要人工签到)');
+    expect(p4).toBe('');
+    expect(tableLines).toEqual([
+      '| 状态 | 站点 |',
+      '|:----|:----|',
+      '| 失败 | 咕嘎咕嘎公益站 |',
+      '| 失败 | CoeeApi |',
+      '| 跳过 | 大喵喵API |',
+    ]);
+    // 成功账号只计数不列名（12 个成功账号曾经把消息刷成一屏）
+    expect(notification.message).not.toContain('liWAN LAB');
+    expect(notification.message).not.toContain('u3');
+    expect(notification.message).not.toContain('u1');
+  });
+
+  it('keeps a clean one-line summary when nothing failed and collapses long lists', async () => {
+    const scheduler = await import('./checkinScheduler.js');
+    const clean = scheduler.buildCheckinSummaryNotification([
+      { accountId: 1, username: 'u1', site: 'site-a', result: { success: true, status: 'success' } },
+      { accountId: 2, username: 'u2', site: 'site-b', result: { success: false, status: 'skipped', skipped: true, message: 'Turnstile' } },
+    ]);
+    expect(clean.title).toBe('签到完成（成功1）');
+    expect(clean.level).toBe('info');
+    expect(clean.message).toBe('签到汇总:成功 1 / 跳过 1 / 失败 0  \n跳过:site-b(Turnstile)\n\n| 状态 | 站点 |\n|:----|:----|\n| 跳过 | site-b |');
+
+    // 同名原因归并到一行，站点超过 3 个时折叠
+    const manySites = Array.from({ length: 5 }, (_, index) => ({
+      accountId: index,
+      username: `u${index}`,
+      site: `site-${index}`,
+      result: { success: false, status: 'failed', message: 'boom' },
+    }));
+    const collapsed = scheduler.buildCheckinSummaryNotification(manySites);
+    expect(collapsed.message).toContain('失败:site-0、site-1、site-2等 5 个站点(boom)');
+    expect(collapsed.message).toContain('| 失败 | 等 5 个站点 |');
+  });
+
+  it('attempts a session re-login when a model refresh fails with an auth error', async () => {
+    recoverAccountSessionMock.mockReset().mockResolvedValue(true);
+    refreshModelsAndRebuildRoutesMock.mockResolvedValue({
+      refresh: [{ accountId: 17, status: 'failed', errorCode: 'unauthorized', errorMessage: 'HTTP 401: invalid session' }],
+      rebuild: {},
+    });
+    refreshAllBalancesMock.mockResolvedValue(undefined);
+    const scheduler = await import('./checkinScheduler.js');
+    await scheduler.startScheduler();
+    const modelCall = (scheduleMock.mock.calls as unknown as Array<[string, () => Promise<void>]>)
+      .find((call) => call[0] === '*/30 * * * *');
+    expect(modelCall).toBeDefined();
+    await modelCall![1]();
+    expect(recoverAccountSessionMock).toHaveBeenCalledWith(17);
   });
 });

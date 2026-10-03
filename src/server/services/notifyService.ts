@@ -1,6 +1,8 @@
 import { createHmac } from 'node:crypto';
 import { fetch } from 'undici';
 import { config } from '../config.js';
+import { db, schema } from '../db/index.js';
+import { upsertSetting } from '../db/upsertSetting.js';
 import { withExplicitProxyRequestInit } from './siteProxy.js';
 import nodemailer, { type Transporter } from 'nodemailer';
 import {
@@ -11,7 +13,43 @@ import {
 } from './notificationThrottle.js';
 import { formatLocalDateTime, getResolvedTimeZone } from './localTimeService.js';
 
-type NotificationChannel = 'webhook' | 'bark' | 'serverchan' | 'telegram' | 'smtp';
+type NotificationChannel = 'webhook' | 'serverchan' | 'telegram' | 'smtp';
+
+/**
+ * A push channel is one bot webhook plus its own signing secret. Channels are
+ * independent rows so DingTalk and Feishu (different URLs, different secrets,
+ * different signing) can be enabled at the same time.
+ */
+export type NotifyChannelKind = 'dingtalk' | 'feishu' | 'wecom' | 'custom';
+
+export type NotifyChannel = {
+  id: string;
+  url: string;
+  secret: string;
+  enabled: boolean;
+  label?: string;
+  /** Explicit platform choice from the UI; falls back to URL detection. */
+  kind?: NotifyChannelKind;
+};
+
+export const NOTIFY_CHANNEL_LABELS: Record<NotifyChannelKind, string> = {
+  dingtalk: '钉钉',
+  feishu: '飞书',
+  wecom: '企业微信',
+  custom: '自定义 Webhook',
+};
+
+/**
+ * The platform is derived from the URL host: the three supported bots use fixed
+ * hosts and paths, and the body shape plus the signing placement differ per
+ * platform, so the URL alone decides how a channel is called.
+ */
+export function resolveNotifyChannelKind(url: string): NotifyChannelKind {
+  if (isWeComBotWebhook(url)) return 'wecom';
+  if (isFeishuBotWebhook(url)) return 'feishu';
+  if (isDingTalkBotWebhook(url)) return 'dingtalk';
+  return 'custom';
+}
 
 export type SendNotificationOptions = {
   bypassThrottle?: boolean;
@@ -124,16 +162,131 @@ function isWeComBotWebhook(url: string): boolean {
   }
 }
 
-function buildWeComText(
-  title: string,
-  message: string,
-  level: 'info' | 'warning' | 'error',
-  timeFootnote: string,
-): string {
-  const maxLength = 1900;
-  const raw = `[metapi][${level.toUpperCase()}] ${title}\n\n${message}\n\n${timeFootnote}`;
-  if (raw.length <= maxLength) return raw;
-  return `${raw.slice(0, maxLength)}\n...(truncated)`;
+type NotifyLevel = 'info' | 'warning' | 'error';
+
+/**
+ * 机器人通道共用的 markdown 正文。前缀里保留 metapi / 级别 / 标题：钉钉与飞书的关键词校验扫的是
+ * 消息正文，标题若只放在 title / header 字段里可能不参与校验。正文原样透传——站点公告本身
+ * 就是上游站点写的 markdown，转义或改写会把它弄坏。
+ */
+function buildBotMarkdown(title: string, message: string, level: NotifyLevel, timeFootnote: string): string {
+  return `**[metapi][${level.toUpperCase()}] ${title}**\n\n${message}\n\n> ${timeFootnote}`;
+}
+
+/** 三个平台的限额都是 UTF-8 字节而不是字符，按字节截断且不切断多字节字符。 */
+function truncateToBytes(text: string, maxBytes: number, suffix = '\n...(truncated)'): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  const budget = Math.max(0, maxBytes - Buffer.byteLength(suffix, 'utf8'));
+  let out = '';
+  let used = 0;
+  for (const char of text) {
+    const size = Buffer.byteLength(char, 'utf8');
+    if (used + size > budget) break;
+    out += char;
+    used += size;
+  }
+  return `${out}${suffix}`;
+}
+
+/**
+ * 图片降级。三家机器人 webhook 都渲染不了图片：飞书只认 `![alt](image_key)` 而且 key 必须由
+ * 上传图片接口换取（data URL 和外链一律不认），钉钉/企微的 markdown 子集里根本没有图片这一项。
+ * 更糟的是 base64 内嵌图会把正文撑到几十 KB，截断后只剩半截乱码。所以统一换成一行提示文字。
+ */
+function degradeImages(text: string): string {
+  return text.replace(/!\[([^\]]*)\]\(([^)]*)\)/g, (_match, alt: string, target: string) => {
+    const label = String(alt || '').trim() || '无描述';
+    const isBase64 = /^data:/i.test(target.trim());
+    return isBase64 ? `[图片：${label}]（内嵌图片过大，请在面板查看）` : `[图片：${label}]（请在面板查看）`;
+  });
+}
+
+/** 解析表格行：以 | 开头结尾且至少两列，否则返回 null。 */
+function parseTableRow(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return null;
+  const cells = trimmed.slice(1, -1).split('|').map((cell) => cell.trim());
+  return cells.length >= 2 ? cells : null;
+}
+
+/**
+ * 保留表格时保证表格前后各有一个空行。这是让 markdown 合法（GFM 里表格不能打断段落），
+ * 不是替平台兜底渲染——钉钉/企微渲染不出表格是它们客户端的事，metapi 不做补偿。
+ */
+function ensureTableSpacing(text: string): string {
+  const lines = text.split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const isTable = parseTableRow(lines[i]) !== null;
+    const prevIsTable = i > 0 && parseTableRow(lines[i - 1]) !== null;
+    if (isTable && !prevIsTable && out.length > 0 && out[out.length - 1].trim() !== '') {
+      out.push('');
+    }
+    out.push(lines[i]);
+    const nextIsTable = i + 1 < lines.length && parseTableRow(lines[i + 1]) !== null;
+    if (isTable && !nextIsTable && i + 1 < lines.length && lines[i + 1].trim() !== '') {
+      out.push('');
+    }
+  }
+  return out.join('\n');
+}
+
+/**
+ * 三个机器人平台共用的正文：图片降级 + 表格补空行 + 统一前缀与时间。
+ *
+ * 不按平台做渲染兜底（表格、行内代码、列表各自能不能渲染由客户端决定，metapi 不转换内容），
+ * 只做一件事是必须的：把 base64 内嵌图片换掉——它不是渲染问题，不换会把正文撑到几十 KB，
+ * 飞书直接超 20KB 上限发不出去、其余平台正文被截断成半截乱码。
+ */
+function buildBotBody(title: string, message: string, level: NotifyLevel, timeFootnote: string): string {
+  return ensureTableSpacing(degradeImages(buildBotMarkdown(title, message, level, timeFootnote)));
+}
+
+/** 飞书自定义机器人请求体上限 20KB，留出 JSON 包装的余量。 */
+const FEISHU_CARD_BODY_BYTE_LIMIT = 19_000;
+/** 钉钉 markdown 正文的保守上限（官方可抓取文档未给出具体数值）。 */
+const DINGTALK_MARKDOWN_BYTE_LIMIT = 19_000;
+/** 企业微信 markdown content 上限：4096 字节。 */
+const WECOM_MARKDOWN_BYTE_LIMIT = 4096;
+
+/**
+ * 飞书卡片标题只接受内置配色枚举（blue|wathet|turquoise|green|yellow|orange|red|carmine|violet|
+ * purple|indigo|grey|default），不支持自定义色值。turquoise 官方浅色主题值为 #067062，与 metapi 的
+ * 品牌色 teal #00727f 同色系且明度接近，因此 info 用 turquoise；warning/error 保留橙/红以保留级别语义。
+ */
+const FEISHU_HEADER_TEMPLATE: Record<NotifyLevel, string> = {
+  info: 'turquoise',
+  warning: 'orange',
+  error: 'red',
+};
+
+/**
+ * 飞书消息卡片（schema 2.0）。自定义机器人的 text 是纯文本、post 是结构化富文本（都不是 markdown），
+ * 只有 interactive 卡片里的 markdown 元素会渲染 markdown。
+ */
+function buildFeishuCard(title: string, message: string, level: NotifyLevel, timeFootnote: string) {
+  const markdown = truncateToBytes(buildBotBody(title, message, level, timeFootnote), FEISHU_CARD_BODY_BYTE_LIMIT);
+  return {
+    schema: '2.0',
+    config: { update_multi: true },
+    header: {
+      title: { tag: 'plain_text', content: `[metapi] ${title}` },
+      template: FEISHU_HEADER_TEMPLATE[level],
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px 12px 12px 12px',
+      elements: [
+        {
+          tag: 'markdown',
+          content: markdown,
+          text_align: 'left',
+          text_size: 'normal_v2',
+          margin: '0px 0px 0px 0px',
+        },
+      ],
+    },
+  };
 }
 
 function isFeishuBotWebhook(url: string): boolean {
@@ -148,16 +301,28 @@ function isFeishuBotWebhook(url: string): boolean {
   }
 }
 
-function buildFeishuText(
-  title: string,
-  message: string,
-  level: 'info' | 'warning' | 'error',
-  timeFootnote: string,
-): string {
-  const maxLength = 3900;
-  const raw = `[metapi][${level.toUpperCase()}] ${title}\n\n${message}\n\n${timeFootnote}`;
-  if (raw.length <= maxLength) return raw;
-  return `${raw.slice(0, maxLength)}\n...(truncated)`;
+/**
+ * Feishu / Lark custom-bot 签名校验.
+ *
+ * Unlike DingTalk (which signs a URL query), Feishu signs the request BODY and
+ * expects the two extra fields next to `msg_type`. Algorithm per the open
+ * platform docs:
+ *
+ *   stringToSign = `${timestamp}\n${secret}`   // timestamp in SECONDS
+ *   sign         = base64(HMAC-SHA256(key = stringToSign, message = ""))
+ *
+ * A bot with 签名校验 enabled rejects an unsigned request, so the secret must
+ * be configured in the 设置页 when the bot has it turned on.
+ */
+function signFeishuBody<T extends Record<string, unknown>>(
+  body: T,
+  secret: string,
+  nowMs = Date.now(),
+): T & { timestamp: string; sign: string } {
+  const timestamp = String(Math.floor(nowMs / 1000));
+  const stringToSign = `${timestamp}\n${secret}`;
+  const sign = createHmac('sha256', stringToSign).update('').digest('base64');
+  return { ...body, timestamp, sign };
 }
 
 
@@ -170,7 +335,12 @@ function isDingTalkBotWebhook(url: string): boolean {
   }
 }
 
-function extractDingTalkSecret(url: string): string {
+/**
+ * Signing secret for a bot webhook, shared by DingTalk 加签 and Feishu 签名校验.
+ * Sources, in order: an explicit query parameter pasted into the URL, then the
+ * configured secret (WEBHOOK_SECRET / 设置页的「加签密钥」).
+ */
+function extractWebhookSigningSecret(url: string, channelSecret = ''): string {
   try {
     const parsed = new URL(url);
     // Prefer explicit secret query; also accept common aliases users might paste.
@@ -184,9 +354,8 @@ function extractDingTalkSecret(url: string): string {
       if (text) return text;
     }
   } catch {}
-  // Config-level secret (optional, set via WEBHOOK_SECRET / settings).
-  const fromConfig = String(config.webhookSecret || '').trim();
-  return fromConfig;
+  // Channel-level secret (the 加签密钥 configured next to the URL).
+  return String(channelSecret || '').trim();
 }
 
 function buildDingTalkSignedUrl(url: string, secret: string, nowMs = Date.now()): string {
@@ -209,16 +378,69 @@ function buildDingTalkSignedUrl(url: string, secret: string, nowMs = Date.now())
   return parsed.toString();
 }
 
-function buildDingTalkText(
-  title: string,
-  message: string,
-  level: 'info' | 'warning' | 'error',
-  timeFootnote: string,
-): string {
-  const maxLength = 1900;
-  const raw = `【metapi】[${level.toUpperCase()}] ${title}\n\n${message}\n\n${timeFootnote}`;
-  if (raw.length <= maxLength) return raw;
-  return `${raw.slice(0, maxLength)}\n...(truncated)`;
+/**
+ * One-time migration of the legacy single-webhook keys into the channel list.
+ *
+ * Runs only when `notify_channels` is absent, so it is idempotent and never
+ * overwrites a list the user has since edited. The legacy keys are left in
+ * place: they cost nothing and keep a rollback path open.
+ *
+ * Bark is gone as a feature; a Bark URL that merely duplicated the webhook URL
+ * (the common misconfiguration) is treated as the intent to keep that channel
+ * enabled, while a genuine Bark endpoint is dropped.
+ */
+export async function migrateLegacyNotifyChannels(): Promise<{ migrated: boolean; channels: number }> {
+  const rows = await db
+    .select({ key: schema.settings.key, value: schema.settings.value })
+    .from(schema.settings)
+    .all();
+  const settingsMap = new Map<string, string>();
+  for (const row of rows) settingsMap.set(row.key, row.value);
+  if (settingsMap.has('notify_channels')) {
+    return { migrated: false, channels: config.notifyChannels.length };
+  }
+
+  const readString = (key: string, fallback: string): string => {
+    const raw = settingsMap.get(key);
+    if (typeof raw !== 'string') return fallback;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return typeof parsed === 'string' ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+  const readBoolean = (key: string, fallback: boolean): boolean => {
+    const raw = settingsMap.get(key);
+    if (typeof raw !== 'string') return fallback;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return typeof parsed === 'boolean' ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  const webhookUrl = readString('webhook_url', String(config.webhookUrl || '')).trim();
+  const webhookSecret = readString('webhook_secret', String(config.webhookSecret || '')).trim();
+  const webhookEnabled = readBoolean('webhook_enabled', config.webhookEnabled !== false);
+  const barkUrl = readString('bark_url', '').trim();
+  const barkEnabled = readBoolean('bark_enabled', false);
+
+  const channels: NotifyChannel[] = [];
+  if (webhookUrl) {
+    channels.push({
+      id: 'legacy-1',
+      url: webhookUrl,
+      secret: webhookSecret,
+      enabled: webhookEnabled || (barkEnabled && barkUrl === webhookUrl),
+      kind: resolveNotifyChannelKind(webhookUrl),
+    });
+  }
+
+  await upsertSetting('notify_channels', channels);
+  config.notifyChannels = channels;
+  return { migrated: true, channels: channels.length };
 }
 
 export async function sendNotification(
@@ -252,36 +474,56 @@ export async function sendNotification(
     }
   }
 
-  const tasks: Array<{ channel: NotificationChannel; run: (signal: AbortSignal) => Promise<unknown> }> = [];
+  const tasks: Array<{ channel: NotificationChannel; channelLabel?: string; run: (signal: AbortSignal) => Promise<unknown> }> = [];
 
-  if (config.webhookEnabled && config.webhookUrl) {
+  for (const channel of config.notifyChannels) {
+    if (!channel.enabled || !String(channel.url || '').trim()) continue;
+    const channelUrl = String(channel.url).trim();
+    const channelSecret = String(channel.secret || '').trim();
+    // An explicit platform choice wins; otherwise the URL decides.
+    const channelKind = channel.kind && channel.kind !== 'custom'
+      ? channel.kind
+      : resolveNotifyChannelKind(channelUrl);
+    const channelLabel = String(channel.label || '').trim() || NOTIFY_CHANNEL_LABELS[channelKind];
     tasks.push(
       {
         channel: 'webhook',
+        channelLabel,
         run: async (signal) => {
-          const isWeComWebhook = isWeComBotWebhook(config.webhookUrl);
-          const isFeishuWebhook = isFeishuBotWebhook(config.webhookUrl);
-          const isDingTalkWebhook = isDingTalkBotWebhook(config.webhookUrl);
+          const isWeComWebhook = channelKind === 'wecom';
+          const isFeishuWebhook = channelKind === 'feishu';
+          const isDingTalkWebhook = channelKind === 'dingtalk';
           let body: string;
           if (isWeComWebhook) {
+            // 企业微信只有 markdown / markdown_v2 类型会渲染 markdown。
             body = JSON.stringify({
-              msgtype: 'text',
-              text: {
-                content: buildWeComText(title, resolvedMessage, level, timeFootnote),
+              msgtype: 'markdown',
+              markdown: {
+                content: truncateToBytes(
+                  buildBotBody(title, resolvedMessage, level, timeFootnote),
+                  WECOM_MARKDOWN_BYTE_LIMIT,
+                ),
               },
             });
           } else if (isFeishuWebhook) {
-            body = JSON.stringify({
-              msg_type: 'text',
-              content: {
-                text: buildFeishuText(title, resolvedMessage, level, timeFootnote),
-              },
-            });
+            const feishuPayload: Record<string, unknown> = {
+              msg_type: 'interactive',
+              card: buildFeishuCard(title, resolvedMessage, level, timeFootnote),
+            };
+            const feishuSecret = extractWebhookSigningSecret(channelUrl, channelSecret);
+            body = JSON.stringify(
+              feishuSecret ? signFeishuBody(feishuPayload, feishuSecret, now.getTime()) : feishuPayload,
+            );
           } else if (isDingTalkWebhook) {
+            // 钉钉 markdown 类型的 title 必填（首屏透出），text 才是 markdown 正文。
             body = JSON.stringify({
-              msgtype: 'text',
-              text: {
-                content: buildDingTalkText(title, resolvedMessage, level, timeFootnote),
+              msgtype: 'markdown',
+              markdown: {
+                title,
+                text: truncateToBytes(
+                  buildBotBody(title, resolvedMessage, level, timeFootnote),
+                  DINGTALK_MARKDOWN_BYTE_LIMIT,
+                ),
               },
             });
           } else {
@@ -295,11 +537,11 @@ export async function sendNotification(
             });
           }
 
-          let targetUrl = config.webhookUrl;
+          let targetUrl = channelUrl;
           if (isDingTalkWebhook) {
-            const secret = extractDingTalkSecret(config.webhookUrl);
+            const secret = extractWebhookSigningSecret(channelUrl, channelSecret);
             if (secret) {
-              targetUrl = buildDingTalkSignedUrl(config.webhookUrl, secret, now.getTime());
+              targetUrl = buildDingTalkSignedUrl(channelUrl, secret, now.getTime());
             }
           }
 
@@ -348,20 +590,6 @@ export async function sendNotification(
         },
       },
     );
-  }
-
-  if (config.barkEnabled && config.barkUrl) {
-    const barkBase = config.barkUrl.replace(/\/+$/, '');
-    const url = `${barkBase}/${encodeURIComponent(title)}/${encodeURIComponent(resolvedMessage)}?group=AllApiHub&level=${encodeURIComponent(level)}`;
-    tasks.push({
-      channel: 'bark',
-      run: async (signal) => {
-        const response = await fetch(url, { method: 'GET', signal });
-        if (!response.ok) {
-          throw new Error(`Bark 响应状态 ${response.status}`);
-        }
-      },
-    });
   }
 
   if (config.serverChanEnabled && config.serverChanKey) {
@@ -466,10 +694,11 @@ export async function sendNotification(
       return { channel: task.channel, ok: true as const, error: '' };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const label = task.channelLabel ? `${task.channelLabel}：` : '';
       return {
         channel: task.channel,
         ok: false as const,
-        error: errorMessage || String(error) || 'unknown error',
+        error: `${label}${errorMessage || String(error) || 'unknown error'}`,
       };
     }
   }));

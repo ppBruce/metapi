@@ -408,6 +408,12 @@ describe('sqlite migrate bootstrap', () => {
       '0033_downstream_key_sensitive_word_detection',
       '0037_downstream_api_key_model_mappings',
       '0040_downstream_api_key_max_inflight',
+      // 0046 alters downstream_api_keys, which 0008 creates, so it stays missing
+      // in this partial-journal fixture too.
+      '0046_downstream_api_key_allow_lists',
+      // 0045 alters site_disabled_models, which 0006 creates, so it has to stay
+      // missing in this partial-journal fixture as well.
+      '0045_per_key_disabled_models',
     ]);
     const appliedEntries = journalEntries.filter((entry) => !missingTags.has(entry.tag));
 
@@ -650,5 +656,31 @@ describe('sqlite migrate bootstrap', () => {
 
     expect(runMigrate).toHaveBeenCalledTimes((retryBudget ?? 0) + 1);
     expect(closeSqlite).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to treat a non-sqlite DB_URL as a sqlite file path', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'metapi-migrate-dbtype-'));
+    process.env.DATA_DIR = dataDir;
+    // docker/Dockerfile CMD runs this module before index.js for every boot.
+    // A mysql/postgres deployment sets DB_TYPE + DB_URL; the sqlite migrator
+    // must refuse (the runtime DB is initialized by index.js) instead of
+    // creating a junk file named after the URL in the CWD.
+    process.env.DB_URL = 'mysql://root:pw@127.0.0.1:3306/metapi';
+    vi.resetModules();
+    const migrateModule = await import('./migrate.js');
+    const { __migrateTestUtils } = migrateModule as {
+      __migrateTestUtils: { resolveSqliteDbPath: () => string };
+    };
+
+    expect(() => __migrateTestUtils.resolveSqliteDbPath()).toThrow(/DB_TYPE|non-sqlite/i);
+
+    delete process.env.DB_URL;
+    // sqlite-flavored URLs keep working.
+    process.env.DB_URL = 'sqlite:///tmp/some/hub.db';
+    vi.resetModules();
+    const sqliteModule = await import('./migrate.js');
+    expect(
+      (sqliteModule.__migrateTestUtils as { resolveSqliteDbPath: () => string }).resolveSqliteDbPath(),
+    ).toBe('/tmp/some/hub.db');
   });
 });

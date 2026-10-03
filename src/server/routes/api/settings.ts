@@ -4,7 +4,7 @@ import { config, normalizeTokenRouterFailureCooldownMaxSec } from '../../config.
 import { db, runtimeDbDialect, schema } from '../../db/index.js';
 import { eq } from 'drizzle-orm';
 import { upsertSetting } from '../../db/upsertSetting.js';
-import { isLikelyTunnelRequest } from '../../services/cloudflareTunnelService.js';
+import { isTunnelAdminRequest, rejectTunnelAdminAction } from '../../tunnelAccessPolicy.js';
 import { normalizeRouteRoutingStrategy } from '../../services/routeRoutingStrategy.js';
 import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import { updateBalanceRefreshCron, updateCheckinSchedule, updateLogCleanupSettings } from '../../services/checkinScheduler.js';
@@ -45,10 +45,6 @@ import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
 import {
-  startModelAvailabilityProbeScheduler,
-  stopModelAvailabilityProbeScheduler,
-} from '../../services/modelAvailabilityProbeService.js';
-import {
   startChannelProbeScheduler,
   stopChannelProbeScheduler,
 } from '../../services/channelRecoveryProbeService.js';
@@ -57,8 +53,8 @@ import { parsePayloadRulesConfigInput } from '../../services/payloadRules.js';
 type RoutingWeights = typeof config.routingWeights;
 
 interface RuntimeSettingsBody {
-  payloadRules?: unknown;
   modelAvailabilityProbeEnabled?: boolean;
+  payloadRules?: unknown;
   sensitiveWordDetectionEnabled?: boolean;
   antiProbeMinTextLength?: number;
   codexUpstreamWebsocketEnabled?: boolean;
@@ -89,9 +85,8 @@ interface RuntimeSettingsBody {
   logCleanupRetentionDays?: number;
   webhookUrl?: string;
   webhookSecret?: string;
-  barkUrl?: string;
   webhookEnabled?: boolean;
-  barkEnabled?: boolean;
+  notifyChannels?: Array<{ id: string; url: string; secret?: string; enabled?: boolean; label?: string; kind?: 'dingtalk' | 'feishu' | 'wecom' | 'custom' }>;
   serverChanEnabled?: boolean;
   serverChanKey?: string;
   telegramEnabled?: boolean;
@@ -113,6 +108,7 @@ interface RuntimeSettingsBody {
   routingFallbackUnitCost?: number;
   proxyFirstByteTimeoutSec?: number;
   proxyRouteProbeRate?: number;
+  proxyConcurrencySpreadEnabled?: boolean;
   tokenRouterFailureCooldownMaxSec?: number;
   routeProbabilityFloor?: number;
   routeQuotaExhaustionExclude?: boolean;
@@ -313,13 +309,9 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
     }
     case 'model_availability_probe_enabled': {
       if (typeof value !== 'boolean') return;
-      const enabled = value && config.modelAvailabilityProbeAllow;
-      config.modelAvailabilityProbeEnabled = enabled;
-      if (enabled) {
-        startModelAvailabilityProbeScheduler();
-      } else {
-        stopModelAvailabilityProbeScheduler();
-      }
+      config.modelAvailabilityProbeEnabled = value && config.modelAvailabilityProbeAllow;
+      if (config.modelAvailabilityProbeEnabled) startChannelProbeScheduler();
+      else stopChannelProbeScheduler();
       return;
     }
     case 'codex_upstream_websocket_enabled': {
@@ -457,13 +449,19 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.webhookEnabled = !!value;
       return;
     }
-    case 'bark_url': {
-      if (typeof value !== 'string') return;
-      config.barkUrl = value.trim();
-      return;
-    }
-    case 'bark_enabled': {
-      config.barkEnabled = !!value;
+    case 'notify_channels': {
+      let candidate: unknown = value;
+      if (typeof value === 'string') {
+        try { candidate = JSON.parse(value) as unknown; } catch { return; }
+      }
+      if (Array.isArray(candidate)) {
+        config.notifyChannels = candidate.filter(
+          (c): c is { id: string; url: string; secret: string; enabled: boolean; label?: string; kind?: 'dingtalk' | 'feishu' | 'wecom' | 'custom' } =>
+            typeof c === 'object' && c !== null
+            && typeof (c as { id?: unknown }).id === 'string'
+            && typeof (c as { url?: unknown }).url === 'string',
+        );
+      }
       return;
     }
     case 'serverchan_enabled': {
@@ -588,6 +586,17 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.proxyRouteProbeRate = Math.min(1, Math.max(0, n));
       return;
     }
+    case 'proxy_concurrency_spread_enabled': {
+      if (typeof value === 'boolean') {
+        config.proxyConcurrencySpreadEnabled = value;
+        return;
+      }
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      if (normalized === 'true' || normalized === 'false') {
+        config.proxyConcurrencySpreadEnabled = normalized === 'true';
+      }
+      return;
+    }
     case 'token_router_failure_cooldown_max_sec': {
       const normalized = normalizeTokenRouterFailureCooldownMaxSec(value);
       if (normalized == null) return;
@@ -603,7 +612,7 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
   }
 }
 
-async function getRuntimeSettingsResponse(currentAdminIp = '') {
+async function getRuntimeSettingsResponse(currentAdminIp = '', tunnelClientView = false) {
   const { resolveGlobalSensitiveWordDetection, resolveAntiProbeMinTextLength } = await import('../../services/sensitiveWordDetectionService.js');
   const sensitiveWordDetectionEnabled = await resolveGlobalSensitiveWordDetection();
   const antiProbeMinTextLength = await resolveAntiProbeMinTextLength();
@@ -616,9 +625,9 @@ async function getRuntimeSettingsResponse(currentAdminIp = '') {
     logCleanupUsageLogsEnabled: config.logCleanupUsageLogsEnabled,
     logCleanupProgramLogsEnabled: config.logCleanupProgramLogsEnabled,
     logCleanupRetentionDays: config.logCleanupRetentionDays,
-    modelAvailabilityProbeEnabled: config.modelAvailabilityProbeEnabled,
     sensitiveWordDetectionEnabled,
     antiProbeMinTextLength,
+    modelAvailabilityProbeEnabled: config.modelAvailabilityProbeEnabled,
     codexUpstreamWebsocketEnabled: config.codexUpstreamWebsocketEnabled,
     streamIncludeUsageEnabled: config.streamIncludeUsageEnabled,
     contextAwareRouting: config.contextAwareRouting,
@@ -641,16 +650,25 @@ async function getRuntimeSettingsResponse(currentAdminIp = '') {
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
     proxyChannelFailoverMaxAttempts: config.proxyChannelFailoverMaxAttempts,
     proxyRouteProbeRate: config.proxyRouteProbeRate,
+    proxyConcurrencySpreadEnabled: config.proxyConcurrencySpreadEnabled,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
     routeProbabilityFloor: config.routeProbabilityFloor ?? 0.05,
     routeQuotaExhaustionExclude: config.routeQuotaExhaustionExclude !== false,
     routingWeights: config.routingWeights,
     defaultRoutingStrategy: config.defaultRoutingStrategy,
     webhookUrl: config.webhookUrl,
-    webhookSecret: config.webhookSecret || '',
-    barkUrl: config.barkUrl,
+    // Masked like every other notification secret (serverChan/telegram/smtp):
+    // the runtime GET is read by the console and must not echo the raw secret.
+    webhookSecretMasked: maskSecret(config.webhookSecret),
     webhookEnabled: config.webhookEnabled,
-    barkEnabled: config.barkEnabled,
+    notifyChannels: config.notifyChannels.map((c) => ({
+      id: c.id,
+      url: c.url,
+      enabled: c.enabled,
+      label: c.label,
+      kind: c.kind,
+      secret: c.secret ? maskSecret(c.secret) : '',
+    })),
     serverChanEnabled: config.serverChanEnabled,
     serverChanKeyMasked: maskSecret(config.serverChanKey),
     telegramEnabled: config.telegramEnabled,
@@ -671,6 +689,9 @@ async function getRuntimeSettingsResponse(currentAdminIp = '') {
     tunnelDashboardAccess: config.tunnelDashboardAccess,
     tunnelEnabled: config.tunnelEnabled,
     currentAdminIp,
+    // Authoritative answer for UI locking: whether THIS request arrived through
+    // the public tunnel. The console must not re-derive this from the hostname.
+    tunnelClientView,
     serverTimeZone: getResolvedTimeZone(),
     payloadRules: config.payloadRules,
     proxyErrorKeywords: config.proxyErrorKeywords,
@@ -749,7 +770,7 @@ function buildRuntimeDatabaseState(saved: RuntimeDatabaseConfig | null) {
 export async function settingsRoutes(app: FastifyInstance) {
   await app.get('/api/settings/runtime', async (request) => {
     const currentAdminIp = getTrustedClientIp(request);
-    return getRuntimeSettingsResponse(currentAdminIp);
+    return getRuntimeSettingsResponse(currentAdminIp, isTunnelAdminRequest(request));
   });
 
   // User profile (display name) persisted in the settings table.
@@ -799,7 +820,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     const currentRequestIp = getTrustedClientIp(request);
 
     // Tunnel clients must not change session/security or tunnel access policy.
-    if (isLikelyTunnelRequest(request as any)) {
+    if (isTunnelAdminRequest(request)) {
       const blockedSecurityKeys = [
         body.adminIpAllowlist !== undefined ? 'adminIpAllowlist' : null,
         body.tunnelDashboardAccess !== undefined ? 'tunnelDashboardAccess' : null,
@@ -829,19 +850,24 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
     }
 
-    const barkTouched = body.barkUrl !== undefined || body.barkEnabled !== undefined;
-    const nextBarkUrl = body.barkUrl !== undefined
-      ? String(body.barkUrl || '').trim()
-      : config.barkUrl;
-    const nextBarkEnabled = body.barkEnabled !== undefined
-      ? !!body.barkEnabled
-      : config.barkEnabled;
-    if (barkTouched && nextBarkEnabled) {
-      if (!nextBarkUrl) {
-        return reply.code(400).send({ success: false, message: 'Bark URL 不能为空（启用 Bark 时）' });
-      }
-      if (!isValidHttpUrl(nextBarkUrl)) {
-        return reply.code(400).send({ success: false, message: 'Bark URL 无效，请填写 http/https 地址' });
+    const notifyChannelsTouched = body.notifyChannels !== undefined;
+    if (notifyChannelsTouched) {
+      const seen = new Set<string>();
+      for (const row of (body.notifyChannels ?? []) as Array<{ id?: unknown; url?: unknown; enabled?: unknown }>) {
+        if (typeof row?.id !== 'string' || !row.id.trim()) {
+          return reply.code(400).send({ success: false, message: '推送通道缺少 id' });
+        }
+        if (seen.has(row.id)) {
+          return reply.code(400).send({ success: false, message: '推送通道 id 重复' });
+        }
+        seen.add(row.id);
+        const channelUrl = String(row.url || '').trim();
+        if (row.enabled && !channelUrl) {
+          return reply.code(400).send({ success: false, message: '启用的推送通道必须填写地址' });
+        }
+        if (channelUrl && !isValidHttpUrl(channelUrl)) {
+          return reply.code(400).send({ success: false, message: '推送通道地址无效，请填写 http/https 地址' });
+        }
       }
     }
 
@@ -1039,11 +1065,11 @@ export async function settingsRoutes(app: FastifyInstance) {
         });
       }
 
-      // Fork policy: batch probe is disabled unless MODEL_AVAILABILITY_PROBE_ALLOW=true.
+      // Local policy: automatic model calls require the deployment allow flag.
       if (nextValue && !config.modelAvailabilityProbeAllow) {
         return reply.code(403).send({
           success: false,
-          message: '当前版本已禁用批量测活。如需启用请设置 MODEL_AVAILABILITY_PROBE_ALLOW=true 后重启服务。',
+          message: '当前部署未允许自动模型测活。如需启用请设置 MODEL_AVAILABILITY_PROBE_ALLOW=true 后重启服务。',
         });
       }
 
@@ -1053,10 +1079,8 @@ export async function settingsRoutes(app: FastifyInstance) {
       await upsertSetting('model_availability_probe_enabled', nextValue);
       config.modelAvailabilityProbeEnabled = nextValue && config.modelAvailabilityProbeAllow;
       if (config.modelAvailabilityProbeEnabled) {
-        startModelAvailabilityProbeScheduler();
         startChannelProbeScheduler();
       } else {
-        stopModelAvailabilityProbeScheduler();
         stopChannelProbeScheduler();
       }
     }
@@ -1415,20 +1439,23 @@ export async function settingsRoutes(app: FastifyInstance) {
       upsertSetting('webhook_enabled', config.webhookEnabled);
     }
 
-    if (body.barkUrl !== undefined) {
-      if (String(body.barkUrl || '').trim() !== config.barkUrl) {
-        changedLabels.push('Bark 地址');
+    if (body.notifyChannels !== undefined) {
+      const existingChannels = config.notifyChannels;
+      const nextChannels = (body.notifyChannels ?? []).map((ch) => ({
+        id: ch.id,
+        url: String(ch.url || '').trim(),
+        enabled: !!ch.enabled,
+        label: typeof ch.label === 'string' ? ch.label.trim() : undefined,
+        kind: ch.kind,
+        secret: String(ch.secret || '').trim()
+          || existingChannels.find((e) => e.id === ch.id)?.secret
+          || '',
+      }));
+      if (JSON.stringify(nextChannels) !== JSON.stringify(existingChannels)) {
+        changedLabels.push('推送通道');
       }
-      config.barkUrl = String(body.barkUrl || '').trim();
-      upsertSetting('bark_url', config.barkUrl);
-    }
-
-    if (body.barkEnabled !== undefined) {
-      if (!!body.barkEnabled !== config.barkEnabled) {
-        changedLabels.push('Bark 开关');
-      }
-      config.barkEnabled = !!body.barkEnabled;
-      upsertSetting('bark_enabled', config.barkEnabled);
+      config.notifyChannels = nextChannels;
+      upsertSetting('notify_channels', nextChannels);
     }
 
     if (body.serverChanEnabled !== undefined) {
@@ -1678,6 +1705,17 @@ export async function settingsRoutes(app: FastifyInstance) {
       upsertSetting('proxy_route_probe_rate', normalized);
     }
 
+    if (body.proxyConcurrencySpreadEnabled !== undefined) {
+      const nextValue = body.proxyConcurrencySpreadEnabled === true;
+      if (nextValue !== config.proxyConcurrencySpreadEnabled) {
+        changedLabels.push(
+          `并发分散路由（${config.proxyConcurrencySpreadEnabled ? '开' : '关'} -> ${nextValue ? '开' : '关'}）`,
+        );
+      }
+      config.proxyConcurrencySpreadEnabled = nextValue;
+      upsertSetting('proxy_concurrency_spread_enabled', nextValue);
+    }
+
     if (body.routeProbabilityFloor !== undefined) {
       const nextFloor = Number(body.routeProbabilityFloor);
       if (!Number.isFinite(nextFloor) || nextFloor < 0.03 || nextFloor > 0.15) {
@@ -1734,7 +1772,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     return {
       success: true,
       message: '运行时设置已更新',
-      ...await getRuntimeSettingsResponse(currentRequestIp),
+      ...await getRuntimeSettingsResponse(currentRequestIp, isTunnelAdminRequest(request)),
     };
   });
 
@@ -1747,6 +1785,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.put<{ Body: unknown }>('/api/settings/database/runtime', async (request, reply) => {
+    if (rejectTunnelAdminAction(request, reply, '切换运行时数据库')) return;
     try {
       const parsedBody = parseDatabaseMigrationPayload(request.body);
       if (!parsedBody.success) {
@@ -1813,6 +1852,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Body: unknown }>('/api/settings/database/migrate', async (request, reply) => {
+    if (rejectTunnelAdminAction(request, reply, '迁移数据库')) return;
     try {
       const parsedBody = parseDatabaseMigrationPayload(request.body);
       if (!parsedBody.success) {
@@ -1852,6 +1892,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Body: unknown }>('/api/settings/backup/import', async (request, reply) => {
+    if (rejectTunnelAdminAction(request, reply, '导入备份数据')) return;
     const parsedBody = parseBackupImportPayload(request.body);
     if (!parsedBody.success) {
       return reply.code(400).send({ success: false, message: '导入数据格式错误：需要 JSON 对象' });
@@ -1938,7 +1979,8 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/api/settings/backup/webdav/import', async (_, reply) => {
+  app.post('/api/settings/backup/webdav/import', async (request, reply) => {
+    if (rejectTunnelAdminAction(request, reply, '从 WebDAV 导入备份')) return;
     try {
       const result = await importBackupFromWebdav();
       for (const item of result.appliedSettings) {
@@ -2116,6 +2158,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/settings/maintenance/factory-reset', async (request, reply) => {
+    if (rejectTunnelAdminAction(request, reply, '恢复出厂设置')) return;
     const body = (request.body || {}) as { confirm?: unknown };
     if (body.confirm !== true) {
       return reply.code(400).send({

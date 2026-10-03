@@ -41,6 +41,7 @@ export function SortableChannelRow({
   onTokenDraftChange,
   onSaveToken,
   onDeleteChannel,
+  onResetChannel,
   onToggleEnabled,
   onSiteBlockModel,
 }: SortableChannelRowProps) {
@@ -216,7 +217,7 @@ export function SortableChannelRow({
               {channel.manualOverride ? (
                 <StatusPill tone="warning"
                   style={{ fontSize: 10 }}
-                  data-tooltip={suppressTooltips ? undefined : '该通道由用户手动添加，而非系统自动生成'}
+                  data-tooltip={suppressTooltips ? undefined : '该通道已被手动配置，系统不会自动重建覆盖；可点击「恢复默认」清除手动配置（统计保留）'}
                 >
                   手动配置
                 </StatusPill>
@@ -346,12 +347,22 @@ export function SortableChannelRow({
                     {channel.enabled === false ? '启用' : '禁用'}
                   </button>
 
-                  {onSiteBlockModel && channel.site?.id ? (
+                  {onSiteBlockModel && channel.accountId ? (
                     <button
                       onClick={onSiteBlockModel}
                       className="btn btn-link btn-link-warning"
                     >
-                      站点屏蔽
+                      屏蔽模型
+                    </button>
+                  ) : null}
+
+                  {channel.manualOverride && onResetChannel ? (
+                    <button
+                      onClick={onResetChannel}
+                      className="btn btn-link"
+                      data-tooltip={suppressTooltips ? undefined : '清除该通道的手动配置，恢复为系统派生的默认状态；累计统计会保留'}
+                    >
+                      恢复默认
                     </button>
                   ) : null}
 
@@ -460,7 +471,7 @@ export function SortableChannelRow({
         {channel.manualOverride ? (
           <StatusPill tone="warning"
             style={{ fontSize: 10 }}
-            data-tooltip={suppressTooltips ? undefined : '该通道由用户手动添加，而非系统自动生成'}
+            data-tooltip={suppressTooltips ? undefined : '该通道已被手动配置，系统不会自动重建覆盖；可点击「恢复默认」清除手动配置（统计保留）'}
           >
             手动配置
           </StatusPill>
@@ -592,13 +603,23 @@ export function SortableChannelRow({
           </button>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            {onSiteBlockModel && channel.site?.id ? (
+            {channel.manualOverride && onResetChannel ? (
+              <button
+                onClick={onResetChannel}
+                className="btn btn-link"
+                data-tooltip={suppressTooltips ? undefined : '清除该通道的手动配置，恢复为系统派生的默认状态；累计统计会保留'}
+              >
+                恢复默认
+              </button>
+            ) : null}
+
+            {onSiteBlockModel && channel.accountId ? (
               <button
                 onClick={onSiteBlockModel}
                 className="btn btn-link btn-link-warning"
-                data-tooltip={suppressTooltips ? undefined : `将此模型加入站点「${channel.site?.name || '未知'}」的禁用列表，rebuild 后该站点的此模型通道将不再生成`}
+                data-tooltip={suppressTooltips ? undefined : `将此模型加入该账号（站点「${channel.site?.name || '未知'}」）的禁用列表，rebuild 后该账号的此模型通道将不再生成，同站点其他账号不受影响`}
               >
-                站点屏蔽
+                屏蔽模型
               </button>
             ) : null}
 

@@ -15,16 +15,9 @@ export const DESKTOP_ENV_TEMPLATE = `# ─────────────�
 # ─────────────────────────────────────────────────────────────
 
 # ── 测活 / 探活 ─────────────────────────────────────────────
-# 模型可用性批量测活（默认关闭，需 MODEL_AVAILABILITY_PROBE_ALLOW 与
-# MODEL_AVAILABILITY_PROBE_ENABLED 同时为 true 才生效；也可以在
-# 后台「设置」中开关）。
-MODEL_AVAILABILITY_PROBE_ENABLED=false
-# 批量测活间隔（毫秒），默认 1800000（30 分钟），下限 60000。
-# MODEL_AVAILABILITY_PROBE_INTERVAL_MS=1800000
-# 批量测活单次超时（毫秒），默认 30000，下限 3000。
+# 按需模型探测（模型市场「立即探测」、站点刷新后探测）单次超时（毫秒），
+# 默认 30000，下限 3000。
 # MODEL_AVAILABILITY_PROBE_TIMEOUT_MS=30000
-# 批量测活并发数，默认 1，上限 2。
-# MODEL_AVAILABILITY_PROBE_CONCURRENCY=1
 
 # 通道心跳测活（活跃通道保活 + 冷却恢复探测）。
 # 心跳扫描间隔（毫秒），默认 120000（2 分钟），下限 60000。
@@ -45,7 +38,6 @@ MODEL_AVAILABILITY_PROBE_ENABLED=false
 # ── 通知 ────────────────────────────────────────────────────
 # 通知渠道建议在后台「通知设置」页面配置；如需脚本注入可在此覆盖。
 # WEBHOOK_URL=
-# BARK_URL=
 # SERVERCHAN_KEY=
 # TELEGRAM_ENABLED=false
 # TELEGRAM_BOT_TOKEN=

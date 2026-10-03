@@ -1,12 +1,13 @@
 import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
+import { normalizeIp } from '../../middleware/clientIp.js';
 import { config } from '../../config.js';
 import { eq } from 'drizzle-orm';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { secretsEqual } from '../../middleware/auth.js';
 import { parseAuthChangePayload } from '../../contracts/supportRoutePayloads.js';
-import { isLikelyTunnelRequest } from '../../services/cloudflareTunnelService.js';
+import { rejectTunnelAdminAction } from '../../tunnelAccessPolicy.js';
 
 const limitAdminTokenChange = createRateLimitGuard({
   bucket: 'auth-change',
@@ -20,12 +21,7 @@ export async function authRoutes(app: FastifyInstance) {
     '/api/settings/auth/change',
     { preHandler: [limitAdminTokenChange] },
     async (request, reply) => {
-    if (isLikelyTunnelRequest(request as any)) {
-      return reply.code(403).send({
-        success: false,
-        message: '通过公网隧道时不允许修改管理员登录令牌。请在本机/内网控制台操作。',
-      });
-    }
+    if (rejectTunnelAdminAction(request, reply, '修改管理员登录令牌')) return;
 
     const parsedBody = parseAuthChangePayload(request.body);
     if (!parsedBody.success) {
@@ -74,7 +70,7 @@ export async function authRoutes(app: FastifyInstance) {
   );
 
   // Get masked current token (for display)
-  app.get('/api/settings/auth/info', async () => {
+  app.get('/api/settings/auth/info', async (request) => {
     const token = config.authToken;
     const masked = token.length > 8
       ? token.slice(0, 4) + '****' + token.slice(-4)
@@ -84,11 +80,11 @@ export async function authRoutes(app: FastifyInstance) {
     // token (buildDesktopServerEnv). Until the user changes it from the UI and
     // it is persisted to the settings table, there is no way for them to know
     // that value. Expose it here as bootstrapToken so the login screen can show
-    // it once. Once a row exists in settings for 'auth_token' the secret has
-    // been customized and we stop exposing the current token.
+    // it once. To keep the live token off the LAN, only expose when the
+    // request arrives from the local loopback (same machine).
     let bootstrapToken: string | null = null;
     const isDesktop = process.env.METAPI_DESKTOP === '1';
-    if (isDesktop) {
+    if (isDesktop && normalizeIp(request.ip) === '127.0.0.1') {
       const persisted = await db.select().from(schema.settings).where(eq(schema.settings.key, 'auth_token')).get();
       if (!persisted) {
         bootstrapToken = token;

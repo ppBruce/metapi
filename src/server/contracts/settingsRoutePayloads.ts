@@ -8,7 +8,6 @@ const runtimeSettingsPayloadSchema = z.object({
   sensitiveWordDetectionEnabled: z.boolean().optional(),
   antiProbeMinTextLength: z.number().optional(),
   webhookEnabled: z.boolean().optional(),
-  barkEnabled: z.boolean().optional(),
   serverChanEnabled: z.boolean().optional(),
   telegramEnabled: z.boolean().optional(),
   smtpEnabled: z.boolean().optional(),
@@ -86,8 +85,8 @@ function formatSettingsPayloadError(error: z.ZodError): string {
   if (firstPath === 'modelAvailabilityProbeEnabled') {
     return '自动模型测活开关格式无效：需要 boolean';
   }
-  if (firstPath === 'barkEnabled') {
-    return 'Bark 开关格式无效：需要 boolean';
+  if (firstPath === 'notifyChannels') {
+    return 'notifyChannels 格式无效';
   }
   if (firstPath === 'serverChanEnabled') {
     return 'Server 酱开关格式无效：需要 boolean';

@@ -66,7 +66,7 @@ import {
   resolveProxyChannelFirstByteTimeoutMs,
 } from '../../services/proxyChannelRetry.js';
 import { createRequestTraceId } from '../../services/requestTraceId.js';
-import { mapUpstreamErrorForClient, resolveSiteProtocolProfile } from '../../shared/siteProtocolProfile.js';
+import { mapUpstreamErrorForClient } from '../../shared/siteProtocolProfile.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { shouldAbortSameSiteEndpointFallback, resolveFailoverBackoffMs, sleepMs, canRetryInPlaceForRecoveringFailure, isRecoveringTransientFailure, shouldGraceRetryInPlaceOnce } from '../../services/proxyRetryPolicy.js';
 import {
@@ -82,6 +82,7 @@ import {
   selectSurfaceChannelForAttempt,
   trySurfaceOauthRefreshRecovery,
   wireStreamCancelOnClientDisconnect,
+  wireReplyGoneAbortSignal,
 } from './sharedSurface.js';
 import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.js';
 import {
@@ -257,6 +258,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
     const lastRetryFailure = {
       current: null as ReturnType<typeof finalizeRetryAsUpstreamFailure> | null,
     };
+    // Non-SSE body read guards, same as chatSurface: an upstream that stalls
+    // mid-body must fail on its own deadline (stream idle window) and a
+    // downstream disconnect must cancel the read instead of draining it.
+    const bodyReadGuards = {
+      idleTimeoutMs: resolveProxyStreamIdleTimeoutMs(),
+      signal: wireReplyGoneAbortSignal(reply),
+    };
     const rememberRetryFailure = (status: number, message: string) => {
       const mapped = mapUpstreamErrorForClient(status, message);
       lastRetryFailure.current = {
@@ -270,7 +278,28 @@ export async function handleOpenAiResponsesSurfaceRequest(
         },
       };
     };
+    // Hard cap on loop iterations (attempts + recovery pass), same failsafe as
+    // chatSurface: every continue path is currently bounded, but a future gate
+    // regression must hit a terminal 502 instead of a hot loop.
+    let loopGuard = 0;
+    const LOOP_GUARD_MAX = 16;
     while (true) {
+      if (++loopGuard > LOOP_GUARD_MAX) {
+        console.error(`[proxy/responses] attempt loop exceeded LOOP_GUARD_MAX (${LOOP_GUARD_MAX}); failing request.`);
+        await reportProxyAllFailed({
+          model: requestedModel,
+          reason: 'Attempt loop exceeded the safety cap',
+          outcome: 'request_failed',
+          attemptedChannels: excludeChannelIds.length,
+          configuredAttempts: maxRetries + 1,
+        });
+        const guardPayload = {
+          error: { message: 'Upstream attempt loop exceeded the safety cap', type: 'server_error' as const },
+        };
+        await finalizeDebugFailure(502, guardPayload, null);
+        sendReplyIfWritable(reply, 502, guardPayload);
+        return;
+      }
       if (retryCount > maxRetries && !recoveryPass) {
         if (allFailuresRecovering && config.proxyFailoverBackoffMs > 0) {
           // One recovery pass: clear exclusions so the previously-good channel
@@ -516,10 +545,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
             oauthProvider: oauth?.provider,
             oauthProjectId: oauth?.projectId,
             sitePlatform: selected.site.platform,
-            requireCodexClient: resolveSiteProtocolProfile({
-              protocolProfile: selected.site.protocolProfile,
-              customHeaders: selected.site.customHeaders,
-            }).requireCodexClient,
             siteUrl: siteApiBaseUrl,
             openaiBody: openAiBody,
             downstreamFormat: 'responses',
@@ -803,6 +828,14 @@ export async function handleOpenAiResponsesSurfaceRequest(
         errorMessage: busyMessage,
         retryCount,
       });
+      // A saturated channel must leave a failure mark: without one the retry
+      // below reselects the same "Channel busy" channel.
+      await failureToolkit.recordChannelFailure({
+        selected,
+        modelName,
+        status: 503,
+        errorText: busyMessage,
+      });
       if (
         canFailoverToNextChannel(reply)
         && retryCount < maxRetries
@@ -933,7 +966,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             },
           });
           if (!upstreamContentType.includes('text/event-stream')) {
-            const rawText = await readRuntimeResponseText(upstream);
+            const rawText = await readRuntimeResponseText(upstream, bodyReadGuards);
             if (looksLikeResponsesSseText(rawText)) {
               startSseResponse();
               const streamResult = await streamSession.run(
@@ -1057,6 +1090,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	                if (inPlaceRecoveringRetry) {
 	                  inPlaceRetryChannel = selected;
 	                  await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
+	                  retryCount += 1;
 	                  continue;
 	                }
 	                if (failureOutcome.action === 'retry') {
@@ -1132,7 +1166,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 
           let replayReader: ReturnType<typeof createSingleChunkStreamReader> | null = null;
           if (websocketTransportRequest) {
-            const rawText = await readRuntimeResponseText(upstream);
+            const rawText = await readRuntimeResponseText(upstream, bodyReadGuards);
             if (looksLikeResponsesSseText(rawText)) {
               try {
                 const collectedPayload = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
@@ -1307,7 +1341,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           rawText = collected.rawText;
           upstreamData = collected.payload;
         } else {
-          rawText = await readRuntimeResponseText(upstream);
+          rawText = await readRuntimeResponseText(upstream, bodyReadGuards);
           if (looksLikeResponsesSseText(rawText)) {
             upstreamData = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
           } else {
@@ -1380,6 +1414,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	            if (inPlaceRecoveringRetry) {
 	              inPlaceRetryChannel = selected;
 	              await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
+	              retryCount += 1;
 	              continue;
 	            }
 	            if (failureOutcome.action === 'retry') {
@@ -1511,6 +1546,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               if (inPlaceRecoveringRetry) {
                 inPlaceRetryChannel = selected;
                 await sleepMs(resolveFailoverBackoffMs(endpointFailureStatus || 502, err?.message || null, config.proxyFailoverBackoffMs));
+                retryCount += 1;
                 continue;
               }
               if (failureOutcome.action === 'retry') {
@@ -1567,6 +1603,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             if (inPlaceRecoveringRetry) {
               inPlaceRetryChannel = selected;
               await sleepMs(resolveFailoverBackoffMs(502, err?.message || null, config.proxyFailoverBackoffMs));
+              retryCount += 1;
               continue;
             }
             if (failureOutcome.action === 'retry') {

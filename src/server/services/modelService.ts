@@ -11,7 +11,7 @@ import {
 } from './accountTokenService.js';
 import {mergeAccountExtraConfig, resolveProxyUrlFromExtraConfig, requiresManagedAccountTokens, resolvePlatformUserId, supportsDirectAccountRoutingConnection} from './accountExtraConfig.js';
 import { invalidateTokenRouterCache } from './tokenRouter.js';
-import { resolveModelAvailabilityProbeTimeoutMs } from '../config.js';
+import { config, resolveModelAvailabilityProbeTimeoutMs } from '../config.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { clearAllRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js';
 import { rebuildAllPatternRouteChannels } from './patternRouteChannelSyncService.js';
@@ -32,7 +32,7 @@ import {
 } from './platformDiscoveryRegistry.js';
 import { probeRuntimeModel, type RuntimeModelProbeStatus } from './runtimeModelProbe.js';
 import { canonicalizeModelName } from '../shared/modelCanonicalization.js';
-import { siteProtocolRequiresCodexClient } from '../shared/siteProtocolProfile.js';
+import { isCodexGatedPlatform } from '../shared/codexGatedPlatforms.js';
 import {
   isModelDisabledForSite,
   loadSiteDisabledModelsIndex,
@@ -60,14 +60,20 @@ let inFlightRefreshModelsAndRebuildRoutes: Promise<{
   refresh: ModelRefreshResult[];
   rebuild: Awaited<ReturnType<typeof rebuildTokenRoutesFromAvailability>>;
 }> | null = null;
-let inFlightRefreshModelsAndRebuildRoutesStartedAtMs = 0;
-
+let inFlightRefreshModelsAndRebuildRoutesHeartbeatMs = 0;
 // A refresh pass can wedge on an unbounded upstream call; the single-flight
 // guard must not hand that stale pass to every later caller forever. After
-// this age, later callers start a fresh pass while the stale one drains in
-// the background (2026-09-12: a wedged pass stayed pending 15h and hung both
-// the scheduler and every request that awaited the refresh).
-const REFRESH_INFLIGHT_MAX_AGE_MS = 10 * 60_000;
+// this much time WITHOUT PROGRESS, later callers start a fresh pass while the
+// stale one drains in the background (2026-09-12: a wedged pass stayed pending
+// 15h and hung both the scheduler and every request that awaited the refresh).
+//
+// Progress is tracked by heartbeat (each finished account batch bumps it), not
+// by the pass start time: a healthy multi-account pass can legitimately run
+// longer than 10 minutes (N batches x 8-12s discovery timeouts + full route
+// rebuild). Age-based staleness would overlap a slow-but-advancing pass with a
+// second one, double-writing route/channel tables; heartbeat-based staleness
+// only fires when the pass is genuinely wedged.
+const REFRESH_INFLIGHT_MAX_IDLE_MS = 5 * 60_000;
 
 type ModelRefreshErrorCode = 'timeout' | 'unauthorized' | 'empty_models' | 'unknown';
 type ModelRefreshSkipCode = 'site_disabled' | 'adapter_or_status';
@@ -122,6 +128,7 @@ export type ModelRefreshSuccessResult = {
     scope: 'single' | 'all';
     probed: number;
     unsupported: number;
+    inconclusive: number;
     details: Array<{
       modelName: string;
       status: RuntimeModelProbeStatus;
@@ -409,6 +416,7 @@ export type ProbeSiteModelsResult = {
   scope: 'single' | 'all';
   probed: number;
   unsupported: number;
+  inconclusive: number;
   details: Array<{ modelName: string; status: RuntimeModelProbeStatus; latencyMs: number | null; reason?: string }>;
 };
 
@@ -423,7 +431,7 @@ export async function probeSiteModels(
   onProgress?: (event: ProbeSiteModelsProgress) => void,
 ): Promise<ProbeSiteModelsResult> {
   const empty = (scope: 'single' | 'all', error: string): ProbeSiteModelsResult =>
-    ({ success: false, error, scope, probed: 0, unsupported: 0, details: [] });
+    ({ success: false, error, scope, probed: 0, unsupported: 0, inconclusive: 0, details: [] });
 
   const site = await db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
   if (!site) return empty('single', '站点不存在');
@@ -468,7 +476,7 @@ export async function probeSiteModels(
 
   onProgress?.({ type: 'start', scope, modelsCount: modelsToProbe.length, modelsToProbe });
 
-  // Probe models concurrently, limited by modelAvailabilityProbeConcurrency
+  // Probe models concurrently, limited by the caller-provided concurrency
   const concurrency = Math.max(1, options?.concurrency ?? 10);
   const detailsMap = new Map<string, { modelName: string; status: RuntimeModelProbeStatus; latencyMs: number | null; reason?: string }>();
 
@@ -510,7 +518,12 @@ export async function probeSiteModels(
   // Restore original model order for the final details list
   const details = modelsToProbe.map((m) => detailsMap.get(m)!);
 
-  const unsupportedModels = details.filter((d) => d.status === 'unsupported' || d.status === 'inconclusive').map((d) => d.modelName);
+  // Only a definite 'unsupported' verdict may disable a model. 'inconclusive'
+  // means the probe reached no conclusion (timeout / transport error), so
+  // treating it as unsupported would let a single transient failure write a
+  // permanent site_disabled_models row — there is no automatic recovery path.
+  const unsupportedModels = details.filter((d) => d.status === 'unsupported').map((d) => d.modelName);
+  const inconclusiveModels = details.filter((d) => d.status === 'inconclusive').map((d) => d.modelName);
   if (unsupportedModels.length > 0) {
     const checkedAt = new Date().toISOString();
     // Two statements for the whole batch instead of two per model: on SQLite each
@@ -524,7 +537,7 @@ export async function probeSiteModels(
       ))
       .run();
     await db.insert(schema.siteDisabledModels)
-      .values(unsupportedModels.map((modelName) => ({ siteId, modelName })))
+      .values(unsupportedModels.map((modelName) => ({ siteId, accountId: account.id, modelName })))
       .onConflictDoNothing()
       .run();
     for (const modelName of unsupportedModels) {
@@ -539,7 +552,29 @@ export async function probeSiteModels(
     });
   }
 
-  return { success: true, scope, probed: details.length, unsupported: unsupportedModels.length, details };
+  // A successful probe is positive proof the upstream is reachable: refresh the
+  // connectivity mark, otherwise a stale `connectivity = false` (soft-avoided by
+  // the router) is never contradicted — probes only bumped checkedAt, which kept
+  // the negative mark "fresh" so its TTL never expired.
+  const supportedModels = details.filter((d) => d.status === 'supported').map((d) => d.modelName);
+  if (supportedModels.length > 0) {
+    await db.update(schema.modelAvailability)
+      .set({ available: true, connectivity: true, checkedAt: new Date().toISOString() })
+      .where(and(
+        eq(schema.modelAvailability.accountId, account.id),
+        inArray(schema.modelAvailability.modelName, supportedModels),
+      ))
+      .run();
+  }
+
+  return {
+    success: true,
+    scope,
+    probed: details.length,
+    unsupported: unsupportedModels.length,
+    inconclusive: inconclusiveModels.length,
+    details,
+  };
 }
 
 async function runPostRefreshProbeIfEnabled(params: {
@@ -547,6 +582,7 @@ async function runPostRefreshProbeIfEnabled(params: {
   site: typeof schema.sites.$inferSelect;
   discoveredModels: string[];
 }): Promise<ModelRefreshSuccessResult['postProbeResult']> {
+  if (!config.modelAvailabilityProbeAllow || !config.modelAvailabilityProbeEnabled) return undefined;
   if (!params.site.postRefreshProbeEnabled) return undefined;
   if (params.discoveredModels.length === 0) return undefined;
 
@@ -590,8 +626,10 @@ async function runPostRefreshProbeIfEnabled(params: {
     }
   }
 
-  // Handle unsupported models
-  const unsupportedModels = details.filter((d) => d.status === 'unsupported' || d.status === 'inconclusive').map((d) => d.modelName);
+  // Handle unsupported models. 'inconclusive' is deliberately excluded: it is
+  // an unfinished probe, not a verdict, and must not disable anything.
+  const unsupportedModels = details.filter((d) => d.status === 'unsupported').map((d) => d.modelName);
+  const inconclusiveModels = details.filter((d) => d.status === 'inconclusive').map((d) => d.modelName);
   if (unsupportedModels.length > 0) {
     const checkedAt = new Date().toISOString();
     // Batched for the same reason as the manual-probe path above.
@@ -603,7 +641,7 @@ async function runPostRefreshProbeIfEnabled(params: {
       ))
       .run();
     await db.insert(schema.siteDisabledModels)
-      .values(unsupportedModels.map((modelName) => ({ siteId: params.site.id, modelName })))
+      .values(unsupportedModels.map((modelName) => ({ siteId: params.site.id, accountId: params.account.id, modelName })))
       .onConflictDoNothing()
       .run();
     // Update account health
@@ -622,10 +660,24 @@ async function runPostRefreshProbeIfEnabled(params: {
     });
   }
 
+  // Same positive-proof refresh as the manual-probe path: a supported verdict
+  // clears a stale `connectivity = false` instead of letting it ride on TTL.
+  const supportedModels = details.filter((d) => d.status === 'supported').map((d) => d.modelName);
+  if (supportedModels.length > 0) {
+    await db.update(schema.modelAvailability)
+      .set({ available: true, connectivity: true, checkedAt: new Date().toISOString() })
+      .where(and(
+        eq(schema.modelAvailability.accountId, params.account.id),
+        inArray(schema.modelAvailability.modelName, supportedModels),
+      ))
+      .run();
+  }
+
   return {
     scope,
     probed: details.length,
     unsupported: unsupportedModels.length,
+    inconclusive: inconclusiveModels.length,
     details,
   };
 }
@@ -1285,15 +1337,12 @@ async function doRefreshModelsForAccount(
     });
   }
 
-  // Codex-gated NewAPI sites ("Codex 兼容" / requireCodexClient) reject
-  // /v1/models unless the caller presents the Codex CLI client fingerprint —
-  // verified on AgentRouter (401 "unauthorized client detected" without it,
-  // full model list with it). Chat traffic gets the fingerprint from
-  // upstreamRequestBuilder; discovery does not, so pass it into the adapter.
-  const codexClientFingerprint = siteProtocolRequiresCodexClient({
-    protocolProfile: site.protocolProfile,
-    customHeaders: site.customHeaders,
-  });
+  // Codex-gated NewAPI-class platforms reject /v1/models unless the caller
+  // presents the Codex CLI client fingerprint — verified on AgentRouter
+  // (401 "unauthorized client detected" without it, full model list with it).
+  // Identity is face/platform-driven (no user-facing site switch): discovery
+  // carries the fingerprint automatically on gated platforms.
+  const codexClientFingerprint = isCodexGatedPlatform(site.platform);
 
   const accountModels = new Map<string, string>();   // lowercase key → original name (first-wins)
   const modelLatency = new Map<string, number | null>();
@@ -1553,6 +1602,12 @@ async function refreshModelsForAllActiveAccounts(): Promise<ModelRefreshResult[]
     const batch = accounts.slice(offset, offset + MODEL_REFRESH_BATCH_SIZE);
     const batchResults = await Promise.all(batch.map(async (account: any) => refreshModelsForAccount(account.id)));
     results.push(...batchResults);
+    // Heartbeat: a finished batch means this pass is advancing, not wedged.
+    // The single-flight staleness guard keys off this timestamp so a healthy
+    // slow pass (N batches x discovery timeouts) is never overlapped by a
+    // second pass mid-run. Uses the injectable clock so tests can drive the
+    // heartbeat/staleness relationship deterministically.
+    inFlightRefreshModelsAndRebuildRoutesHeartbeatMs = refreshInflightNow();
   }
   return results;
 }
@@ -1639,7 +1694,7 @@ export async function rebuildTokenRoutesFromAvailability() {
   ) => {
     const sourceModel = (modelNameRaw || '').trim();
     if (!sourceModel) return;
-    if (isModelDisabledForSite(disabledModelsIndex, siteId, sourceModel)) return;
+    if (isModelDisabledForSite(disabledModelsIndex, siteId, sourceModel, accountId)) return;
     const modelName = canonicalizeModelName(sourceModel) || sourceModel;
     if (!modelCandidates.has(modelName)) modelCandidates.set(modelName, new Map());
     const candidate = { accountId, tokenId, oauthRouteUnitId, sourceModel };
@@ -1734,6 +1789,7 @@ export async function rebuildTokenRoutesFromAvailability() {
         disabledModelsIndex,
         channelSiteId,
         channel.sourceModel,
+        channel.accountId,
       );
       if (desiredKeys.has(channelKey) && !forceRemoveDisabled) {
         continue;
@@ -1798,11 +1854,15 @@ export async function rebuildTokenRoutesFromAvailability() {
       routeIds: [],
       removedChannels: 0,
       createdChannels: 0,
+      updatedChannels: 0,
     };
   createdChannels += patternRouteSync.createdChannels;
   removedChannels += patternRouteSync.removedChannels;
 
-  if (exactRouteTopologyChanged || patternRouteSync.createdChannels > 0 || patternRouteSync.removedChannels > 0) {
+  if (exactRouteTopologyChanged
+    || patternRouteSync.createdChannels > 0
+    || patternRouteSync.removedChannels > 0
+    || patternRouteSync.updatedChannels > 0) {
     await clearAllRouteDecisionSnapshots();
   }
 
@@ -1817,6 +1877,7 @@ export async function rebuildTokenRoutesFromAvailability() {
     rebuiltPatternRoutes: patternRouteSync.rebuiltRoutes,
     patternRouteCreatedChannels: patternRouteSync.createdChannels,
     patternRouteRemovedChannels: patternRouteSync.removedChannels,
+    patternRouteUpdatedChannels: patternRouteSync.updatedChannels,
   };
 }
 
@@ -1826,13 +1887,32 @@ async function runRefreshModelsAndRebuildRoutes() {
   return { refresh, rebuild };
 }
 
+// Injectable clock for tests (single-flight staleness uses wall time).
+let refreshInflightNow: () => number = () => Date.now();
+let refreshInflightStaleTakeoversForTests = 0;
+
+/** Test hook: override the clock used by the single-flight staleness guard. */
+export function __setRefreshInflightClockForTests(clock: { now: () => number }): void {
+  refreshInflightNow = clock.now;
+}
+
+/** Test hook: number of times a fresh pass took over an in-flight (stale) pass. */
+export function __getAndResetRefreshInflightStaleTakeoversForTests(): number {
+  const value = refreshInflightStaleTakeoversForTests;
+  refreshInflightStaleTakeoversForTests = 0;
+  return value;
+}
+
 export async function refreshModelsAndRebuildRoutes() {
-  const nowMs = Date.now();
+  const nowMs = refreshInflightNow();
   if (
     inFlightRefreshModelsAndRebuildRoutes
-    && nowMs - inFlightRefreshModelsAndRebuildRoutesStartedAtMs < REFRESH_INFLIGHT_MAX_AGE_MS
+    && nowMs - inFlightRefreshModelsAndRebuildRoutesHeartbeatMs < REFRESH_INFLIGHT_MAX_IDLE_MS
   ) {
     return inFlightRefreshModelsAndRebuildRoutes;
+  }
+  if (inFlightRefreshModelsAndRebuildRoutes) {
+    refreshInflightStaleTakeoversForTests += 1;
   }
 
   let run!: Promise<{
@@ -1850,6 +1930,6 @@ export async function refreshModelsAndRebuildRoutes() {
     }
   })();
   inFlightRefreshModelsAndRebuildRoutes = run;
-  inFlightRefreshModelsAndRebuildRoutesStartedAtMs = nowMs;
+  inFlightRefreshModelsAndRebuildRoutesHeartbeatMs = nowMs;
   return run;
 }

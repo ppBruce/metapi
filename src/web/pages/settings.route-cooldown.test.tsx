@@ -136,6 +136,7 @@ describe('Settings route cooldown cap', () => {
         routeProbabilityFloor: 0.05,
         routeQuotaExhaustionExclude: true,
         disableCrossProtocolFallback: false,
+        proxyConcurrencySpreadEnabled: true,
       });
     } finally {
       root?.unmount();
@@ -243,6 +244,7 @@ describe('Settings route cooldown cap', () => {
         routeProbabilityFloor: 0.05,
         routeQuotaExhaustionExclude: true,
         disableCrossProtocolFallback: false,
+        proxyConcurrencySpreadEnabled: true,
       });
     } finally {
       root?.unmount();

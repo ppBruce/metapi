@@ -243,6 +243,11 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     config.proxyRouteProbeRate = Math.min(1, Math.max(0, proxyRouteProbeRate));
   }
 
+  const proxyConcurrencySpreadEnabled = parseSettingFromMap<boolean>(settingsMap, 'proxy_concurrency_spread_enabled');
+  if (typeof proxyConcurrencySpreadEnabled === 'boolean') {
+    config.proxyConcurrencySpreadEnabled = proxyConcurrencySpreadEnabled;
+  }
+
   const tokenRouterFailureCooldownMaxSec = parseSettingFromMap<number>(settingsMap, 'token_router_failure_cooldown_max_sec');
   const normalizedFailureCooldownMaxSec = normalizeTokenRouterFailureCooldownMaxSec(tokenRouterFailureCooldownMaxSec);
   if (normalizedFailureCooldownMaxSec != null) {
@@ -258,11 +263,31 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const webhookEnabled = parseSettingFromMap<boolean>(settingsMap, 'webhook_enabled');
   if (typeof webhookEnabled === 'boolean') config.webhookEnabled = webhookEnabled;
 
-  const barkUrl = parseSettingFromMap<string>(settingsMap, 'bark_url');
-  if (typeof barkUrl === 'string') config.barkUrl = barkUrl;
-
-  const barkEnabled = parseSettingFromMap<boolean>(settingsMap, 'bark_enabled');
-  if (typeof barkEnabled === 'boolean') config.barkEnabled = barkEnabled;
+  const notifyChannelsRaw = parseSettingFromMap<unknown>(settingsMap, 'notify_channels');
+  // The stored value is already decoded here; a string form is accepted too so
+  // an env-seeded JSON string hydrates the same way.
+  let notifyChannelsList: unknown = notifyChannelsRaw;
+  if (typeof notifyChannelsRaw === 'string' && notifyChannelsRaw.trim()) {
+    try { notifyChannelsList = JSON.parse(notifyChannelsRaw) as unknown; } catch { notifyChannelsList = null; }
+  }
+  if (notifyChannelsList !== null && notifyChannelsList !== undefined) {
+    if (Array.isArray(notifyChannelsList)) {
+      config.notifyChannels = notifyChannelsList.filter(
+        (c): c is { id: string; url: string; secret: string; enabled: boolean; label?: string; kind?: 'dingtalk' | 'feishu' | 'wecom' | 'custom' } =>
+          typeof c === 'object' && c !== null
+          && typeof (c as { id?: unknown }).id === 'string'
+          && typeof (c as { url?: unknown }).url === 'string',
+      );
+    }
+  } else if (String(config.webhookUrl || '').trim()) {
+    // Legacy single-webhook configuration becomes the first channel.
+    config.notifyChannels = [{
+      id: 'legacy-webhook',
+      url: String(config.webhookUrl).trim(),
+      secret: String(config.webhookSecret || '').trim(),
+      enabled: config.webhookEnabled !== false,
+    }];
+  }
 
   const serverChanEnabled = parseSettingFromMap<boolean>(settingsMap, 'serverchan_enabled');
   if (typeof serverChanEnabled === 'boolean') config.serverChanEnabled = serverChanEnabled;

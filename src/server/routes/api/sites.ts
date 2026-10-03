@@ -18,13 +18,11 @@ import {
   parseSiteBatchPayload,
   parseSiteCreatePayload,
   parseSiteDetectPayload,
-  parseSiteDisabledModelsPayload,
   parseSiteUpdatePayload,
 } from '../../contracts/siteRoutePayloads.js';
 import { normalizeSiteApiEndpointBaseUrl } from '../../services/siteApiEndpointService.js';
 import { analyzePrimarySiteUrl } from '../../../shared/sitePrimaryUrl.js';
-import { probeSiteModels, rebuildTokenRoutesFromAvailability } from '../../services/modelService.js';
-import { clearModelsMarketplaceCache } from './stats.js';
+import { probeSiteModels } from '../../services/modelService.js';
 import { rebuildRoutesBestEffort } from '../../services/routeRefreshWorkflow.js';
 import { invalidateAccountsSnapshot } from '../../services/accountsOverviewService.js';
 
@@ -649,6 +647,46 @@ export async function sitesRoutes(app: FastifyInstance) {
       }
     }
 
+    // Per-key disabled models: shown in the site list so a customized list is
+    // visible without opening each key. Disabled models belong to keys only.
+    const disabledModelRows = await db.select({
+      siteId: schema.siteDisabledModels.siteId,
+      accountId: schema.siteDisabledModels.accountId,
+      modelName: schema.siteDisabledModels.modelName,
+    }).from(schema.siteDisabledModels).all();
+    const usernameById: Record<number, string | null> = {};
+    for (const row of accountRows) {
+      usernameById[row.id] = null;
+    }
+    const usernameRows = await db.select({
+      id: schema.accounts.id,
+      username: schema.accounts.username,
+    }).from(schema.accounts).all();
+    for (const row of usernameRows) {
+      usernameById[row.id] = row.username ?? null;
+    }
+    const disabledModelsBySiteId: Record<number, {
+      total: number;
+      keys: Array<{ accountId: number; username: string | null; count: number }>;
+    }> = {};
+    for (const row of disabledModelRows) {
+      const siteId = Number(row.siteId);
+      if (!Number.isFinite(siteId) || siteId <= 0) continue;
+      const bucket = disabledModelsBySiteId[siteId] ?? (disabledModelsBySiteId[siteId] = { total: 0, keys: [] });
+      bucket.total += 1;
+      if (row.accountId == null) continue;
+      const accountId = Number(row.accountId);
+      const existing = bucket.keys.find((item) => item.accountId === accountId);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        bucket.keys.push({ accountId, username: usernameById[accountId] ?? null, count: 1 });
+      }
+    }
+    for (const bucket of Object.values(disabledModelsBySiteId)) {
+      bucket.keys.sort((a, b) => (a.username || '').localeCompare(b.username || '') || a.accountId - b.accountId);
+    }
+
     return siteRowsWithApiEndpoints.map((site) => ({
       ...site,
       totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
@@ -666,6 +704,7 @@ export async function sitesRoutes(app: FastifyInstance) {
         tokens: tokenCountBySiteId[site.id] || 0,
         oauth: oauthCountBySiteId[site.id] || 0,
       },
+      disabledModels: disabledModelsBySiteId[site.id] || null,
     }));
   });
 
@@ -1167,69 +1206,6 @@ export async function sitesRoutes(app: FastifyInstance) {
     };
   });
 
-  // Get disabled models for a site
-  app.get<{ Params: { id: string } }>('/api/sites/:id/disabled-models', async (request, reply) => {
-    const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
-      return reply.code(400).send({ error: 'Invalid site id' });
-    }
-    const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
-    if (!existingSite) {
-      return reply.code(404).send({ error: 'Site not found' });
-    }
-    const rows = await db.select({ modelName: schema.siteDisabledModels.modelName })
-      .from(schema.siteDisabledModels)
-      .where(eq(schema.siteDisabledModels.siteId, id))
-      .all() as SiteModelNameRow[];
-    return { siteId: id, models: rows.map((r) => r.modelName) };
-  });
-
-  // Update disabled models for a site (full replace)
-  app.put<{ Params: { id: string }; Body: unknown }>('/api/sites/:id/disabled-models', async (request, reply) => {
-    const parsedBody = parseSiteDisabledModelsPayload(request.body);
-    if (!parsedBody.success) {
-      return reply.code(400).send({ error: parsedBody.error });
-    }
-
-    const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
-      return reply.code(400).send({ error: 'Invalid site id' });
-    }
-    const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
-    if (!existingSite) {
-      return reply.code(404).send({ error: 'Site not found' });
-    }
-    const rawModels = parsedBody.data.models;
-    if (!Array.isArray(rawModels)) {
-      return reply.code(400).send({ error: 'models must be an array of strings' });
-    }
-    const models = rawModels
-      .filter((m): m is string => typeof m === 'string')
-      .map((m) => m.trim())
-      .filter((m) => m.length > 0);
-    const uniqueModels = Array.from(new Set(models));
-
-    await db.transaction(async (tx: any) => {
-      await tx.delete(schema.siteDisabledModels)
-        .where(eq(schema.siteDisabledModels.siteId, id))
-        .run();
-
-      if (uniqueModels.length > 0) {
-        await tx.insert(schema.siteDisabledModels).values(
-          uniqueModels.map((modelName) => ({ siteId: id, modelName })),
-        ).run();
-      }
-    });
-
-    invalidateSiteCaches();
-    clearModelsMarketplaceCache();
-    // Drop channels/routes that now hit site-disabled models immediately.
-    rebuildTokenRoutesFromAvailability().catch((err) => {
-      console.warn('[sites] rebuild routes after disabled-models update failed', err);
-    });
-    return { siteId: id, models: uniqueModels };
-  });
-
   // Get all discovered models for a site (from model_availability and token_model_availability)
   app.get<{ Params: { id: string } }>('/api/sites/:id/available-models', async (request, reply) => {
     const id = parseInt(request.params.id);
@@ -1398,8 +1374,12 @@ export async function sitesRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: 'favicon not found' });
       }
 
+      const contentType = result.payload.contentType.toLowerCase().split(';', 1)[0]?.trim() || '';
+      if (!contentType.startsWith('image/')) {
+        return reply.code(415).send({ error: 'favicon content type is not an image' });
+      }
       reply
-        .header('Content-Type', result.payload.contentType)
+        .header('Content-Type', contentType)
         .header('Cache-Control', `public, max-age=${ICON_HTTP_MAX_AGE_SECONDS}`)
         .header('X-Favicon-Source', result.payload.source)
         .header('X-Favicon-Cache', result.cache);

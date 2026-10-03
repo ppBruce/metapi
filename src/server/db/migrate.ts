@@ -107,6 +107,14 @@ function resolveSqliteDbPath(): string {
   if (raw.startsWith('sqlite://')) {
     return resolve(raw.slice('sqlite://'.length).trim());
   }
+  // mysql:// / postgres:// URLs belong to the runtime database picked by
+  // DB_TYPE in index.js. Treating one as a path used to create a junk SQLite
+  // file named after the URL (and crash on read-only rootfs) — refuse instead.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    throw new Error(
+      `DB_URL is not a sqlite database (${raw.split('://')[0]}://...). Set DB_TYPE=sqlite or remove DB_URL; non-sqlite runtimes are initialized by the server itself.`,
+    );
+  }
   return resolve(raw);
 }
 
@@ -627,12 +635,22 @@ function deduplicateLegacySitesForUniqueIndex(sqlite: Database.Database): boolea
     ORDER BY id ASC
   `);
   const rebindAccounts = sqlite.prepare('UPDATE accounts SET site_id = ? WHERE site_id = ?');
-  const mergeDisabledModels = sqlite.prepare(`
-    INSERT OR IGNORE INTO site_disabled_models (site_id, model_name, created_at)
-    SELECT ?, model_name, created_at
-    FROM site_disabled_models
-    WHERE site_id = ?
-  `);
+  // Merge disabled models explicitly instead of relying on a unique index:
+  // site-wide rows (account_id NULL) are distinct to UNIQUE, so INSERT OR IGNORE
+  // would keep duplicates after a legacy site merge.
+  const disabledModelColumns = (sqlite.prepare("PRAGMA table_info('site_disabled_models')").all() as Array<{ name: string }>)
+    .map((column) => column.name);
+  const hasDisabledModelAccountColumn = disabledModelColumns.includes('account_id');
+  const selectDisabledModels = sqlite.prepare(
+    hasDisabledModelAccountColumn
+      ? 'SELECT account_id, model_name, created_at FROM site_disabled_models WHERE site_id = ?'
+      : 'SELECT NULL AS account_id, model_name, created_at FROM site_disabled_models WHERE site_id = ?',
+  );
+  const insertDisabledModel = sqlite.prepare(
+    hasDisabledModelAccountColumn
+      ? 'INSERT INTO site_disabled_models (site_id, account_id, model_name, created_at) VALUES (?, ?, ?, ?)'
+      : 'INSERT INTO site_disabled_models (site_id, model_name, created_at) VALUES (?, ?, ?)',
+  );
   const deleteDisabledModels = sqlite.prepare('DELETE FROM site_disabled_models WHERE site_id = ?');
   const deleteSite = sqlite.prepare('DELETE FROM sites WHERE id = ?');
 
@@ -644,8 +662,21 @@ function deduplicateLegacySitesForUniqueIndex(sqlite: Database.Database): boolea
       if (sites.length <= 1) continue;
 
       const canonicalSiteId = sites[0]!.id;
+      const mergedKeys = new Set(
+        (selectDisabledModels.all(canonicalSiteId) as Array<{ account_id: number | null; model_name: string }>)
+          .map((row) => `${row.account_id ?? 'site'}:${row.model_name}`),
+      );
       for (const site of sites.slice(1)) {
-        mergeDisabledModels.run(canonicalSiteId, site.id);
+        for (const row of selectDisabledModels.all(site.id) as Array<{ account_id: number | null; model_name: string; created_at: string | null }>) {
+          const mergeKey = `${row.account_id ?? 'site'}:${row.model_name}`;
+          if (mergedKeys.has(mergeKey)) continue;
+          mergedKeys.add(mergeKey);
+          if (hasDisabledModelAccountColumn) {
+            insertDisabledModel.run(canonicalSiteId, row.account_id, row.model_name, row.created_at);
+          } else {
+            insertDisabledModel.run(canonicalSiteId, row.model_name, row.created_at);
+          }
+        }
         deleteDisabledModels.run(site.id);
         rebindAccounts.run(canonicalSiteId, site.id);
         siteIdMapping.set(site.id, canonicalSiteId);
@@ -678,6 +709,7 @@ export const __migrateTestUtils = {
   deduplicateLegacySitesForUniqueIndex,
   runSqliteMigrationRecoveryLoop,
   sqliteMigrationRecoveryRetryBudget: SQLITE_MIGRATION_RECOVERY_RETRY_BUDGET,
+  resolveSqliteDbPath,
 };
 
 function bootstrapLegacyDrizzleMigrations(sqlite: Database.Database, migrationsFolder: string): boolean {
@@ -734,4 +766,18 @@ export function runSqliteMigrations(): void {
   console.log('Migration complete.');
 }
 
-runSqliteMigrations();
+// Boot shim for the Dockerfile CMD (`node dist/server/db/migrate.js && node
+// dist/server/index.js`). When DB_URL points at a non-sqlite runtime the
+// migrator has nothing to do — the server initializes that database itself —
+// and resolveSqliteDbPath would otherwise refuse; skip instead of crashing.
+const rawDbUrl = (config.dbUrl || '').trim();
+const isNonSqliteDbUrl = rawDbUrl.length > 0
+  && !rawDbUrl.startsWith('file://')
+  && !rawDbUrl.startsWith('sqlite://')
+  && rawDbUrl !== ':memory:'
+  && /^[a-z][a-z0-9+.-]*:\/\//i.test(rawDbUrl);
+if (isNonSqliteDbUrl) {
+  console.log(`[db] DB_URL targets ${rawDbUrl.split('://')[0]} — sqlite migration skipped (runtime DB is initialized by the server).`);
+} else {
+  runSqliteMigrations();
+}

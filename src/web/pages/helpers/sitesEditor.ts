@@ -24,6 +24,8 @@ export type SiteForm = {
   globalWeight: string;
   protocolProfile: {
     preferResponses: boolean;
+    /** Anthropic Messages-native gateway: Claude traffic keeps messages-first. */
+    preferMessages: boolean;
     requireCodexClient: boolean;
     credentialMode: string;
   };
@@ -62,7 +64,6 @@ type SiteSaveAction =
 export function emptySiteCustomHeader(): SiteCustomHeaderField {
   return { key: '', value: '' };
 }
-
 
 /** Preset used by “Codex 客户端” checkbox for NewAPI codex-only gateways. */
 export const CODEX_CLIENT_PROFILE_HEADERS = {
@@ -157,7 +158,7 @@ export function applyCodexCompatibilityMode(form: SiteForm, enabled: boolean): S
   };
 }
 
-/** Preset used by the “Browser UA” switch for Cloudflare / WAF-gated sites. */
+/** Preset used by the "Browser UA" switch for Cloudflare / WAF-gated sites. */
 export const BROWSER_UA_PROFILE_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36',
 } as const;
@@ -230,7 +231,6 @@ export function applyBrowserUaMode(form: SiteForm, enabled: boolean): SiteForm {
   };
 }
 
-
 export function emptySiteApiEndpoint(): SiteApiEndpointField {
   return {
     url: '',
@@ -256,6 +256,7 @@ export function emptySiteForm(): SiteForm {
     paramOverride: '',
     protocolProfile: {
       preferResponses: false,
+      preferMessages: false,
       requireCodexClient: false,
       credentialMode: 'auto',
     },
@@ -339,12 +340,14 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
         const raw = typeof (site as any).protocolProfile === 'string' ? JSON.parse((site as any).protocolProfile) : null;
         return {
           preferResponses: !!raw?.preferResponses,
+          preferMessages: !!raw?.preferMessages,
           requireCodexClient: !!raw?.requireCodexClient,
           credentialMode: raw?.credentialMode || 'auto',
         };
       } catch {
         return {
           preferResponses: false,
+          preferMessages: false,
           requireCodexClient: false,
           credentialMode: 'auto',
         };

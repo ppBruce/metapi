@@ -4,7 +4,7 @@
  * format a SiteRow/SubscriptionSummary or render a label.
  */
 
-import { FileTextIcon, GlobeIcon, KeyIcon, SlidersIcon, UnlockIcon, UserIcon } from '../../components/MiniIcons.js';
+import { BanIcon, FileTextIcon, GlobeIcon, KeyIcon, SlidersIcon, UnlockIcon, UserIcon } from '../../components/MiniIcons.js';
 import HoverPopover from '../../components/HoverPopover.js';
 
 export type SiteSubscriptionSummary = {
@@ -58,14 +58,10 @@ export function hasSiteOutboundProxy(proxyUrl?: string | null): boolean {
 }
 
 /**
- * Markers for configuration that silently changes how a site reaches upstream:
- * its own outbound proxy and custom request headers. Neither was visible in the
- * list, so locating them meant opening the editor site by site — while a tester
- * tracking down a site-specific 502 needs exactly that answer in the row.
- *
- * Each marker labels itself through HoverPopover — desktop hover, touch tap —
- * matching the connection markers in the same row. The native `title` reads as
- * a panel at this icon size and is unavailable on touch devices.
+ * Markers for configuration that silently changes how a site reaches upstream —
+ * its own outbound proxy and custom request headers — which previously could
+ * only be found by opening the editor site by site. Each marker labels itself
+ * through HoverPopover, matching the connection markers in the same row.
  */
 export function SiteOutboundFlags(props: {
   proxyUrl?: string | null;
@@ -104,6 +100,12 @@ export type SiteConnectionStatsLike = {
   oauth: number;
 };
 
+/** Per-key disabled-model summary carried by the sites list payload. */
+export type SiteDisabledModelsSummary = {
+  total: number;
+  keys: Array<{ accountId: number; username: string | null; count: number }>;
+};
+
 /**
  * Connection counts as icon+number markers. Shared by the sites table row and
  * the mobile card so the two surfaces cannot drift apart.
@@ -113,13 +115,25 @@ export type SiteConnectionStatsLike = {
  * colour glyphs at a different optical size than the rest of the UI. Hidden
  * counts stay hidden — a zero count is not a signal.
  */
-export function SiteConnectionStats(props: { stats?: SiteConnectionStatsLike | null }) {
+export function SiteConnectionStats(props: {
+  stats?: SiteConnectionStatsLike | null;
+  disabledModels?: SiteDisabledModelsSummary | null;
+}) {
   const stats = props.stats;
+  const disabled = props.disabledModels;
+  // Disabled models belong to keys, so the marker reports how many keys carry a
+  // list and how big each one is.
+  const disabledLabel = disabled && disabled.keys.length > 0
+    ? `禁用模型（按 key）：${disabled.keys
+      .map((entry) => `${entry.username || `账号 ${entry.accountId}`} ${entry.count} 个`)
+      .join('；')}`
+    : '禁用模型';
   const markers = [
     { key: 'sessions', label: 'Session 账号', count: stats?.sessions || 0, Icon: UserIcon },
     { key: 'apiKeys', label: 'API Key', count: stats?.apiKeys || 0, Icon: KeyIcon },
     { key: 'tokens', label: '令牌', count: stats?.tokens || 0, Icon: FileTextIcon },
     { key: 'oauth', label: 'OAuth', count: stats?.oauth || 0, Icon: UnlockIcon },
+    { key: 'disabledModels', label: disabledLabel, count: disabled?.total || 0, Icon: BanIcon },
   ].filter((marker) => marker.count > 0);
 
   if (markers.length === 0) {
@@ -277,14 +291,11 @@ export function SiteBalanceDisplay(props: {
 }
 
 /**
- * Platform is a category, not a health signal. Colouring `one-api` green and
- * `claude` amber made the sites table look like a status board, so every
- * platform now uses the neutral chip and the name itself carries the meaning.
- */
-/**
  * Platform chip class for every surface that shows a platform (sites table,
- * site detail header, site announcements). Category, not health — keep it in one
- * place so the three surfaces cannot drift apart again.
+ * detail header, announcements). Platform is a category, not a health signal:
+ * colouring one-api green and claude amber made the table look like a status
+ * board, so every platform uses the neutral chip. Kept in one place so the three
+ * surfaces cannot drift apart again.
  */
 export function platformBadgeClass(platform?: string | null): string {
   const key = String(platform || '').trim();
@@ -297,11 +308,9 @@ export type OAuthProviderSiteInfo = {
 };
 
 /**
- * Whether a platform reaches the form via auto-detect or the OAuth flow and
- * may map to an OAuth provider. Platforms in the manual dropdown are
- * manual-entry and must never resolve to an OAuth provider — doing so prefills
- * the editor with the provider's own upstream URL instead of a user-entered
- * Base URL.
+ * Whether a platform reaches the form via auto-detect or the OAuth flow rather
+ * than the manual dropdown. Manual-entry platforms must never resolve to an
+ * OAuth provider — that prefills the editor with the provider's own upstream URL.
  */
 export function isOauthFlowPlatform(platform?: string | null): boolean {
   const normalized = String(platform || '').trim().toLowerCase();
@@ -337,11 +346,11 @@ export const platformColors: Record<string, string> = {
 
 export const SITE_PLATFORM_OPTIONS = [
   { value: '', label: '平台类型（可自动检测）' },
-  { value: 'new-api', label: 'new-api', description: '聚合面板，适合多渠道统一管理' },
-  { value: 'one-api', label: 'one-api', description: '经典聚合面板，常见于通用 OpenAI 中转' },
-  { value: 'sub2api', label: 'sub2api', description: '订阅式中转面板，可同步套餐与余额信息' },
-  { value: 'metapi', label: 'metapi', description: '另一个 MetAPI 实例，提供下游 key 即可同步余额与用量' },
-  { value: 'openai', label: 'openai', description: '通用 OpenAI 兼容接口，手填 Base URL 即可' },
+  { value: 'new-api', label: 'new-api', description: '聚合面板，多渠道统一管理' },
+  { value: 'one-api', label: 'one-api', description: '经典聚合面板，通用 OpenAI 中转' },
+  { value: 'sub2api', label: 'sub2api', description: '订阅式中转面板，可同步套餐与余额' },
+  { value: 'metapi', label: 'metapi', description: '另一个 MetAPI 实例，填下游 key 同步余额与用量' },
+  { value: 'openai', label: 'openai', description: '通用 OpenAI 兼容接口，手填 Base URL' },
   { value: 'claude', label: 'claude', description: 'Claude / Anthropic 接口，手填 Base URL + API Key' },
   { value: 'gemini', label: 'gemini', description: '通用 Gemini / Google AI 兼容接口' },
 ];

@@ -3,8 +3,9 @@ import type { ScheduledTask } from 'node-cron';
 import { eq } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
-import { refreshAllBalances } from './balanceService.js';
-import { checkinAll } from './checkinService.js';
+import { recoverAccountSession, refreshAllBalances } from './balanceService.js';
+import { formatUtcSqlDateTime } from './localTimeService.js';
+import { buildCheckinSummaryMessage, checkinAll } from './checkinService.js';
 import * as routeRefreshWorkflow from './routeRefreshWorkflow.js';
 import { sendNotification } from './notifyService.js';
 import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dailySummaryService.js';
@@ -89,37 +90,19 @@ function summarizeCheckinRun(results: Array<{ result?: any }>) {
   return { total: results.length, success, skipped, failed };
 }
 
-function buildCheckinSummaryNotification(results: Array<{ accountId?: number; username?: string; site?: string; result?: any }>) {
+export function buildCheckinSummaryNotification(results: Array<{ accountId?: number; username?: string; site?: string; result?: any }>) {
   const summary = summarizeCheckinRun(results);
-  const lines: string[] = [
-    `全部账号签到完成：成功 ${summary.success}，跳过 ${summary.skipped}，失败 ${summary.failed}`,
-  ];
-  const failedRows = results.filter((item) => {
-    const status = item?.result?.status;
-    if (status === 'skipped' || item?.result?.skipped) return false;
-    return !item?.result?.success;
-  }).slice(0, 8);
-  if (failedRows.length > 0) {
-    lines.push('失败明细:');
-    for (const item of failedRows) {
-      const label = `${item?.username || (item?.accountId ? `#${item.accountId}` : 'unknown')} @ ${item?.site || 'unknown'}`;
-      const reason = String(item?.result?.message || 'failed').trim().slice(0, 80);
-      lines.push(`- ${label}: ${reason}`);
-    }
-    if (summary.failed > failedRows.length) {
-      lines.push(`- ... 另有 ${summary.failed - failedRows.length} 个失败未展开`);
-    }
-  }
   const title = summary.failed > 0
     ? `签到完成（成功${summary.success}/失败${summary.failed}）`
     : `签到完成（成功${summary.success}）`;
   return {
     title,
-    message: lines.join('\n'),
-    level: (summary.failed > 0 ? 'warning' : 'info') as 'info' | 'warning' | 'error',
+    message: buildCheckinSummaryMessage(results),
+    level: (summary.failed > 0 ? 'warning' : 'info') as 'info' | 'warning',
     summary,
   };
 }
+
 
 async function notifyCheckinSummary(results: Array<{ accountId?: number; username?: string; site?: string; result?: any }>) {
   const notification = buildCheckinSummaryNotification(results);
@@ -307,6 +290,62 @@ function createBalanceTask(cronExpr: string) {
   });
 }
 
+
+/**
+ * Model discovery failing silently is how an 18h outage went unnoticed
+ * (2026-09-28). Two consecutive failed passes for the same account now trigger a
+ * session re-login attempt (when the failure was an auth failure) and, if the
+ * account still cannot refresh, one status event naming the reason. The event is
+ * rate-limited per account so a permanently broken account cannot flood the
+ * events table.
+ */
+const MODEL_REFRESH_FAILURE_EVENT_THRESHOLD = 2;
+const MODEL_REFRESH_FAILURE_EVENT_COOLDOWN_MS = 6 * 60 * 60_000;
+const modelRefreshFailureStreaks = new Map<number, number>();
+const modelRefreshFailureEventAtMs = new Map<number, number>();
+
+async function handleFailedModelRefreshes(refresh: Array<any>): Promise<void> {
+  const failures = refresh.filter((item) => item?.status === 'failed' && typeof item?.accountId === 'number');
+  const failedAccountIds = new Set(failures.map((item) => item.accountId));
+  for (const accountId of [...modelRefreshFailureStreaks.keys()]) {
+    if (!failedAccountIds.has(accountId)) modelRefreshFailureStreaks.delete(accountId);
+  }
+
+  for (const item of failures) {
+    const streak = (modelRefreshFailureStreaks.get(item.accountId) ?? 0) + 1;
+    modelRefreshFailureStreaks.set(item.accountId, streak);
+    const authFailure = item.errorCode === 'unauthorized';
+    let recovered = false;
+    if (authFailure) {
+      recovered = await recoverAccountSession(item.accountId).catch(() => false);
+      if (recovered) {
+        modelRefreshFailureStreaks.delete(item.accountId);
+        modelRefreshFailureEventAtMs.delete(item.accountId);
+        console.log(`[Scheduler] Recovered the session for account ${item.accountId} after ${streak} failed model refresh pass(es)`);
+        continue;
+      }
+    }
+    if (streak < MODEL_REFRESH_FAILURE_EVENT_THRESHOLD) continue;
+    const nowMs = Date.now();
+    const lastEventAtMs = modelRefreshFailureEventAtMs.get(item.accountId) ?? 0;
+    if (nowMs - lastEventAtMs < MODEL_REFRESH_FAILURE_EVENT_COOLDOWN_MS) continue;
+    modelRefreshFailureEventAtMs.set(item.accountId, nowMs);
+    const detail = String(item.errorMessage || item.errorCode || 'unknown').replace(/\s+/g, ' ').slice(0, 200);
+    const recoveryNote = authFailure
+      ? '；自动重登失败（该账号没有保存登录凭据，无法自动恢复）'
+      : '';
+    await db.insert(schema.events).values({
+      type: 'status',
+      title: '模型刷新连续失败',
+      message: `账号 #${item.accountId} 连续 ${streak} 次刷新模型失败：${detail}${recoveryNote}`,
+      level: 'error',
+      relatedType: 'account',
+      relatedId: item.accountId,
+      createdAt: formatUtcSqlDateTime(new Date()),
+    }).run();
+  }
+}
+
 function createModelRefreshTask(cronExpr: string) {
   return cron.schedule(cronExpr, async () => {
     if (modelRefreshPassInFlight && Date.now() - modelRefreshPassStartedAtMs < PASS_STALE_AFTER_MS) {
@@ -320,17 +359,26 @@ function createModelRefreshTask(cronExpr: string) {
     const pass = (async () => {
       console.log(`[Scheduler] Refreshing models at ${new Date().toISOString()}`);
       try {
-        const result = await routeRefreshWorkflow.refreshModelsAndRebuildRoutes();
+        const outcome = await routeRefreshWorkflow.refreshModelsAndRebuildRoutesWithSchedulerBound();
+        if (!outcome.completed) {
+          console.warn('[Scheduler] Model refresh did not complete within the scheduler bound; keeping existing route state');
+          return;
+        }
+        const result = outcome.result;
         const refresh = Array.isArray(result?.refresh) ? result.refresh : [];
         const succeeded = refresh.filter((item: any) => item?.status === 'success').length;
         const failed = refresh.filter((item: any) => item?.status === 'failed').length;
         const rebuild = result?.rebuild;
+        const firstFailure = refresh.find((item: any) => item?.status === 'failed') as any;
+        const failureDetail = String(firstFailure?.message || firstFailure?.error || '')
+          .trim().replace(/\s+/g, ' ').slice(0, 200);
         const summary = [
           `accounts=${refresh.length} ok=${succeeded} failed=${failed}`,
           `createdRoutes=${rebuild?.createdRoutes ?? 0} removedRoutes=${rebuild?.removedRoutes ?? 0}`,
           `createdChannels=${rebuild?.createdChannels ?? 0} removedChannels=${rebuild?.removedChannels ?? 0}`,
         ].join(' ');
-        console.log(`[Scheduler] Model refresh complete: ${summary}`);
+        console.log(`[Scheduler] Model refresh complete: ${summary}${failureDetail ? ` failedReason=${failureDetail}` : ''}`);
+        await handleFailedModelRefreshes(refresh);
       } catch (err) {
         console.error('[Scheduler] Model refresh error:', err);
       }

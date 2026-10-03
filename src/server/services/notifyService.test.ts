@@ -45,9 +45,8 @@ describe('notifyService', () => {
     config.notifyCooldownSec = 300;
     config.webhookEnabled = false;
     config.webhookUrl = '';
-    (config as any).webhookSecret = '';
-    config.barkEnabled = false;
-    config.barkUrl = '';
+    config.notifyChannels = config.notifyChannels.map((c) => ({ ...c, secret: '' }));
+    config.notifyChannels = [];
     config.serverChanEnabled = false;
     config.serverChanKey = '';
     (config as any).telegramEnabled = false;
@@ -101,10 +100,11 @@ describe('notifyService', () => {
 
   it('includes failed channel details when all enabled channels fail', async () => {
     const { config } = await import('../config.js');
-    config.webhookEnabled = true;
-    config.webhookUrl = 'https://webhook.example.com/notify';
-    config.barkEnabled = true;
-    config.barkUrl = 'https://api.day.app/mock-key';
+    config.notifyChannels = [{ id: 'test-1', url: 'https://webhook.example.com/notify', secret: '', enabled: true }];
+    config.notifyChannels = [
+      { id: 'test-1', url: 'https://webhook.example.com/notify', secret: '', enabled: true },
+      { id: 'test-2', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/second', secret: '', enabled: true },
+    ];
     config.smtpEnabled = false;
 
     fetchMock
@@ -124,15 +124,14 @@ describe('notifyService', () => {
         bypassThrottle: true,
         throwOnFailure: true,
       }),
-    ).rejects.toThrow(/webhook|bark|Webhook 响应状态|Bark 响应状态/i);
+    ).rejects.toThrow(/Webhook 响应状态/i);
   });
 
   it('times out a stalled channel without blocking successful channels', async () => {
     vi.useFakeTimers();
     try {
       const { config } = await import('../config.js');
-      config.webhookEnabled = true;
-      config.webhookUrl = 'https://webhook.example.com/notify';
+      config.notifyChannels = [{ id: 'test-1', url: 'https://webhook.example.com/notify', secret: '', enabled: true }];
       config.smtpEnabled = true;
       fetchMock.mockImplementation((_url: string, init?: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
@@ -177,8 +176,7 @@ describe('notifyService', () => {
 
   it('sends enterprise wechat webhook payload as structured text message', async () => {
     const { config } = await import('../config.js');
-    config.webhookEnabled = true;
-    config.webhookUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=demo-key';
+    config.notifyChannels = [{ id: 'test-1', url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=demo-key', secret: '', enabled: true }];
     config.smtpEnabled = false;
 
     fetchMock.mockResolvedValue({
@@ -194,17 +192,19 @@ describe('notifyService', () => {
     const call = fetchMock.mock.calls[0] as [string, { body?: string }];
     expect(call[0]).toContain('qyapi.weixin.qq.com/cgi-bin/webhook/send');
 
-    const payload = JSON.parse(call[1]?.body || '{}') as { msgtype?: string; text?: { content?: string } };
+    const payload = JSON.parse(call[1]?.body || '{}') as { msgtype?: string; markdown?: { content?: string } };
     expect(Array.isArray(payload)).toBe(false);
-    expect(payload.msgtype).toBe('text');
-    expect(payload.text?.content || '').toContain('[metapi][INFO] 测试通知');
-    expect(payload.text?.content || '').toContain('message');
+    // 企业微信只有 markdown / markdown_v2 类型才渲染 markdown，text 是纯文本。
+    expect(payload.msgtype).toBe('markdown');
+    expect(payload.markdown?.content || '').toContain('[metapi][INFO] 测试通知');
+    expect(payload.markdown?.content || '').toContain('message');
+    // 官方上限是 4096 字节（不是字符），必须按字节截断。
+    expect(Buffer.byteLength(payload.markdown?.content || '', 'utf8')).toBeLessThanOrEqual(4096);
   });
 
   it('fails when enterprise wechat webhook returns non-zero errcode', async () => {
     const { config } = await import('../config.js');
-    config.webhookEnabled = true;
-    config.webhookUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=demo-key';
+    config.notifyChannels = [{ id: 'test-1', url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=demo-key', secret: '', enabled: true }];
     config.smtpEnabled = false;
 
     fetchMock.mockResolvedValue({
@@ -315,8 +315,7 @@ describe('notifyService', () => {
 
   it('sends feishu webhook payload with msg_type text format', async () => {
     const { config } = await import('../config.js');
-    config.webhookEnabled = true;
-    config.webhookUrl = 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token';
+    config.notifyChannels = [{ id: 'test-1', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token', secret: '', enabled: true }];
     config.smtpEnabled = false;
 
     fetchMock.mockResolvedValue({
@@ -332,16 +331,64 @@ describe('notifyService', () => {
     const call = fetchMock.mock.calls[0] as [string, { body?: string }];
     expect(call[0]).toContain('open.feishu.cn/open-apis/bot/v2/hook/');
 
-    const payload = JSON.parse(call[1]?.body || '{}') as { msg_type?: string; content?: { text?: string } };
-    expect(payload.msg_type).toBe('text');
-    expect(payload.content?.text || '').toContain('[metapi][INFO] 测试通知');
-    expect(payload.content?.text || '').toContain('feishu message');
+    const payload = JSON.parse(call[1]?.body || '{}') as {
+      msg_type?: string;
+      card?: {
+        schema?: string;
+        header?: { title?: { content?: string }; template?: string };
+        body?: { elements?: Array<{ tag?: string; content?: string }> };
+      };
+    };
+    // 飞书自定义机器人只有消息卡片（interactive）能渲染 markdown；text / post 都不是 markdown。
+    expect(payload.msg_type).toBe('interactive');
+    expect(payload.card?.schema).toBe('2.0');
+    expect(payload.card?.header?.title?.content || '').toContain('测试通知');
+    // 品牌色：飞书无自定义色值，info 用最接近 metapi teal 的 turquoise（#067062）。
+    expect(payload.card?.header?.template).toBe('turquoise');
+    const md = (payload.card?.body?.elements || []).filter((e) => e?.tag === 'markdown');
+    expect(md.length).toBeGreaterThan(0);
+    const joined = md.map((e) => e.content || '').join('\n');
+    expect(joined).toContain('feishu message');
+    expect(joined).toContain('[metapi][INFO]');
+    // 官方上限：请求体 20KB。
+    expect(Buffer.byteLength(call[1]?.body || '', 'utf8')).toBeLessThan(20000);
+  });
+
+  it('signs the feishu body when a signature secret is configured', async () => {
+    const { config } = await import('../config.js');
+    const { createHmac } = await import('node:crypto');
+    const secret = 'feishu-sign-secret-demo';
+    config.notifyChannels = [{ id: 'test-1', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token', secret: '', enabled: true }];
+    config.notifyChannels = config.notifyChannels.map((c) => ({ ...c, secret: secret }));
+    config.smtpEnabled = false;
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ code: 0, msg: 'success' }),
+    });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('测试通知', 'feishu message', 'info', { bypassThrottle: true, throwOnFailure: true });
+
+    const call = fetchMock.mock.calls[0] as [string, { body?: string }];
+    const payload = JSON.parse(call[1]?.body || '{}') as {
+      msg_type?: string;
+      timestamp?: string;
+      sign?: string;
+    };
+    // Feishu 签名校验签的是请求体：timestamp 为 epoch 秒，sign =
+    // base64(HMAC-SHA256(key = `${timestamp}\n${secret}`, message = ""))。
+    expect(payload.msg_type).toBe('interactive');
+    expect(payload.timestamp).toMatch(/^\d{9,}$/);
+    const stringToSign = `${payload.timestamp}\n${secret}`;
+    const expected = createHmac('sha256', stringToSign).update('').digest('base64');
+    expect(payload.sign).toBe(expected);
   });
 
   it('fails when feishu webhook returns non-zero code', async () => {
     const { config } = await import('../config.js');
-    config.webhookEnabled = true;
-    config.webhookUrl = 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token';
+    config.notifyChannels = [{ id: 'test-1', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token', secret: '', enabled: true }];
     config.smtpEnabled = false;
 
     fetchMock.mockResolvedValue({
@@ -361,8 +408,7 @@ describe('notifyService', () => {
 
   it('sends feishu webhook payload for larksuite.com domain', async () => {
     const { config } = await import('../config.js');
-    config.webhookEnabled = true;
-    config.webhookUrl = 'https://open.larksuite.com/open-apis/bot/v2/hook/demo-token';
+    config.notifyChannels = [{ id: 'test-1', url: 'https://open.larksuite.com/open-apis/bot/v2/hook/demo-token', secret: '', enabled: true }];
     config.smtpEnabled = false;
 
     fetchMock.mockResolvedValue({
@@ -378,19 +424,23 @@ describe('notifyService', () => {
     const call = fetchMock.mock.calls[0] as [string, { body?: string }];
     expect(call[0]).toContain('open.larksuite.com/open-apis/bot/v2/hook/');
 
-    const payload = JSON.parse(call[1]?.body || '{}') as { msg_type?: string; content?: { text?: string } };
-    expect(payload.msg_type).toBe('text');
-    expect(payload.content?.text || '').toContain('[metapi][WARNING] 测试通知');
-    expect(payload.content?.text || '').toContain('lark message');
+    const payload = JSON.parse(call[1]?.body || '{}') as {
+      msg_type?: string;
+      card?: { header?: { template?: string; title?: { content?: string } }; body?: { elements?: Array<{ tag?: string; content?: string }> } };
+    };
+    expect(payload.msg_type).toBe('interactive');
+    expect(payload.card?.header?.template).toBe('orange');
+    expect(payload.card?.header?.title?.content || '').toContain('测试通知');
+    const joined = (payload.card?.body?.elements || []).filter((e) => e?.tag === 'markdown').map((e) => e.content || '').join('\n');
+    expect(joined).toContain('lark message');
+    expect(joined).toContain('[metapi][WARNING]');
   });
 
   it('sends dingtalk text payload and signs url when secret is configured', async () => {
     const { config } = await import('../config.js');
-    config.webhookEnabled = true;
-    config.webhookUrl = 'https://oapi.dingtalk.com/robot/send?access_token=demo-token';
-    (config as any).webhookSecret = 'SECdemo';
+    config.notifyChannels = [{ id: 'test-1', url: 'https://oapi.dingtalk.com/robot/send?access_token=demo-token', secret: '', enabled: true }];
+    config.notifyChannels = config.notifyChannels.map((c) => ({ ...c, secret: 'SECdemo' }));
     config.smtpEnabled = false;
-    config.barkEnabled = false;
     config.serverChanEnabled = false;
     (config as any).telegramEnabled = false;
 
@@ -411,18 +461,19 @@ describe('notifyService', () => {
     expect(String(url)).toContain('sign=');
     expect(String(url)).not.toContain('secret=');
     const body = JSON.parse(String((init as any).body));
-    expect(body.msgtype).toBe('text');
-    expect(body.text.content).toContain('测试通知');
-    expect(body.text.content).toContain('dingtalk message');
+    // 钉钉 markdown 类型：title 必填（首屏透出），text 才是 markdown 正文。
+    expect(body.msgtype).toBe('markdown');
+    expect(body.markdown.title).toBe('测试通知');
+    expect(body.markdown.text).toContain('测试通知');
+    expect(body.markdown.text).toContain('dingtalk message');
+    expect(body.markdown.text).toContain('[metapi][INFO]');
   });
 
   it('fails when dingtalk webhook returns non-zero errcode', async () => {
     const { config } = await import('../config.js');
-    config.webhookEnabled = true;
-    config.webhookUrl = 'https://oapi.dingtalk.com/robot/send?access_token=demo-token';
-    (config as any).webhookSecret = '';
+    config.notifyChannels = [{ id: 'test-1', url: 'https://oapi.dingtalk.com/robot/send?access_token=demo-token', secret: '', enabled: true }];
+    config.notifyChannels = config.notifyChannels.map((c) => ({ ...c, secret: '' }));
     config.smtpEnabled = false;
-    config.barkEnabled = false;
     config.serverChanEnabled = false;
     (config as any).telegramEnabled = false;
 
@@ -439,5 +490,163 @@ describe('notifyService', () => {
         throwOnFailure: true,
       }),
     ).rejects.toThrow(/钉钉|310000|sign not match/i);
+  });
+  it('passes markdown bodies through verbatim so site announcements render', async () => {
+    const { config } = await import('../config.js');
+    config.notifyChannels = [{ id: 'test-1', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token', secret: '', enabled: true }];
+    config.smtpEnabled = false;
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ code: 0 }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    const announcement = '# 欢迎使用 liWAN公益站\n\n## 日常开发\n**加粗重点**\n1. 第一条\n2. 第二条';
+    await sendNotification('站点公告：liWAN LAB', announcement, 'info', { bypassThrottle: true, throwOnFailure: true });
+
+    const call = fetchMock.mock.calls[0] as [string, { body?: string }];
+    const payload = JSON.parse(call[1]?.body || '{}') as { card?: { body?: { elements?: Array<{ tag?: string; content?: string }> } } };
+    const joined = (payload.card?.body?.elements || []).map((e) => e.content || '').join('\n');
+    expect(joined).toContain('# 欢迎使用 liWAN公益站');
+    expect(joined).toContain('**加粗重点**');
+    expect(joined).toContain('1. 第一条');
+  });
+
+  it('truncates enterprise wechat markdown by utf-8 bytes, not by characters', async () => {
+    const { config } = await import('../config.js');
+    config.notifyChannels = [{ id: 'test-1', url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=demo-key', secret: '', enabled: true }];
+    config.smtpEnabled = false;
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ errcode: 0 }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    // 2000 个汉字 = 6000 字节，远超 4096 字节上限。
+    await sendNotification('长公告', '汉'.repeat(2000), 'info', { bypassThrottle: true, throwOnFailure: true });
+
+    const call = fetchMock.mock.calls[0] as [string, { body?: string }];
+    const payload = JSON.parse(call[1]?.body || '{}') as { markdown?: { content?: string } };
+    const bytes = Buffer.byteLength(payload.markdown?.content || '', 'utf8');
+    expect(bytes).toBeLessThanOrEqual(4096);
+    expect(bytes).toBeGreaterThan(3000);
+    expect(payload.markdown?.content || '').toContain('truncated');
+  });
+
+  it('keeps the feishu card request body under the 20KB limit for huge announcements', async () => {
+    const { config } = await import('../config.js');
+    config.notifyChannels = [{ id: 'test-1', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token', secret: '', enabled: true }];
+    config.smtpEnabled = false;
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ code: 0 }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    // 生产库最长的一条站点公告是 24143 字节正文，已超飞书 20KB 请求体上限。
+    await sendNotification('站点公告：JustDoWork', '汉'.repeat(9000), 'info', { bypassThrottle: true, throwOnFailure: true });
+
+    const call = fetchMock.mock.calls[0] as [string, { body?: string }];
+    expect(Buffer.byteLength(call[1]?.body || '', 'utf8')).toBeLessThan(20000);
+    const payload = JSON.parse(call[1]?.body || '{}') as { card?: { body?: { elements?: Array<{ content?: string }> } } };
+    const joined = (payload.card?.body?.elements || []).map((e) => e.content || '').join('\n');
+    expect(joined).toContain('truncated');
+  });
+  it('degrades inline base64 images instead of shipping half of one', async () => {
+    const { config } = await import('../config.js');
+    config.notifyChannels = [{ id: 'test-1', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token', secret: '', enabled: true }];
+    config.smtpEnabled = false;
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ code: 0 }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    // 真实公告形状：一行文字 + 一张 base64 内嵌图（生产库里最长的一条长 24143 字节，其中 99.8% 是图片数据）
+    const base64 = 'iVBORw0KGgoAAAANSUhEUg'.repeat(300);
+    await sendNotification(
+      '站点公告：JustDoWork',
+      `Join Discord：https://discord.gg/demo\n\n![discord](data:image/png;base64,${base64})`,
+      'info',
+      { bypassThrottle: true, throwOnFailure: true },
+    );
+
+    const call = fetchMock.mock.calls[0] as [string, { body?: string }];
+    const body = call[1]?.body || '';
+    // 不能把 base64 发出去（平台渲染不了，还会把正文挤爆并截断成半截乱码）
+    expect(body).not.toContain('iVBORw0KGgo');
+    expect(body).not.toContain('data:image');
+    expect(Buffer.byteLength(body, 'utf8')).toBeLessThan(1200);
+    const payload = JSON.parse(body) as { card?: { body?: { elements?: Array<{ content?: string }> } } };
+    const joined = (payload.card?.body?.elements || []).map((e) => e.content || '').join('\n');
+    expect(joined).toContain('[图片：discord]');
+    expect(joined).toContain('Join Discord：https://discord.gg/demo');
+  });
+
+  it('degrades external image links too, since no webhook platform renders them', async () => {
+    const { config } = await import('../config.js');
+    config.notifyChannels = [{ id: 'test-1', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token', secret: '', enabled: true }];
+    config.smtpEnabled = false;
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ code: 0 }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('公告', '看图：![活动海报](https://example.com/a.png)', 'info', { bypassThrottle: true, throwOnFailure: true });
+
+    const call = fetchMock.mock.calls[0] as [string, { body?: string }];
+    const payload = JSON.parse(call[1]?.body || '{}') as { card?: { body?: { elements?: Array<{ content?: string }> } } };
+    const joined = (payload.card?.body?.elements || []).map((e) => e.content || '').join('\n');
+    expect(joined).not.toContain('https://example.com/a.png');
+    expect(joined).toContain('[图片：活动海报]');
+  });
+
+  it('keeps tables intact for feishu cards and guarantees a blank line before them', async () => {
+    const { config } = await import('../config.js');
+    config.notifyChannels = [{ id: 'test-1', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/demo-token', secret: '', enabled: true }];
+    config.smtpEnabled = false;
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ code: 0 }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('公告', '| 平台 | 表格 |\n| --- | --- |\n| 飞书 | 支持 |', 'info', { bypassThrottle: true, throwOnFailure: true });
+
+    const call = fetchMock.mock.calls[0] as [string, { body?: string }];
+    const payload = JSON.parse(call[1]?.body || '{}') as { card?: { body?: { elements?: Array<{ content?: string }> } } };
+    const joined = (payload.card?.body?.elements || []).map((e) => e.content || '').join('\n');
+    expect(joined).toContain('| 平台 | 表格 |');
+    expect(joined).toContain('| --- | --- |');
+    // 表格前必须有空行
+    expect(joined).toMatch(/公告\*\*\n\n\| 平台 \| 表格 \|/);
+  });
+
+  it('sends the published markdown as-is to dingtalk, leaving rendering to the client', async () => {
+    const { config } = await import('../config.js');
+    config.notifyChannels = [{ id: 'test-1', url: 'https://oapi.dingtalk.com/robot/send?access_token=demo', secret: '', enabled: true }];
+    config.smtpEnabled = false;
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ errcode: 0 }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('公告', '| 平台 | 表格 |\n| --- | --- |\n| 钉钉 | 不支持 |\n| 飞书 | 支持 |', 'info', { bypassThrottle: true, throwOnFailure: true });
+
+    const call = fetchMock.mock.calls[0] as [string, { body?: string }];
+    const payload = JSON.parse(call[1]?.body || '{}') as { markdown?: { text?: string } };
+    const text = payload.markdown?.text || '';
+    // metapi 不替平台做渲染兜底：钉钉客户端能不能渲染表格由它自己决定，正文原样发出。
+    expect(text).toContain('| 平台 | 表格 |');
+    expect(text).toContain('| --- | --- |');
+    expect(text).toContain('| 钉钉 | 不支持 |');
+    expect(text).not.toContain('- 平台：');
+  });
+
+  it('sends the published markdown as-is to enterprise wechat as well', async () => {
+    const { config } = await import('../config.js');
+    config.notifyChannels = [{ id: 'test-1', url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=demo-key', secret: '', enabled: true }];
+    config.smtpEnabled = false;
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ errcode: 0 }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('公告', '| 项 | 值 |\n| --- | --- |\n| 余额 | 12 |', 'info', { bypassThrottle: true, throwOnFailure: true });
+
+    const call = fetchMock.mock.calls[0] as [string, { body?: string }];
+    const payload = JSON.parse(call[1]?.body || '{}') as { markdown?: { content?: string } };
+    const content = payload.markdown?.content || '';
+    expect(content).toContain('| 项 | 值 |');
+    expect(content).toContain('| --- | --- |');
+    expect(content).toContain('| 余额 | 12 |');
+    expect(content).not.toContain('项：余额');
   });
 });

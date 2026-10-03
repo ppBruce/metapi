@@ -447,6 +447,103 @@ describe('convertOpenAiBodyToAnthropicMessagesBody', () => {
     ]);
   });
 
+  it('carries unsigned thinking back for DeepSeek-family models (thinking pass-back contract)', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'deepseek-v4-flash',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'final answer',
+            reasoning_content: 'prior turn thinking',
+          },
+        ],
+      },
+      'deepseek-v4-flash',
+      false,
+    );
+
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'prior turn thinking',
+          },
+          {
+            type: 'text',
+            text: 'final answer',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('keeps dropping whitespace-only reasoning even for DeepSeek models', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'deepseek-v4-flash',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'final answer',
+            reasoning_content: ' ',
+          },
+        ],
+      },
+      'deepseek-v4-flash',
+      false,
+    );
+
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: 'final answer',
+      },
+    ]);
+  });
+
+  it('injects a placeholder thinking block for DeepSeek models with whitespace-only reasoning and tool_calls', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'deepseek-v4-flash',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'final answer',
+            reasoning_content: ' ',
+            tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'test', arguments: '{}' } }],
+          },
+        ],
+      },
+      'deepseek-v4-flash',
+      false,
+    );
+
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: '(thinking omitted)',
+          },
+          {
+            type: 'text',
+            text: 'final answer',
+          },
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'test',
+            input: {},
+          },
+        ],
+      },
+    ]);
+  });
+
   it('preserves top-level reasoning_signature when rebuilding assistant thinking blocks for messages fallback', () => {
     const body = convertOpenAiBodyToAnthropicMessagesBody(
       {

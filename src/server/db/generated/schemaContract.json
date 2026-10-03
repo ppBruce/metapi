@@ -585,6 +585,18 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "allowed_site_ids": {
+          "logicalType": "json",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "allowed_credential_refs": {
+          "logicalType": "json",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },
@@ -2079,6 +2091,12 @@
           "notNull": false,
           "defaultValue": "datetime('now')",
           "primaryKey": false
+        },
+        "account_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },
@@ -3137,21 +3155,30 @@
       "unique": false
     },
     {
+      "name": "site_disabled_models_account_id_idx",
+      "table": "site_disabled_models",
+      "columns": [
+        "account_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "site_disabled_models_site_account_model_unique",
+      "table": "site_disabled_models",
+      "columns": [
+        "site_id",
+        "account_id",
+        "model_name"
+      ],
+      "unique": true
+    },
+    {
       "name": "site_disabled_models_site_id_idx",
       "table": "site_disabled_models",
       "columns": [
         "site_id"
       ],
       "unique": false
-    },
-    {
-      "name": "site_disabled_models_site_model_unique",
-      "table": "site_disabled_models",
-      "columns": [
-        "site_id",
-        "model_name"
-      ],
-      "unique": true
     },
     {
       "name": "site_hour_usage_hour_idx",
@@ -3366,10 +3393,11 @@
       ]
     },
     {
-      "name": "site_disabled_models_site_model_unique",
+      "name": "site_disabled_models_site_account_model_unique",
       "table": "site_disabled_models",
       "columns": [
         "site_id",
+        "account_id",
         "model_name"
       ]
     },
@@ -3611,6 +3639,17 @@
         "site_id"
       ],
       "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "site_disabled_models",
+      "columns": [
+        "account_id"
+      ],
+      "referencedTable": "accounts",
       "referencedColumns": [
         "id"
       ],

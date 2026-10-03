@@ -238,6 +238,33 @@ describe('checkinService auto relogin', () => {
     expect(Number(firstInsertPayload?.reward)).toBeCloseTo(2.5, 6);
   });
 
+  it('does not send a per-account failure alert — the run summary owns messaging', async () => {
+    selectAllMock.mockReturnValue([{
+      accounts: { id: 99, username: 'manual-user', accessToken: 'token', status: 'active', extraConfig: null },
+      sites: { id: 99, name: 'manual-site', url: 'https://example.com', platform: 'new-api' },
+    }]);
+    adapterMock.checkin.mockResolvedValue({ success: false, message: 'upstream failed' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    await checkinAccount(99);
+
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it('never notifies per site — a batch run stays silent and lets the summary speak', async () => {
+    selectAllMock.mockReturnValue([
+      { accounts: { id: 101, username: 'u1', accessToken: 't1', status: 'active', extraConfig: null }, sites: { id: 10, name: 'site-a', url: 'https://example.com', platform: 'new-api' } },
+      { accounts: { id: 102, username: 'u2', accessToken: 't2', status: 'active', extraConfig: null }, sites: { id: 10, name: 'site-a', url: 'https://example.com', platform: 'new-api' } },
+    ]);
+    adapterMock.checkin.mockResolvedValue({ success: false, message: 'same error' });
+
+    const { checkinAll } = await import('./checkinService.js');
+    const results = await checkinAll({ scheduleMode: 'cron' });
+
+    expect(results).toHaveLength(2);
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+
   it('treats already checked in responses as successful checkins', async () => {
     selectAllMock.mockReturnValue([
       {

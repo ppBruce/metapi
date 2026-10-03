@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import type { RouteRoutingStrategy } from './routeRoutingStrategy.js';
+import { EMPTY_DOWNSTREAM_ROUTING_POLICY, type DownstreamRoutingPolicy } from './downstreamPolicyTypes.js';
 
 type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
@@ -221,6 +222,81 @@ describe('TokenRouter selection scoring', () => {
     // Without a context requirement the call shape and outcome are unchanged.
     const plain = await new TokenRouter().selectChannel('context-fallback-model');
     expect(plain?.channel.id).toBe(channel.id);
+  });
+
+  it('explainSelection mirrors the live context filter and its availability-first fallback', async () => {
+    config.contextAwareRouting = 'exclude_known';
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'explain-context-model',
+      enabled: true,
+    }).returning().get();
+    const site = await createSite('explain-ctx');
+    const otherSite = await createSite('explain-ctx-ok');
+    const account = await createAccount(site.id, 'explain-ctx');
+    const otherAccount = await createAccount(otherSite.id, 'explain-ctx-ok');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id, accountId: account.id, priority: 0, weight: 10, enabled: true,
+    }).returning().get();
+    const otherChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id, accountId: otherAccount.id, priority: 0, weight: 10, enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.siteModelContext).values([
+      {
+        siteId: site.id,
+        modelName: 'explain-context-model',
+        contextLimit: 32_000,
+        source: 'error',
+      },
+      {
+        siteId: otherSite.id,
+        modelName: 'explain-context-model',
+        contextLimit: 256_000,
+        source: 'manual',
+      },
+    ]).run();
+    resetSiteContextCapabilityCache();
+    await ensureSiteContextCapabilityLoaded();
+
+    const router = new TokenRouter();
+    const options = { requiredContextTokens: 200_000 };
+
+    const blocked = await router.explainSelection('explain-context-model', [], undefined, options);
+    const blockedCandidate = blocked.candidates.find((item) => item.channelId === channel.id);
+    expect(blockedCandidate?.eligible).toBe(false);
+    expect(blockedCandidate?.reasonCodes).toContain('context_insufficient');
+    expect(blocked.candidates.find((item) => item.channelId === otherChannel.id)?.eligible).toBe(true);
+
+    // When every candidate is context-insufficient, the snapshot must apply
+    // the same availability-first fallback as selectFromMatch.
+    await db.update(schema.siteModelContext).set({ contextLimit: 16_000 })
+      .where(eq(schema.siteModelContext.siteId, otherSite.id)).run();
+    resetSiteContextCapabilityCache();
+    await ensureSiteContextCapabilityLoaded();
+    const fallback = await router.explainSelection('explain-context-model', [], undefined, options);
+    expect(fallback.summary.some((line) => line.includes('上下文过滤放行'))).toBe(true);
+    expect(fallback.candidates.every((item) => item.eligible)).toBe(true);
+
+    // Compound case: every candidate is probe-cooled AND context-insufficient.
+    // The live path's full-relax pass drops BOTH filters; the snapshot must not
+    // report "no channel" while the live path serves traffic.
+    await db.update(schema.routeChannels).set({
+      consecutiveFailCount: 1,
+      cooldownUntil: new Date(Date.now() + 5 * 60 * 1_000).toISOString(),
+    }).run();
+    invalidateTokenRouterCache();
+    const compound = await router.explainSelection('explain-context-model', [], undefined, options);
+    expect(compound.summary.some((line) => line.includes('探测冷却 + 上下文过滤放行'))).toBe(true);
+    expect(compound.candidates.every((item) => item.eligible)).toBe(true);
+    const liveCompound = await router.selectChannel('explain-context-model', EMPTY_DOWNSTREAM_ROUTING_POLICY, [], options);
+    expect(liveCompound?.channel.id).toBeDefined();
+
+    // Probe-only cooldown fallback also applies when no context requirement is
+    // supplied. A compound-only guard would break this existing live behavior.
+    const probeOnly = await router.explainSelection('explain-context-model');
+    expect(probeOnly.summary.some((line) => line.includes('探测冷却放行'))).toBe(true);
+    expect(probeOnly.candidates.every((item) => item.eligible)).toBe(true);
+    expect((await router.selectChannel('explain-context-model'))?.channel.id).toBeDefined();
   });
 
   it('reuses a preferred channel only while it remains healthy', async () => {
@@ -2286,4 +2362,165 @@ describe('selectPreferredChannel low-balance yield', () => {
     expect(channelAfter?.failCount).toBeGreaterThan(0);
   });
 });
+
+  it('fails open when a probe-written cooldown would empty a single-candidate pool', async () => {
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'cooldown-alone-fallback',
+      enabled: true,
+    }).returning().get();
+    const site = await createSite('cd-fallback');
+    const account = await createAccount(site.id, 'cd-fallback');
+    // Exactly what recordProbeFailure writes: a cooldown plus a bumped
+    // consecutiveFailCount, and no touch to failCount (which tracks real
+    // traffic only). This is the shape a failed health probe leaves behind.
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id, accountId: account.id, priority: 0, weight: 10, enabled: true,
+      cooldownUntil: new Date(Date.now() + 120_000).toISOString(),
+      consecutiveFailCount: 1,
+      failCount: 0,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const selected = await router.selectChannel('cooldown-alone-fallback');
+    // The only candidate was parked by a probe — a prediction, not an
+    // observation. Availability-first must let it through so the request gets a
+    // real attempt instead of a hard 503.
+    expect(selected?.channel.id).toBe(channel.id);
+  });
+
+  it('keeps a real-traffic cooldown as a hard exclusion on a single-candidate pool', async () => {
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'cooldown-real-traffic',
+      enabled: true,
+    }).returning().get();
+    const site = await createSite('cd-traffic');
+    const account = await createAccount(site.id, 'cd-traffic');
+    // recordFailure resets consecutiveFailCount to 0 and bumps failCount, so
+    // this cooldown was written by real traffic, not by a probe. Retrying it
+    // would only burn the request, so the exclusion must hold.
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id, accountId: account.id, priority: 0, weight: 10, enabled: true,
+      cooldownUntil: new Date(Date.now() + 120_000).toISOString(),
+      consecutiveFailCount: 0,
+      failCount: 3,
+    }).run();
+
+    const router = new TokenRouter();
+    const selected = await router.selectChannel('cooldown-real-traffic');
+    expect(selected).toBeNull();
+  });
+
+  it('does not resurrect a candidate blocked by a hard exclusion even when also cooling', async () => {
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'cooldown-hard-blocked',
+      enabled: true,
+    }).returning().get();
+    const site = await createSite('cd-hard');
+    const account = await createAccount(site.id, 'cd-hard');
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id, accountId: account.id, priority: 0, weight: 10, enabled: false,
+      cooldownUntil: new Date(Date.now() + 120_000).toISOString(),
+      consecutiveFailCount: 1,
+    }).run();
+
+    const router = new TokenRouter();
+    const selected = await router.selectChannel('cooldown-hard-blocked');
+    // The channel is both disabled AND cooling; the hard exclusion (disabled)
+    // must not be bypassed by the cooldown fallback — still null.
+    expect(selected).toBeNull();
+  });
+
+  it('rotates a site\'s turn between sibling keys instead of always serving one of them', async () => {
+    const route = await createRoute('intra-site-rotation');
+    const site = await createSite('intra-rotation');
+    const accountA = await createAccount(site.id, 'intra-rotation-a');
+    const accountB = await createAccount(site.id, 'intra-rotation-b');
+    // Two keys on ONE site with identical weights — the shape that starved the
+    // second key. The site-level draw picks the site; the choice INSIDE it used
+    // to be "highest score wins" with ties broken by array order, so one
+    // channel served every one of that site's turns while its sibling key sat
+    // at zero traffic despite an equal probability in the panel.
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id, accountId: accountA.id, priority: 0, weight: 10, enabled: true,
+    }).run();
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id, accountId: accountB.id, priority: 0, weight: 10, enabled: true,
+    }).run();
+
+    const router = new TokenRouter();
+    const picks: number[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      const selected = await router.selectChannel('intra-site-rotation');
+      expect(selected).not.toBeNull();
+      picks.push(selected!.channel.id);
+    }
+
+    // Equal scores inside the site => the bounded gap forces alternation (only
+    // the first pick is a weighted draw), so each key serves about half of the
+    // site's turns. The spread below stays tolerant of small score differences:
+    // unequal keys keep their weighted ratio and only the floor is guaranteed.
+    const distinct = new Set(picks);
+    expect(distinct.size).toBe(2);
+    for (const channelId of distinct) {
+      expect(picks.filter((id) => id === channelId).length).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  describe('downstream modelMappings must apply on every selection entry point', () => {
+    let policy: DownstreamRoutingPolicy;
+
+    beforeEach(() => {
+      // Key-level alias mapping: clients request 'alias-model', routes expose 'real-model'.
+      policy = {
+        ...EMPTY_DOWNSTREAM_ROUTING_POLICY,
+        modelMappings: [{ from: 'alias-model', to: 'real-model' }],
+      };
+    });
+
+    async function seedMappedRouteWithTwoSites() {
+      const route = await db.insert(schema.tokenRoutes).values({
+        modelPattern: 'real-model',
+        enabled: true,
+      }).returning().get();
+      const siteA = await createSite('mapped-a');
+      const siteB = await createSite('mapped-b');
+      const accountA = await createAccount(siteA.id, 'mapped-a');
+      const accountB = await createAccount(siteB.id, 'mapped-b');
+      const channelA = await db.insert(schema.routeChannels).values({
+        routeId: route.id, accountId: accountA.id, priority: 0, weight: 10, enabled: true,
+      }).returning().get();
+      const channelB = await db.insert(schema.routeChannels).values({
+        routeId: route.id, accountId: accountB.id, priority: 0, weight: 10, enabled: true,
+      }).returning().get();
+      return { route, siteA, siteB, channelA, channelB };
+    }
+
+    it('selectPreferredChannel resolves the mapping (sticky hop still works for a mapped key)', async () => {
+      const { channelA } = await seedMappedRouteWithTwoSites();
+      const router = new TokenRouter();
+
+      const selected = await router.selectPreferredChannel('alias-model', channelA.id, policy);
+      expect(selected?.channel.id).toBe(channelA.id);
+    });
+
+    it('listChannelIdsForSite resolves the mapping (site short-circuit excludes the right site)', async () => {
+      const { siteA, channelA } = await seedMappedRouteWithTwoSites();
+      const router = new TokenRouter();
+
+      const ids = await router.listChannelIdsForSite('alias-model', siteA.id, policy);
+      // Old code looks for a route matching 'alias-model' (none exists) and returns [].
+      expect(ids).toEqual([channelA.id]);
+    });
+
+    it('selectSpreadChannel resolves the mapping (spread hop can find an alternative site)', async () => {
+      const { channelA, channelB } = await seedMappedRouteWithTwoSites();
+      const router = new TokenRouter();
+
+      const spread = await router.selectSpreadChannel('alias-model', channelA.id, policy, {
+        channelLoad: (channelId: number) => (channelId === channelA.id ? 1 : 0),
+      });
+      // Old code finds no route for 'alias-model' and returns null.
+      expect(spread?.channel.id).toBe(channelB.id);
+    });
+  });
 });

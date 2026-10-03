@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 
+const probeRuntimeModelMock = vi.fn();
 const getApiTokenMock = vi.fn();
 const getModelsMock = vi.fn();
 const undiciFetchMock = vi.fn();
@@ -20,6 +21,10 @@ class MockProxyAgent {
 }
 
 class MockAgent {}
+
+vi.mock('./runtimeModelProbe.js', () => ({
+  probeRuntimeModel: (...args: unknown[]) => probeRuntimeModelMock(...args),
+}));
 
 vi.mock('./platforms/index.js', () => ({
   getAdapter: () => ({
@@ -90,6 +95,33 @@ describe('refreshModelsForAccount credential discovery', () => {
     delete process.env.DATA_DIR;
   });
 
+  it.each([false, true])('respects the global automatic probe switch (%s) after model refresh', async (enabled) => {
+    const { config } = await import('../config.js');
+    const previousAllow = config.modelAvailabilityProbeAllow;
+    const previousEnabled = config.modelAvailabilityProbeEnabled;
+    config.modelAvailabilityProbeAllow = true;
+    config.modelAvailabilityProbeEnabled = enabled;
+    probeRuntimeModelMock.mockReset();
+    probeRuntimeModelMock.mockResolvedValue({ status: 'supported', latencyMs: 10 });
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockResolvedValue(['gpt-4o']);
+    const site = await db.insert(schema.sites).values({
+      name: 'probe-switch-site', url: 'https://probe-switch.example.com',
+      platform: 'new-api', status: 'active', postRefreshProbeEnabled: true,
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id, accessToken: 'session-token', status: 'active',
+    }).returning().get();
+    try {
+      const result = await refreshModelsForAccount(account.id);
+      expect(result).toMatchObject({ refreshed: true, status: 'success' });
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(enabled ? 1 : 0);
+    } finally {
+      config.modelAvailabilityProbeAllow = previousAllow;
+      config.modelAvailabilityProbeEnabled = previousEnabled;
+    }
+  });
+
   it('discovers models from account session credential without account_tokens', async () => {
     getApiTokenMock.mockResolvedValue(null);
     getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
@@ -137,7 +169,7 @@ describe('refreshModelsForAccount credential discovery', () => {
     expect(tokenRows).toHaveLength(0);
   });
 
-  it('passes the site codex-client requirement into model discovery calls', async () => {
+  it('passes the Codex fingerprint into model discovery calls on codex-gated platforms', async () => {
     getApiTokenMock.mockResolvedValue(null);
     getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
       token === 'session-token' ? ['gpt-6-astra', 'claude-opus-5'] : []
@@ -333,7 +365,8 @@ describe('refreshModelsForAccount credential discovery', () => {
       modelCount: 1,
       modelsPreview: ['gpt-4.1'],
     });
-    expect(getModelsMock).toHaveBeenCalledWith('https://api.example.com', 'session-token', undefined);
+    // new-api 平台 = Codex 门禁平台，发现请求自动带指纹（无站点开关）。
+    expect(getModelsMock).toHaveBeenCalledWith('https://api.example.com', 'session-token', undefined, { requireCodexClient: true });
   });
 
   it('deduplicates discovered model names before writing availability rows', async () => {

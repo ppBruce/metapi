@@ -1,12 +1,7 @@
 /**
- * Small stroke icons used in filter chips and similar dense controls.
- *
- * These replace bare text glyphs (⚡ / ⚙) that render as colour emoji on
- * platforms with emoji fonts installed — the emoji presentation clashes with
- * the monochrome stroke icon set and its optical size varies per system font.
- *
- * Geometry from Feather Icons (MIT license): same 24-unit grid and 2px stroke
- * as the inline icons used elsewhere in the UI.
+ * Small stroke icons for filter chips and other dense controls, replacing the
+ * ⚡ / ⚙ text glyphs (colour emoji on systems with emoji fonts, and optically
+ * inconsistent). Geometry from Feather Icons (MIT): 24-unit grid, 2px stroke.
  */
 
 type IconProps = {
@@ -119,7 +114,6 @@ export function SlidersIcon({ size = 12 }: IconProps) {
   );
 }
 
-/** Session count — replaces the 👤 in connection stats. */
 export function UserIcon({ size = 12 }: IconProps) {
   return (
     <svg
@@ -139,7 +133,6 @@ export function UserIcon({ size = 12 }: IconProps) {
   );
 }
 
-/** API key count — replaces the 🔑 in connection stats. */
 export function KeyIcon({ size = 12 }: IconProps) {
   return (
     <svg
@@ -159,7 +152,6 @@ export function KeyIcon({ size = 12 }: IconProps) {
   );
 }
 
-/** Token count — replaces the 🎫 in connection stats. */
 export function FileTextIcon({ size = 12 }: IconProps) {
   return (
     <svg
@@ -181,7 +173,6 @@ export function FileTextIcon({ size = 12 }: IconProps) {
   );
 }
 
-/** OAuth connection count — replaces the 🔓 in connection stats. */
 export function UnlockIcon({ size = 12 }: IconProps) {
   return (
     <svg
@@ -198,6 +189,30 @@ export function UnlockIcon({ size = 12 }: IconProps) {
       <rect x="5" y="11" width="14" height="10" rx="2" ry="2" />
       <path d="M8 11V7a4 4 0 0 1 8 0" />
       <circle cx="12" cy="16" r="1" />
+    </svg>
+  );
+}
+
+/**
+ * Blocked/disabled marker (Feather "slash" geometry): used where a model is
+ * disabled, so the count reads as "disabled" without a text label.
+ */
+export function BanIcon({ size = 12 }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {/* r=9 keeps this circle distinct from the globe glyph. */}
+      <circle cx="12" cy="12" r="9" />
+      <line x1="5.64" y1="5.64" x2="18.36" y2="18.36" />
     </svg>
   );
 }

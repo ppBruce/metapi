@@ -21,7 +21,7 @@ Metapi 当前有三类主要配置入口：
 | 你要改什么 | 优先去哪里 | 说明 |
 |----------|------------|------|
 | 日常系统设置 | 管理后台「设置」 | 大部分运行时配置都在这里，保存后直接生效或按提示重启 |
-| 通知渠道 | 管理后台「通知设置」 | Webhook / Bark / Server酱 / Telegram / SMTP 都有 UI |
+| 通知渠道 | 管理后台「通知设置」 | 推送通道（钉钉 / 飞书 / 企微 / 自定义 Webhook，可多条）/ Server酱 / Telegram / SMTP 都有 UI |
 | 下游项目级 Key | 管理后台「下游密钥」 | 不要再回到环境变量里硬塞 |
 | 首次启动令牌、端口、数据目录 | `.env` / 容器环境变量 | 这类属于部署级初始化 |
 | OAuth 客户端 ID / Secret | `.env` / 容器环境变量 | 当前没有 UI |
@@ -44,7 +44,6 @@ Metapi 当前有三类主要配置入口：
 | 系统代理 | `SYSTEM_PROXY_URL` | 保存后即时生效 |
 | 代理失败判定 | 失败关键词、空内容失败判定 | 保存后即时生效 |
 | Codex 上游传输与会话并发 | WebSocket 开关、并发与队列参数 | 保存后即时生效 |
-| 批量测活 | 后台模型可用性探测开关 | 保存后即时生效 |
 | 路由策略 | 成本/余额/使用率权重、默认单价、首字超时、路由探测率、协议回退、失败冷却上限 | 保存后即时生效 |
 | 全局品牌屏蔽 | 全局品牌屏蔽 | 保存后即时生效，并触发路由重建 |
 | 全局模型白名单 | 全局模型白名单 | 保存后即时生效，并触发路由重建 |
@@ -64,8 +63,7 @@ Metapi 当前有三类主要配置入口：
 
 | UI 项 | 说明 | 生效方式 |
 |------|------|----------|
-| Webhook | 企业微信 / 飞书 / 通用 Webhook | 保存后即时生效 |
-| Bark | Bark 推送地址与开关 | 保存后即时生效 |
+| 推送通道 | 可配置**多条**并同时生效，每条各自填平台（钉钉 / 飞书 / 企业微信 / 自定义）、地址、签名密钥、启用开关 | 保存后即时生效 |
 | Server酱 | SendKey 与开关 | 保存后即时生效 |
 | Telegram | API Base URL、Chat ID、Topic ID、Bot Token、是否走系统代理 | 保存后即时生效 |
 | SMTP | SMTP 主机、端口、账号、密码、发件/收件地址 | 保存后即时生效 |
@@ -178,19 +176,11 @@ Metapi 当前有三类主要配置入口：
 | `TOKEN_ROUTER_CACHE_TTL_MS` | Token 路由缓存 TTL（毫秒） | `1500` |
 | `PROXY_LOG_RETENTION_DAYS` | 代理日志保留天数 | `30` |
 | `PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES` | 代理日志清理任务执行间隔（分钟） | `30` |
-| `MODEL_AVAILABILITY_PROBE_ALLOW` | 是否允许启用批量测活（默认禁止） | `false` |
-| `MODEL_AVAILABILITY_PROBE_ENABLED` | 批量测活开关（需先设 `MODEL_AVAILABILITY_PROBE_ALLOW=true` 才生效） | `false` |
-| `MODEL_AVAILABILITY_PROBE_INTERVAL_MS` | 批量测活间隔（毫秒） | `1800000` |
-| `MODEL_AVAILABILITY_PROBE_TIMEOUT_MS` | 批量测活单次探测超时（毫秒） | `30000` |
+| `MODEL_AVAILABILITY_PROBE_TIMEOUT_MS` | 按需模型探测单次超时（毫秒） | `30000` |
 | `PROXY_FIRST_BYTE_TIMEOUT_SEC` | 单次通道首字超时（秒）；0 关闭 | `30` |
 | `PROXY_STICKY_SESSION_TTL_MS` | soft sticky / 会话粘性 TTL（毫秒） | `30000` |
 | `PROXY_CHANNEL_FAILOVER_BUDGET_MS` | 多通道 failover 总预算（毫秒）；0 用 soft 默认 30s | `0` |
-| `MODEL_AVAILABILITY_PROBE_CONCURRENCY` | 批量测活并发数 | `1` |
 
-注意：
-
-- **批量测活开关本身**已经在 UI 里有了
-- 这里只剩下间隔、超时、并发这些更高级的细项还没有 UI
 
 ### 5. 路由与故障转移（proxy 核心行为）
 
@@ -276,6 +266,8 @@ Metapi 当前有三类主要配置入口：
 | `TUNNEL_ENABLED` | 启用 Cloudflare Quick Tunnel | `false` |
 | `TUNNEL_DASHBOARD_ACCESS` | 允许通过隧道访问管理后台 | `false` |
 
+隧道下始终禁止的操作（即使已开启控制台访问）：修改管理员登录令牌、管理员 IP 白名单、隧道开关与隧道控制台访问权限、切换/迁移运行时数据库、导入备份（含 WebDAV 拉取）、恢复出厂设置。控制台会把这些入口置灰，服务端同时拒绝请求。
+
 ### 11. 数据库连接
 
 | 变量名 | 说明 | 默认值 |
@@ -306,7 +298,6 @@ Metapi 当前有三类主要配置入口：
 - 系统代理
 - 定时任务
 - 路由策略
-- 批量测活开关
 - 安全白名单
 - 通知渠道
 - 下游密钥
@@ -344,20 +335,27 @@ Metapi 当前的配置关系可以概括为：
 
 虽然我更推荐直接去「通知设置」页面，但为了方便查字段，这里保留一个速查表。
 
-### Webhook
+### 推送通道（钉钉 / 飞书 / 企业微信 / 自定义 Webhook）
+
+推送通道是**列表**：可以在「通知设置」里加任意多条，每条各自填平台、地址、签名密钥和启用开关，
+互不影响（钉钉与飞书可以各用自己的密钥同时跑）。平台留空时按地址自动识别
+（`oapi.dingtalk.com/robot/send` → 钉钉、`open.feishu.cn` / `open.larksuite.com` 的 `/bot/v2/hook/` → 飞书、
+`qyapi.weixin.qq.com/cgi-bin/webhook/send` → 企业微信），签名位置随平台：钉钉签在 URL 查询串、飞书签在请求体、企微不需要签名。
+消息按各平台能渲染的 IM 卡片形态发 markdown（标题、表格、加粗）。
 
 | UI / 变量 | 说明 | 默认值 |
 |--------|------|--------|
-| `WEBHOOK_ENABLED` | 启用 Webhook 通知 | `true` |
-| `WEBHOOK_URL` | Webhook 推送地址 | 空 |
-| `WEBHOOK_SECRET` | Webhook 签名密钥（可选） | 空 |
+| `WEBHOOK_ENABLED` | 旧的单一 Webhook 开关，**仅作为一次性迁移来源** | `true` |
+| `WEBHOOK_URL` | 旧的单一 Webhook 地址，启动时一次性迁入第一条推送通道 | 空 |
+| `WEBHOOK_SECRET` | 旧的单一 Webhook 签名密钥，同上 | 空 |
 
-### Bark（iOS 推送）
+旧的 `webhook_url` / `webhook_secret` / `webhook_enabled` 三个键在迁移后**保持原样不删**，作为回滚路径；
+日常配置请直接用「通知设置」里的推送通道列表，不要再写这些键。
 
-| UI / 变量 | 说明 | 默认值 |
-|--------|------|--------|
-| `BARK_ENABLED` | 启用 Bark 推送 | `true` |
-| `BARK_URL` | Bark 推送地址 | 空 |
+### Bark
+
+Bark 已**不再是独立渠道**（`BARK_ENABLED` / `BARK_URL` 已移除）。升级时如果旧的 Bark 地址与 Webhook 地址相同，
+它会被并入第一条推送通道并保持启用；否则请改用自定义推送通道填 Bark 的推送地址。
 
 ### Server酱
 

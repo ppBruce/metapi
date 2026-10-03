@@ -1,6 +1,7 @@
 import React from 'react';
 import CenteredModal from '../../components/CenteredModal.js';
 import { StatusPill } from '../../components/StatusText.js';
+import { fuzzyMatch } from '../helpers/fuzzySearch.js';
 
 type AccountModelRow = {
   name: string;
@@ -48,6 +49,12 @@ export default function AccountModelsModal({
   onRemoveManualModel,
   removingManualModelName,
 }: AccountModelsModalProps) {
+  const [modelSearch, setModelSearch] = React.useState('');
+  const searchQuery = modelSearch.trim();
+  const enabledCount = modelModal.models.filter((model) => !modelModal.pendingDisabled.has(model.name)).length;
+  const filteredModels = searchQuery
+    ? modelModal.models.filter((model) => fuzzyMatch(model.name, searchQuery))
+    : modelModal.models;
   return (
     <CenteredModal
       open={modelModal.open}
@@ -96,18 +103,24 @@ export default function AccountModelsModal({
                     ref={(el) => {
                       if (el) {
                         const total = modelModal.models.length;
-                        const disabled = modelModal.pendingDisabled.size;
+                        const disabled = modelModal.models.filter(
+                          (model) => modelModal.pendingDisabled.has(model.name),
+                        ).length;
                         el.indeterminate = disabled > 0 && disabled < total;
                       }
                     }}
                     onChange={() => {
-                      const allEnabled = modelModal.pendingDisabled.size === 0;
-                      onSetPendingDisabled(allEnabled ? new Set(modelModal.models.map((model) => model.name)) : new Set());
+                      const allEnabled = modelModal.models.every(
+                        (model) => !modelModal.pendingDisabled.has(model.name),
+                      );
+                      onSetPendingDisabled(allEnabled
+                        ? new Set(modelModal.models.map((model) => model.name))
+                        : new Set());
                     }}
                     style={{ accentColor: 'var(--color-primary)', width: 15, height: 15 }}
                   />
                   <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    已启用 <strong style={{ color: 'var(--color-text-primary)' }}>{modelModal.models.length - modelModal.pendingDisabled.size}</strong> / {modelModal.models.length} 个模型
+                    已启用 <strong style={{ color: 'var(--color-text-primary)' }}>{enabledCount}</strong> / {modelModal.models.length} 个模型
                   </span>
                 </label>
                 <div style={{ display: 'flex', gap: 6 }}>
@@ -149,13 +162,39 @@ export default function AccountModelsModal({
                 </div>
               </div>
 
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  value={modelSearch}
+                  onChange={(e) => setModelSearch(e.target.value)}
+                  placeholder="搜索模型（支持模糊匹配）"
+                  style={{ ...inputStyle, flex: 1, minWidth: 0, padding: '8px 10px', fontSize: 12 }}
+                />
+                {searchQuery ? (
+                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
+                    {filteredModels.length}/{modelModal.models.length}
+                  </span>
+                ) : null}
+                <button
+                  onClick={() => setModelSearch('')}
+                  disabled={!searchQuery}
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12, padding: '4px 10px', whiteSpace: 'nowrap' }}
+                >
+                  清空
+                </button>
+              </div>
+
               <div style={{
                 maxHeight: 280,
                 overflowY: 'auto',
                 border: '1px solid var(--color-border-light)',
                 borderRadius: 'var(--radius-sm)',
               }}>
-                {modelModal.models.map((model, idx) => {
+                {searchQuery && filteredModels.length === 0 ? (
+                  <div style={{ padding: '24px 14px', textAlign: 'center', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    没有匹配的模型
+                  </div>
+                ) : filteredModels.map((model, idx) => {
                   const isDisabled = modelModal.pendingDisabled.has(model.name);
                   return (
                     <label
@@ -167,7 +206,7 @@ export default function AccountModelsModal({
                         padding: '9px 14px',
                         cursor: 'pointer',
                         background: isDisabled ? 'var(--color-bg)' : undefined,
-                        borderBottom: idx < modelModal.models.length - 1 ? '1px solid var(--color-border-light)' : undefined,
+                        borderBottom: idx < filteredModels.length - 1 ? '1px solid var(--color-border-light)' : undefined,
                         opacity: isDisabled ? 0.55 : 1,
                         transition: 'opacity 0.15s, background 0.15s',
                       }}
@@ -218,7 +257,7 @@ export default function AccountModelsModal({
                 })}
               </div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                💡 禁用的模型将对整个站点生效，该站点下所有连接都不会使用这些模型进行代理。
+                💡 禁用的模型只对这个 key 生效，同一站点的其他 key 不受影响。
               </div>
             </>
           )}

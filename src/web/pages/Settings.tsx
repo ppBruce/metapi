@@ -7,6 +7,7 @@ import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import ModernSelect from '../components/ModernSelect.js';
 import ResponsiveFormGrid from '../components/ResponsiveFormGrid.js';
 import FactoryResetModal from './settings/FactoryResetModal.js';
+import { useTunnelClientView } from './helpers/useTunnelClientView.js';
 import {
   createCodexDefaultHighReasoningVisualPreset,
   createVisualPayloadRule,
@@ -63,7 +64,6 @@ type RuntimeSettings = {
   logCleanupUsageLogsEnabled: boolean;
   logCleanupProgramLogsEnabled: boolean;
   logCleanupRetentionDays: number;
-  modelAvailabilityProbeEnabled: boolean;
   sensitiveWordDetectionEnabled: boolean;
   antiProbeMinTextLength: number;
   codexUpstreamWebsocketEnabled: boolean;
@@ -79,6 +79,7 @@ type RuntimeSettings = {
   proxyFirstByteTimeoutSec: number;
   proxyChannelFailoverMaxAttempts: number;
   proxyRouteProbeRate: number;
+  proxyConcurrencySpreadEnabled: boolean;
   routeFailureCooldownMaxValue: number;
   routeFailureCooldownMaxUnit: RouteCooldownUnit;
   routeProbabilityFloor: number;
@@ -90,7 +91,6 @@ type RuntimeSettings = {
   adminIpAllowlist?: string[];
   currentAdminIp?: string;
 };
-
 
 type DatabaseMigrationSummary = {
   dialect: DbDialect;
@@ -122,14 +122,12 @@ type RuntimeDatabaseState = {
   restartRequired: boolean;
 };
 
-
 export default function Settings() {
   const isMobile = useIsMobile();
-  const isTunnelClientView = typeof window !== 'undefined'
-    && (
-      window.location.hostname.endsWith('.trycloudflare.com')
-      || window.location.hostname.endsWith('.abc-tunnel.us')
-    );
+  // Server answer wins once /api/settings/runtime has loaded; the hostname
+  // heuristic only covers the window before it arrives (and offline shells).
+  const [serverTunnelClientView, setServerTunnelClientView] = useState<boolean | null>(null);
+  const isTunnelClientView = useTunnelClientView(serverTunnelClientView);
   const [runtime, setRuntime] = useState<RuntimeSettings>({
     tunnelDashboardAccess: false,
     tunnelEnabled: false,
@@ -141,7 +139,6 @@ export default function Settings() {
     logCleanupUsageLogsEnabled: false,
     logCleanupProgramLogsEnabled: false,
     logCleanupRetentionDays: 30,
-    modelAvailabilityProbeEnabled: false,
     sensitiveWordDetectionEnabled: true,
     antiProbeMinTextLength: 8,
     codexUpstreamWebsocketEnabled: false,
@@ -157,6 +154,7 @@ export default function Settings() {
     proxyFirstByteTimeoutSec: 15,
     proxyChannelFailoverMaxAttempts: 8,
     proxyRouteProbeRate: 0.15,
+    proxyConcurrencySpreadEnabled: true,
     routeFailureCooldownMaxValue: 30,
     routeFailureCooldownMaxUnit: 'day',
     routeProbabilityFloor: 0.05,
@@ -241,7 +239,6 @@ export default function Settings() {
       database: defaults.database,
     }));
   }, [migrationDialect]);
-
 
   useEffect(() => {
     if (!factoryResetOpen) {
@@ -431,7 +428,6 @@ export default function Settings() {
         logCleanupRetentionDays: Number(runtimeInfo.logCleanupRetentionDays) >= 1
           ? Math.trunc(Number(runtimeInfo.logCleanupRetentionDays))
           : 30,
-        modelAvailabilityProbeEnabled: !!runtimeInfo.modelAvailabilityProbeEnabled,
         sensitiveWordDetectionEnabled: runtimeInfo.sensitiveWordDetectionEnabled !== false,
         antiProbeMinTextLength: Number(runtimeInfo.antiProbeMinTextLength) >= 1
           ? Math.trunc(Number(runtimeInfo.antiProbeMinTextLength))
@@ -467,6 +463,7 @@ export default function Settings() {
         proxyRouteProbeRate: Number(runtimeInfo.proxyRouteProbeRate) >= 0 && Number(runtimeInfo.proxyRouteProbeRate) <= 1
           ? Number(runtimeInfo.proxyRouteProbeRate)
           : 0.15,
+        proxyConcurrencySpreadEnabled: runtimeInfo.proxyConcurrencySpreadEnabled !== false,
         routeFailureCooldownMaxValue: routeCooldownInput.value,
         routeFailureCooldownMaxUnit: routeCooldownInput.unit,
         routeProbabilityFloor: Number(runtimeInfo.routeProbabilityFloor) >= 0.03 && Number(runtimeInfo.routeProbabilityFloor) <= 0.15
@@ -489,6 +486,9 @@ export default function Settings() {
         tunnelEnabled: !!runtimeInfo.tunnelEnabled,
         currentAdminIp: typeof runtimeInfo.currentAdminIp === 'string' ? runtimeInfo.currentAdminIp : '',
       });
+      setServerTunnelClientView(
+        typeof runtimeInfo.tunnelClientView === 'boolean' ? runtimeInfo.tunnelClientView : null,
+      );
       setProxyErrorKeywordsText(
         Array.isArray(runtimeInfo.proxyErrorKeywords)
           ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string').join('\n')
@@ -572,8 +572,6 @@ export default function Settings() {
     }
   };
 
-
-
   const saveProxyTransportSettings = async () => {
     setSavingProxyTransport(true);
     try {
@@ -622,7 +620,6 @@ export default function Settings() {
       setSavingProxyTransport(false);
     }
   };
-
 
   const saveProxyFailureRules = async () => {
     setSavingProxyFailureRules(true);
@@ -743,6 +740,7 @@ export default function Settings() {
         proxyRouteProbeRate: Number.isFinite(runtime.proxyRouteProbeRate)
           ? Math.min(1, Math.max(0, runtime.proxyRouteProbeRate))
           : 0.15,
+        proxyConcurrencySpreadEnabled: runtime.proxyConcurrencySpreadEnabled !== false,
         tokenRouterFailureCooldownMaxSec: toRouteCooldownSeconds(
           runtime.routeFailureCooldownMaxValue,
           runtime.routeFailureCooldownMaxUnit,
@@ -798,7 +796,6 @@ export default function Settings() {
       setSavingSecurity(false);
     }
   };
-
 
   const handleClearCache = async () => {
     if (!window.confirm('确认清理模型缓存并重建路由？')) return;
@@ -857,7 +854,6 @@ export default function Settings() {
     if (factoryResetting) return;
     setFactoryResetOpen(false);
   };
-
 
   const handleFactoryReset = async () => {
     if (factoryResetSecondsLeft > 0 || factoryResetting) return;
@@ -1025,7 +1021,8 @@ export default function Settings() {
             borderRadius: 'var(--radius-sm)',
             border: '1px solid var(--color-border-light)',
             background: 'var(--color-bg)',
-            cursor: 'pointer',
+            cursor: isTunnelClientView ? 'not-allowed' : 'pointer',
+            opacity: isTunnelClientView ? 0.55 : 1,
           }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)' }}>
@@ -1180,7 +1177,6 @@ export default function Settings() {
             </button>
           </div>
         </div>
-
 
         <div className="card animate-slide-up stagger-5" style={{ padding: 20, order: 4 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>代理失败判定</div>
@@ -1695,6 +1691,26 @@ export default function Settings() {
               默认 0.15（15%）。首次请求有一定概率跳过会话粘性和上次成功记录，直接进入加权均衡选路。设为 0 关闭探测、1 每次都探测。
             </div>
           </div>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+              并发分散路由（并发请求避开占用中的通道）
+            </div>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={runtime.proxyConcurrencySpreadEnabled !== false}
+                onChange={(e) => setRuntime((prev) => ({
+                  ...prev,
+                  proxyConcurrencySpreadEnabled: e.target.checked,
+                }))}
+                style={{ width: 15, height: 15, accentColor: 'var(--color-primary)' }}
+              />
+              并发大于 1 时，第二路请求改挑空闲的另一条通道（不同站点优先）
+            </label>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7, marginTop: 6 }}>
+              默认开启。粘性/上次成功通道正在服务请求时，第二路并发改走空闲候选，避免单站点瞬时 RPM 过高；并发为 1 时行为完全不变。
+            </div>
+          </div>
           </div>
           <div>
           <div style={{ marginBottom: 12, maxWidth: 280 }}>
@@ -1838,7 +1854,6 @@ export default function Settings() {
           </label>
           </div>
           </div>
-
 
           <div className={`anim-collapse ${showAdvancedRouting ? 'is-open' : ''}`.trim()}>
             <div className="anim-collapse-inner" style={{ paddingTop: 2 }}>
@@ -2102,14 +2117,16 @@ export default function Settings() {
             </button>
             <button
               onClick={handleMigrateToExternalDatabase}
-              disabled={migratingDatabase || testingMigrationConnection || savingRuntimeDatabase}
+              disabled={isTunnelClientView || migratingDatabase || testingMigrationConnection || savingRuntimeDatabase}
+              title={isTunnelClientView ? '公网隧道访问时不可用，请在本机/内网控制台操作' : undefined}
               className="btn btn-primary"
             >
               {migratingDatabase ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 迁移中...</> : '开始迁移'}
             </button>
             <button
               onClick={handleSaveRuntimeDatabaseConfig}
-              disabled={savingRuntimeDatabase || migratingDatabase || testingMigrationConnection}
+              disabled={isTunnelClientView || savingRuntimeDatabase || migratingDatabase || testingMigrationConnection}
+              title={isTunnelClientView ? '公网隧道访问时不可用，请在本机/内网控制台操作' : undefined}
               className="btn btn-ghost"
               style={{ border: '1px solid var(--color-border)' }}
             >
@@ -2143,8 +2160,6 @@ export default function Settings() {
 
         <div style={{ order: 0, gridColumn: '1 / -1' }}><UpdateCenterSection /></div>
 
-
-
         <div className="card animate-slide-up stagger-7" style={{ padding: 20, order: 10, border: '1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border))' }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10, color: 'var(--color-danger)' }}>危险操作</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 12 }}>
@@ -2153,7 +2168,12 @@ export default function Settings() {
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 14 }}>
             完成后管理员 Token 保留当前值不变，页面将自动刷新并恢复登录态。
           </div>
-          <button onClick={() => setFactoryResetOpen(true)} className="btn btn-danger">
+          <button
+            onClick={() => setFactoryResetOpen(true)}
+            disabled={isTunnelClientView}
+            title={isTunnelClientView ? '公网隧道访问时不可用，请在本机/内网控制台操作' : undefined}
+            className="btn btn-danger"
+          >
             重新初始化系统
           </button>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}>
@@ -2189,7 +2209,12 @@ export default function Settings() {
             style={{ ...inputStyle, fontFamily: 'var(--font-mono)', resize: 'vertical', marginBottom: 10 }}
           />
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button onClick={saveSecuritySettings} disabled={savingSecurity || isTunnelClientView} className="btn btn-primary">
+            <button
+              onClick={saveSecuritySettings}
+              disabled={savingSecurity || isTunnelClientView}
+              title={isTunnelClientView ? '公网隧道访问时不可用，请在本机/内网控制台操作' : undefined}
+              className="btn btn-primary"
+            >
               {savingSecurity ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存安全设置'}
             </button>
             <button
@@ -2241,7 +2266,7 @@ export default function Settings() {
             </label>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button onClick={saveAntiProbeSettings} disabled={savingSecurity || isTunnelClientView} className="btn btn-primary">
+            <button onClick={saveAntiProbeSettings} disabled={savingSecurity} className="btn btn-primary">
               {savingSecurity ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存反探测设置'}
             </button>
           </div>

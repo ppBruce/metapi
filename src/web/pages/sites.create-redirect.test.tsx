@@ -1,8 +1,3 @@
-/**
- * @Author: 橘子
- * @Project_description: Metapi 站点创建跳转测试
- * @Description: 代码是我抄的，不会也是真的
- */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -15,7 +10,6 @@ const { apiMock } = vi.hoisted(() => ({
     getSites: vi.fn(),
     getOAuthProviders: vi.fn().mockResolvedValue({ providers: [] }),
     addSite: vi.fn(),
-    getSiteDisabledModels: vi.fn().mockResolvedValue({ models: [] }),
     getSiteAvailableModels: vi.fn().mockResolvedValue({ models: [] }),
   },
 }));

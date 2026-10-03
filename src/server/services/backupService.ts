@@ -6,6 +6,7 @@ import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { PLATFORM_ALIASES, detectPlatformByUrlHint } from '../../shared/platformIdentity.js';
+import { fanoutSiteWideDisabledModels } from './siteDisabledModels.js';
 
 const BACKUP_VERSION = '2.1';
 
@@ -80,7 +81,10 @@ type BackupRouteChannelRow = Omit<RouteChannelRow,
   | 'cooldownUntil'
 >>;
 
-type BackupSiteDisabledModelRow = Pick<SiteDisabledModelRow, 'siteId' | 'modelName'>;
+type BackupSiteDisabledModelRow = Pick<SiteDisabledModelRow, 'siteId' | 'modelName'> & {
+  /** Nullable: absent in backups written before per-key disabling. */
+  accountId?: number | null;
+};
 type BackupManualModelRow = {
   accountId: number;
   modelName: string;
@@ -98,8 +102,8 @@ type BackupDownstreamApiKeyRow = Pick<DownstreamApiKeyRow,
   | 'supportedModels'
   | 'allowedRouteIds'
   | 'siteWeightMultipliers'
-  | 'excludedSiteIds'
-  | 'excludedCredentialRefs'
+  | 'allowedSiteIds'
+  | 'allowedCredentialRefs'
 > & Partial<Pick<DownstreamApiKeyRow, 'usedCost' | 'usedRequests' | 'lastUsedAt'>>;
 
 interface AccountsBackupSection {
@@ -1342,6 +1346,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
     routeGroupSources,
     siteDisabledModels: siteDisabledModels.map((row) => ({
       siteId: row.siteId,
+      accountId: row.accountId ?? null,
       modelName: row.modelName,
     })),
     manualModels: manualModels.map((row) => ({
@@ -1672,6 +1677,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
       for (const row of section.siteDisabledModels || []) {
         await tx.insert(schema.siteDisabledModels).values({
           siteId: row.siteId,
+          accountId: row.accountId ?? null,
           modelName: row.modelName,
         }).run();
       }
@@ -1775,8 +1781,8 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
           supportedModels: row.supportedModels ?? null,
           allowedRouteIds: row.allowedRouteIds ?? null,
           siteWeightMultipliers: row.siteWeightMultipliers ?? null,
-          excludedSiteIds: row.excludedSiteIds ?? null,
-          excludedCredentialRefs: row.excludedCredentialRefs ?? null,
+          allowedSiteIds: row.allowedSiteIds ?? null,
+          allowedCredentialRefs: row.allowedCredentialRefs ?? null,
           lastUsedAt: runtimeDownstream?.lastUsedAt ?? row.lastUsedAt ?? null,
         }).run();
         const downstreamApiKeyId = requireInsertedRowId(
@@ -1835,6 +1841,11 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
       }).run();
     }
   });
+
+  // Backups may carry legacy site-wide disabled-model rows (account_id NULL,
+  // pre-v1.8). Fan the leftovers out to each key so the imported data follows
+  // the per-key model immediately — no restart needed.
+  await fanoutSiteWideDisabledModels();
 }
 
 async function importPreferencesSection(section: PreferencesBackupSection): Promise<Array<{ key: string; value: unknown }>> {

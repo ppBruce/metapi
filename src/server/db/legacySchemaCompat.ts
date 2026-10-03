@@ -57,6 +57,8 @@ const BOOTSTRAP_OWNED_LEGACY_COLUMNS = [
   'downstream_api_keys.tags',
   'downstream_api_keys.sensitive_word_detection',
   'downstream_api_keys.model_mappings',
+  'downstream_api_keys.allowed_site_ids',
+  'downstream_api_keys.allowed_credential_refs',
   'route_channels.request_override_rules',
   'proxy_logs.billing_details',
   'proxy_logs.is_stream',
@@ -109,7 +111,7 @@ const LEGACY_COMPAT_TABLES = new Set([
 ]);
 
 const LEGACY_COMPAT_COLUMNS = new Set([
-  ...SITE_COLUMN_COMPATIBILITY_SPECS.map((spec) => `sites.${spec.column}`),
+  ...SITE_COLUMN_COMPATIBILITY_SPECS.map((spec) => `${spec.table ?? 'sites'}.${spec.column}`),
   ...ACCOUNT_TOKEN_COLUMN_COMPATIBILITY_SPECS.map((spec) => `${spec.table}.${spec.column}`),
   ...ROUTE_GROUPING_COLUMN_COMPATIBILITY_SPECS.map((spec) => `${spec.table}.${spec.column}`),
   ...PROXY_FILE_COLUMN_COMPATIBILITY_SPECS.map((spec) => `${spec.table}.${spec.column}`),
@@ -136,11 +138,25 @@ const LEGACY_COMPAT_UPDATES = new Set(
     .map((sqlText) => normalizeSqlText(sqlText)),
 );
 
+// Indexes the compat layer is allowed to drop. Replacing a unique index is not
+// data loss, and the per-key disabled-model scope needs the old
+// (site_id, model_name) uniqueness replaced by (site_id, account_id, model_name).
+const LEGACY_COMPAT_DROPPABLE_INDEXES = new Set([
+  'site_disabled_models_site_model_unique',
+]);
+
 export function classifyLegacyCompatMutation(sqlText: string): LegacySchemaCompatClassification {
   const normalized = normalizeSqlText(sqlText);
 
   if (LEGACY_COMPAT_UPDATES.has(normalized)) {
     return 'legacy';
+  }
+
+  const dropIndexMatch = normalized.match(
+    /^drop index(?: if exists)? [`"]?([a-z0-9_]+)[`"]?/i,
+  );
+  if (dropIndexMatch) {
+    return LEGACY_COMPAT_DROPPABLE_INDEXES.has(dropIndexMatch[1]) ? 'legacy' : 'forbidden';
   }
 
   const createTableMatch = normalized.match(/^create table if not exists [`"]?([a-z0-9_]+)[`"]?/i);
@@ -153,6 +169,16 @@ export function classifyLegacyCompatMutation(sqlText: string): LegacySchemaCompa
   );
   if (alterTableMatch) {
     const [, tableName, columnName] = alterTableMatch;
+    return LEGACY_COMPAT_COLUMNS.has(`${tableName}.${columnName}`) ? 'legacy' : 'forbidden';
+  }
+
+  // MySQL gets the foreign key of a newly added column as a separate
+  // ADD CONSTRAINT statement (it ignores inline REFERENCES on ADD COLUMN).
+  const addConstraintMatch = normalized.match(
+    /^alter table [`"]?([a-z0-9_]+)[`"]? add constraint [`"]?[a-z0-9_]+[`"]? foreign key \([`"]?([a-z0-9_]+)[`"]?\)/i,
+  );
+  if (addConstraintMatch) {
+    const [, tableName, columnName] = addConstraintMatch;
     return LEGACY_COMPAT_COLUMNS.has(`${tableName}.${columnName}`) ? 'legacy' : 'forbidden';
   }
 

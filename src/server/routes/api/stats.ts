@@ -21,14 +21,11 @@ import {
   fetchModelPricingCatalog,
 } from '../../services/modelPricingService.js';
 import {
-  buildModelAvailabilityProbeTaskDedupeKey,
   probeSingleModelAvailability,
   probeSingleModelAvailabilityStream,
-  queueModelAvailabilityProbeTask,
-  type ModelAvailabilityProbeExecutionResult,
-} from '../../services/modelAvailabilityProbeService.js';
+} from '../../services/modelMarketplaceProbeService.js';
 import { getUpstreamModelDescriptionsCached } from '../../services/upstreamModelDescriptionService.js';
-import {getRunningTaskByDedupeKey, startBackgroundTask, waitForBackgroundTaskCompletion} from '../../services/backgroundTaskService.js';
+import {getRunningTaskByDedupeKey, startBackgroundTask} from '../../services/backgroundTaskService.js';
 import {
   parseProxyLogBillingDetails,
   withProxyLogSelectFields,
@@ -79,6 +76,14 @@ const MODELS_MARKETPLACE_BASE_TTL_MS = 15_000;
 const MODELS_MARKETPLACE_PRICING_TTL_MS = 90_000;
 const limitModelTokenCandidatesRead = createRateLimitGuard({
   bucket: 'models-token-candidates-read',
+  max: 30,
+  windowMs: 60_000,
+});
+// The marketplace is the most expensive read endpoint (availability joins +
+// 7-day log scans + optional upstream pricing fan-out). Bound it like its
+// sibling reads so a client loop cannot pin the DB / upstreams.
+const limitModelsMarketplaceRead = createRateLimitGuard({
+  bucket: 'models-marketplace-read',
   max: 30,
   windowMs: 60_000,
 });
@@ -1209,6 +1214,7 @@ export async function statsRoutes(app: FastifyInstance) {
   // Models marketplace - refresh upstream models and aggregate.
   app.get<{ Querystring: { refresh?: string; includePricing?: string } }>(
     '/api/models/marketplace',
+    { preHandler: [limitModelsMarketplaceRead] },
     async (request) => {
       const refreshRequested = parseBooleanFlag(request.query.refresh);
       const includePricing = parseBooleanFlag(request.query.includePricing);
@@ -1233,7 +1239,17 @@ export async function statsRoutes(app: FastifyInstance) {
             failureMessage: (currentTask) =>
               `模型广场刷新失败：${currentTask.error || 'unknown error'}`,
           },
-          async () => routeRefreshWorkflow.refreshModelsAndRebuildRoutes(),
+          async () => {
+            try {
+              return await routeRefreshWorkflow.refreshModelsAndRebuildRoutes();
+            } finally {
+              // Availability/routes were rewritten under the running task: any
+              // marketplace payload cached mid-run is pre-refresh data. Drop it
+              // so the next GET rebuilds from the refreshed DB (success OR
+              // failure — a partial pass also leaves stale rows behind).
+              modelsMarketplaceCache.clear();
+            }
+          },
         );
         refreshQueued = !reused;
         refreshReused = reused;
@@ -1547,7 +1563,7 @@ export async function statsRoutes(app: FastifyInstance) {
 
         const sourceModel = String(m.modelName || '').trim();
         if (!sourceModel) continue;
-        if (isModelDisabledForSite(disabledModelsIndex, s.id, sourceModel)) continue;
+        if (isModelDisabledForSite(disabledModelsIndex, s.id, sourceModel, a.id)) continue;
         const canonicalName = canonicalizeModelName(sourceModel) || sourceModel;
         if (!modelMap[canonicalName]) {
           modelMap[canonicalName] = {
@@ -1610,7 +1626,7 @@ export async function statsRoutes(app: FastifyInstance) {
 
         const sourceModel = String(m.modelName || '').trim();
         if (!sourceModel) continue;
-        if (isModelDisabledForSite(disabledModelsIndex, s.id, sourceModel)) continue;
+        if (isModelDisabledForSite(disabledModelsIndex, s.id, sourceModel, a.id)) continue;
         const canonicalName = canonicalizeModelName(sourceModel) || sourceModel;
         if (!modelMap[canonicalName]) {
           modelMap[canonicalName] = {
@@ -1699,9 +1715,14 @@ export async function statsRoutes(app: FastifyInstance) {
           ...account,
           sourceModels: [...account.sourceModels].sort((a, b) => a.localeCompare(b)),
         }));
-        const avgLatency =
-          accounts.reduce((sum, a) => sum + (a.latency || 0), 0) /
-          (accounts.length || 1);
+        // Average only over accounts with a known probe: counting never-probed
+        // accounts as 0ms fabricated "fast" averages (680ms + null → 340ms).
+        const knownLatencies = accounts
+          .map((a) => a.latency)
+          .filter((latency): latency is number => Number.isFinite(latency) && latency != null);
+        const avgLatency = knownLatencies.length > 0
+          ? knownLatencies.reduce((sum, latency) => sum + latency, 0) / knownLatencies.length
+          : null;
         const metadata = modelMetadataMap.get(m.name.toLowerCase());
         const fallbackDescription = metadata?.description
           ? null
@@ -1722,7 +1743,7 @@ export async function statsRoutes(app: FastifyInstance) {
             (sum, account) => sum + account.tokens.length,
             0,
           ),
-          avgLatency: Math.round(avgLatency),
+          avgLatency: avgLatency == null ? null : Math.round(avgLatency),
           avgFirstByteMs,
           avgThroughputTps,
           throughputSampleCount,
@@ -1755,6 +1776,9 @@ export async function statsRoutes(app: FastifyInstance) {
           refreshRunning: !!runningRefreshTask,
           refreshJobId,
           includePricing,
+          // Explicit on both paths so clients can rely on its presence:
+          // true = served from cache, false = freshly computed.
+          cacheHit: false,
         },
       };
     },
@@ -1883,7 +1907,7 @@ export async function statsRoutes(app: FastifyInstance) {
       for (const row of rows) {
         const modelName = (row.token_model_availability.modelName || '').trim();
         if (!modelName) continue;
-        if (isModelDisabledForSite(disabledModelsIndex, row.sites.id, modelName)) continue;
+        if (isModelDisabledForSite(disabledModelsIndex, row.sites.id, modelName, row.accounts.id)) continue;
         const accountModelKey = `${row.accounts.id}::${modelName.toLowerCase()}`;
         coveredAccountModelSet.add(accountModelKey);
 
@@ -1933,7 +1957,7 @@ export async function statsRoutes(app: FastifyInstance) {
         if (!requiresManagedAccountTokens(row)) continue;
         const modelName = (row.modelName || '').trim();
         if (!modelName) continue;
-        if (isModelDisabledForSite(disabledModelsIndex, row.siteId, modelName)) continue;
+        if (isModelDisabledForSite(disabledModelsIndex, row.siteId, modelName, row.accountId)) continue;
         const coverageKey = `${row.accountId}::${modelName.toLowerCase()}`;
         if (coveredAccountModelSet.has(coverageKey)) continue;
         if (!modelsWithoutToken[modelName]) modelsWithoutToken[modelName] = [];
@@ -2135,120 +2159,6 @@ export async function statsRoutes(app: FastifyInstance) {
       const refresh = await refreshModelsForAccount(accountId);
       const rebuild = await routeRefreshWorkflow.rebuildRoutesOnly();
       return { success: true, refresh, rebuild };
-    },
-  );
-
-  app.post<{ Body?: { accountId?: number; wait?: boolean } }>(
-    '/api/models/probe',
-    async (request, reply) => {
-      if (!config.modelAvailabilityProbeAllow || !config.modelAvailabilityProbeEnabled) {
-        return reply.code(403).send({
-          success: false,
-          message: '批量测活已禁用。请使用 /api/models/probe-one 进行单模型定点探测，或设置 MODEL_AVAILABILITY_PROBE_ALLOW=true 后启用批量测活。',
-        });
-      }
-      const requestBody = request.body;
-      if (requestBody !== undefined && !isRecord(requestBody)) {
-        return reply
-          .code(400)
-          .send({ success: false, message: '请求体必须是对象' });
-      }
-
-      const rawAccountId = requestBody?.accountId as unknown;
-      const normalizedAccountId =
-        rawAccountId === undefined || rawAccountId === null
-          ? ''
-          : String(rawAccountId).trim();
-      const hasAccountId = normalizedAccountId !== '';
-      const parsedAccountId =
-        hasAccountId && /^[1-9]\d*$/.test(normalizedAccountId)
-          ? Number(normalizedAccountId)
-          : undefined;
-      const accountId =
-        parsedAccountId !== undefined && Number.isSafeInteger(parsedAccountId)
-          ? parsedAccountId
-          : undefined;
-      const wait = requestBody?.wait === true;
-
-      if (hasAccountId && accountId === undefined) {
-        return reply
-          .code(400)
-          .send({ success: false, message: '账号 ID 无效' });
-      }
-
-      if (wait) {
-        const taskTitle = accountId
-          ? `探测模型可用性 #${accountId}`
-          : '探测全部模型可用性';
-        const dedupeKey = buildModelAvailabilityProbeTaskDedupeKey(accountId);
-        const runningTask = getRunningTaskByDedupeKey(dedupeKey);
-        const { task, reused } = runningTask
-          ? { task: runningTask, reused: true }
-          : queueModelAvailabilityProbeTask({
-              accountId,
-              title: taskTitle,
-            });
-        const completedTask = await waitForBackgroundTaskCompletion(task.id);
-        if (!completedTask) {
-          return reply
-            .code(500)
-            .send({
-              success: false,
-              message: '模型可用性探测任务不存在或已过期',
-            });
-        }
-        if (completedTask.status === 'failed') {
-          return reply.code(500).send({
-            success: false,
-            reused,
-            jobId: completedTask.id,
-            status: completedTask.status,
-            message: completedTask.error || '模型可用性探测失败',
-          });
-        }
-        const result =
-          completedTask.result as ModelAvailabilityProbeExecutionResult | null;
-        if (!result) {
-          return reply.code(500).send({
-            success: false,
-            reused,
-            jobId: completedTask.id,
-            status: completedTask.status,
-            message: '模型可用性探测结果为空',
-          });
-        }
-        if (accountId && result.summary.totalAccounts === 0) {
-          return reply
-            .code(404)
-            .send({ success: false, message: '账号不存在' });
-        }
-        return {
-          success: true,
-          reused,
-          jobId: completedTask.id,
-          status: completedTask.status,
-          ...result,
-        };
-      }
-
-      const taskTitle = accountId
-        ? `探测模型可用性 #${accountId}`
-        : '探测全部模型可用性';
-      const { task, reused } = queueModelAvailabilityProbeTask({
-        accountId,
-        title: taskTitle,
-      });
-
-      return reply.code(202).send({
-        success: true,
-        queued: true,
-        reused,
-        jobId: task.id,
-        status: task.status,
-        message: reused
-          ? '模型可用性探测任务进行中，请稍后查看任务列表'
-          : '已开始模型可用性探测，请稍后查看任务列表',
-      });
     },
   );
 

@@ -118,9 +118,13 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     logCleanupRetentionDays: Math.max(1, Math.trunc(parseNumber(env.LOG_CLEANUP_RETENTION_DAYS, 30))),
     webhookUrl: env.WEBHOOK_URL || '',
     webhookSecret: env.WEBHOOK_SECRET || '',
-    barkUrl: env.BARK_URL || '',
     webhookEnabled: parseBoolean(env.WEBHOOK_ENABLED, true),
-    barkEnabled: parseBoolean(env.BARK_ENABLED, true),
+    /**
+     * Push channels (one bot webhook + secret each). The legacy
+     * webhook_url/webhook_secret/webhook_enabled keys feed the one-time
+     * migration and stay as a rollback path.
+     */
+    notifyChannels: [] as Array<{ id: string; url: string; secret: string; enabled: boolean; label?: string; kind?: 'dingtalk' | 'feishu' | 'wecom' | 'custom' }>, 
     serverChanEnabled: parseBoolean(env.SERVERCHAN_ENABLED, true),
     serverChanKey: env.SERVERCHAN_KEY || '',
     telegramEnabled: parseBoolean(env.TELEGRAM_ENABLED, false),
@@ -206,6 +210,12 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     // Sticky max-hits only applies to session affinity; last-success uses its
     // own exploration interval above.
     proxyStickyMaxHits: Math.max(1, Math.trunc(parseNumber(env.PROXY_STICKY_MAX_HITS, 5))),
+    // Concurrency-spread routing: when the affinity channel (sticky /
+    // last-success) is already serving a request, a second concurrent hop
+    // picks another idle candidate (different site first) instead of piling
+    // onto the same site, so one site's instant RPM does not spike. Serial
+    // traffic (concurrency == 1) keeps the historical behavior.
+    proxyConcurrencySpreadEnabled: parseBoolean(env.PROXY_CONCURRENCY_SPREAD_ENABLED, true),
     // Probability (0-1) that a first-hop request skips sticky and last-success
     // affinity and goes directly to balanced-v2 weighted sampling. This keeps
     // short-session distributions converging to the configured weights without
@@ -241,14 +251,12 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     proxyDebugRetentionHours: Math.max(1, Math.trunc(parseNumber(env.PROXY_DEBUG_RETENTION_HOURS, 24))),
     proxyDebugMaxBodyBytes: Math.max(1024, Math.trunc(parseNumber(env.PROXY_DEBUG_MAX_BODY_BYTES, 262_144))),
     openAiServiceTierRules: parseJsonValue(env.OPENAI_SERVICE_TIER_RULES_JSON || env.OPENAI_SERVICE_TIER_RULES),
-    // Batch probe is intentionally disabled for this fork unless explicitly allowed.
-    // MODEL_AVAILABILITY_PROBE_ALLOW=true is required before MODEL_AVAILABILITY_PROBE_ENABLED can take effect.
+    // Local global switch for automatic model calls; manual probes stay available.
     modelAvailabilityProbeAllow: parseBoolean(env.MODEL_AVAILABILITY_PROBE_ALLOW, false),
     modelAvailabilityProbeEnabled: parseBoolean(env.MODEL_AVAILABILITY_PROBE_ALLOW, false)
       && parseBoolean(env.MODEL_AVAILABILITY_PROBE_ENABLED, false),
-    modelAvailabilityProbeIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_INTERVAL_MS, 30 * 60 * 1000))),
+    // Timeout shared by the on-demand marketplace probe and post-refresh probes.
     modelAvailabilityProbeTimeoutMs: Math.max(3_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS, 30_000))),
-    modelAvailabilityProbeConcurrency: Math.max(1, Math.min(2, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_CONCURRENCY, 1)))),
     // Channel probe (heartbeat for active channels). Default 30s to match the
     // marketplace probe timeout: free/slow relay sites routinely take >10s to
     // return a first byte, and a too-short heartbeat marks healthy channels as
@@ -330,11 +338,40 @@ export function resolveProxyStreamIdleTimeoutMs(): number {
   return firstByteMs > 0 ? firstByteMs : 0;
 }
 
+/**
+ * Remove credentials accepted through query parameters before Fastify/Pino
+ * serializes a request. Query-key authentication is legacy-compatible, but the
+ * credential must never become durable process/log-shipping data.
+ */
+export function redactSensitiveRequestUrl(rawUrl: string): string {
+  const hashIndex = rawUrl.indexOf('#');
+  const fragment = hashIndex >= 0 ? rawUrl.slice(hashIndex) : '';
+  const withoutFragment = hashIndex >= 0 ? rawUrl.slice(0, hashIndex) : rawUrl;
+  const queryIndex = withoutFragment.indexOf('?');
+  if (queryIndex < 0) return rawUrl;
+  const path = withoutFragment.slice(0, queryIndex);
+  const query = withoutFragment.slice(queryIndex + 1);
+  const redactedQuery = query.replace(
+    /(^|&)((?:key|x-api-key|api[_-]?key|token|access[_-]?token|auth[_-]?token|authorization|password|secret|credential))=([^&]*)/gi,
+    '$1$2=[REDACTED]',
+  );
+  return `${path}?${redactedQuery}${fragment}`;
+}
+
 export function buildFastifyOptions(
   appConfig: ReturnType<typeof buildConfig>,
 ): FastifyServerOptions {
   return {
-    logger: true,
+    logger: {
+      serializers: {
+        req: (request: { method?: string; url?: string; hostname?: string; ip?: string }) => ({
+          method: request.method,
+          url: redactSensitiveRequestUrl(request.url || ''),
+          hostname: request.hostname,
+          remoteAddress: request.ip,
+        }),
+      },
+    },
     // false | true | hop count — avoid unconditionally trusting client-supplied XFF.
     // Default preserves legacy trust-all (true); TRUST_PROXY=false disables; TRUST_PROXY_HOPS=N constrains.
     //

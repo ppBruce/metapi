@@ -2,7 +2,6 @@ import { TextDecoder } from 'node:util';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { config, resolveProxyStreamIdleTimeoutMs } from '../../config.js';
 import { resolveRequestContextRequirement } from '../../shared/requestContextEstimate.js';
-import { resolveSiteProtocolProfile } from '../../shared/siteProtocolProfile.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { reportProxyAllFailed } from '../../services/alertService.js';
 import { hasProxyUsagePayload, mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
@@ -26,6 +25,10 @@ import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
 import {
   downgradeReasoningEffortInBody,
   isReasoningEffortRejection,
+  isNoneReasoningEffortRejection,
+  readReasoningEffortFromBody,
+  resolveInPlaceEffortRetryCeiling,
+  stripReasoningEffortFromBody,
 } from '../../services/reasoningEffort.js';
 import {
   clampRequestBodyToSiteEffortCeiling,
@@ -79,6 +82,7 @@ import {
   selectSurfaceChannelForAttempt,
   trySurfaceOauthRefreshRecovery,
   wireStreamCancelOnClientDisconnect,
+  wireReplyGoneAbortSignal,
 } from './sharedSurface.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import {
@@ -279,6 +283,15 @@ export async function handleChatSurfaceRequest(
     let graceRetriedOnce = false;
     const lastRetryFailure = {
       current: null as ReturnType<typeof finalizeRetryAsUpstreamFailure> | null,
+    };
+    // Non-SSE bodies are read whole. Without a deadline, an upstream that
+    // emits a partial body and stalls holds the request until the client's
+    // own patience runs out (the same stall the SSE idle guard already
+    // covers). Abort when the downstream is gone so nobody reads a dead
+    // request. Budgets follow the stream idle window (proxyFirstByteTimeoutSec).
+    const bodyReadGuards = {
+      idleTimeoutMs: resolveProxyStreamIdleTimeoutMs(),
+      signal: wireReplyGoneAbortSignal(reply),
     };
 
     /**
@@ -529,10 +542,6 @@ export async function handleChatSurfaceRequest(
           oauthProvider: oauth?.provider,
           oauthProjectId: oauth?.projectId,
           sitePlatform: selected.site.platform,
-          requireCodexClient: resolveSiteProtocolProfile({
-            protocolProfile: selected.site.protocolProfile,
-            customHeaders: selected.site.customHeaders,
-          }).requireCodexClient,
           siteUrl: siteApiBaseUrl,
           openaiBody: bodyForEndpoint,
           downstreamFormat,
@@ -601,6 +610,13 @@ export async function handleChatSurfaceRequest(
           ctx.response.status,
           ctx.rawErrText || ctx.errText,
         ),
+        // An effort rejection is a request-shape verdict, not a channel-health
+        // signal: the relay answered instantly and told us which ladder it
+        // accepts. onAttemptFailure just downgraded the shared body, so
+        // redispach the SAME endpoint on this channel immediately instead of
+        // cascading elsewhere with a value other relays may also refuse.
+        shouldRetryInPlace: (ctx) => ctx.response.status === 400
+          && isReasoningEffortRejection(ctx.rawErrText || ctx.errText),
         onAttemptFailure: async (ctx) => {
           // A 400 that names the effort means the value we forwarded is not in
           // this upstream's accepted ladder: relays that only take
@@ -611,16 +627,33 @@ export async function handleChatSurfaceRequest(
           // rejection downgrades — the first attempt always sends exactly what
           // the client asked for.
           if (ctx.response.status === 400 && isReasoningEffortRejection(ctx.rawErrText || ctx.errText)) {
-            // Remember the verdict for this site+protocol so later requests stop
-            // opening with a value this relay refuses, and step this request's
-            // own body down one rung for the failover retry.
-            learnReasoningEffortCeilingFromFailure({
-              siteId: selected.site.id,
-              endpoint: ctx.request.endpoint,
-              errorText: ctx.rawErrText || ctx.errText,
-              body: resolvedOpenAiBody,
-            });
-            downgradeReasoningEffortInBody(resolvedOpenAiBody);
+            // Two kinds of effort verdict:
+            // 1) `none` rejected outright — the model does not support
+            //    disabling reasoning and no ladder rung sits below `none`.
+            //    Strip the field so the in-place retry goes out without it.
+            // 2) A ladder rejection — remember the verdict for this
+            //    site+protocol so later requests stop opening with a value
+            //    this relay refuses, and step this request's own body down
+            //    one rung for the in-place retry. A rejection that spells
+            //    out its accepted ladder ("valid levels: low, medium,
+            //    high") teaches the top accepted rung directly instead of
+            //    one mechanical step below the rejected value.
+            if (isNoneReasoningEffortRejection(ctx.rawErrText || ctx.errText)) {
+              stripReasoningEffortFromBody(resolvedOpenAiBody);
+            } else {
+              const taughtCeiling = resolveInPlaceEffortRetryCeiling({
+                rejectedEffort: readReasoningEffortFromBody(resolvedOpenAiBody),
+                errorText: ctx.rawErrText || ctx.errText,
+              });
+              learnReasoningEffortCeilingFromFailure({
+                siteId: selected.site.id,
+                endpoint: ctx.request.endpoint,
+                errorText: ctx.rawErrText || ctx.errText,
+                body: resolvedOpenAiBody,
+                taughtCeiling,
+              });
+              downgradeReasoningEffortInBody(resolvedOpenAiBody);
+            }
           }
           const memoryWrite = recordUpstreamEndpointFailure({
             ...endpointRuntimeContext,
@@ -716,6 +749,14 @@ export async function handleChatSurfaceRequest(
         latencyMs: leaseResult.waitMs,
         errorMessage: busyMessage,
         retryCount,
+      });
+      // A saturated channel must leave a failure mark: without one the retry
+      // below reselects the same "Channel busy" channel.
+      await failureToolkit.recordChannelFailure({
+        selected,
+        modelName,
+        status: 503,
+        errorText: busyMessage,
       });
       if (
         canFailoverToNextChannel(reply)
@@ -842,7 +883,7 @@ export async function handleChatSurfaceRequest(
         });
         let rawText = '';
         if (isGeminiNativeRuntimePath(successfulUpstreamPath)) {
-          rawText = await readRuntimeResponseText(upstream);
+          rawText = await readRuntimeResponseText(upstream, bodyReadGuards);
           const bridged = buildOpenAiStreamLinesFromGeminiNativeSse(
             rawText,
             modelName,
@@ -874,7 +915,7 @@ export async function handleChatSurfaceRequest(
           return;
         }
         if (!upstreamContentType.includes('text/event-stream')) {
-          const fallbackText = await readRuntimeResponseText(upstream);
+          const fallbackText = await readRuntimeResponseText(upstream, bodyReadGuards);
           rawText = fallbackText;
           if (looksLikeResponsesSseText(fallbackText)) {
             const streamResult = await streamSession.run(
@@ -1183,7 +1224,7 @@ export async function handleChatSurfaceRequest(
         rawText = collected.rawText;
         upstreamData = collected.payload;
       } else {
-        rawText = await readRuntimeResponseText(upstream);
+        rawText = await readRuntimeResponseText(upstream, bodyReadGuards);
         if (looksLikeResponsesSseText(rawText)) {
           upstreamData = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
         } else {
@@ -1321,6 +1362,16 @@ export async function handleChatSurfaceRequest(
         console.warn(`[proxy/chat] client disconnected before completion: ${err?.message || 'client disconnect'}`);
         return;
       }
+      // Same failure-invalidates-last-success rule as the responses surface:
+      // an execution error (transport / site endpoint failure) that escapes the
+      // detected-failure branches must also drop the channel's preferred-hop
+      // status, or the model-level anchor re-prefers a channel whose last
+      // outcome was a crash once the cooldown expires.
+      proxyChannelCoordinator.clearLastSuccessChannel({
+        requestedModel,
+        downstreamApiKeyId,
+        channelId: selected.channel.id,
+      });
       const endpointFailureStatus = typeof err?.status === 'number' ? err.status : null;
       const isSiteApiEndpointFailure = (
         err instanceof SiteApiEndpointRequestError

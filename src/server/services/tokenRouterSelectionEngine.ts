@@ -20,6 +20,7 @@ import { isUsableAccountToken } from './accountTokenService.js';
 import { getCredentialModeFromExtraConfig } from './accountExtraConfig.js';
 import { lookupSiteContextLimitForNames } from './siteContextCapabilityService.js';
 import { filterRecentlyFailedCandidates, formatContextTokens, isChannelRecentlyFailed, isSiteDisabled } from './tokenRouterFailurePolicy.js';
+import { isProbeAttributableCooldown } from './tokenRouterFailureRecording.js';
 import { formatChannelRuntimeLoad, isExplicitTokenChannel, isOauthRouteUnitCandidate, isOauthRouteUnitMemberCoolingDown, resolveChannelRuntimeLoadMultiplier, resolveRouteStrategy, setCandidateDecisionReason } from './tokenRouterCandidateHelpers.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { getOauthRouteUnitStrategyLabel } from './oauth/routeUnitService.js';
@@ -97,6 +98,7 @@ export async function explainSelectionFromMatch(
       excludeChannelIds,
       nowIso,
       downstreamPolicy,
+      requiredContextTokens: options.requiredContextTokens,
     });
 
     const recentlyFailed = routeStrategy !== 'round_robin'
@@ -130,6 +132,95 @@ export async function explainSelectionFromMatch(
 
     if (eligible) {
       available.push(row);
+    }
+  }
+
+  if (
+    available.length === 0
+    && (options.requiredContextTokens ?? 0) > 0
+    && config.contextAwareRouting !== 'off'
+  ) {
+    // Mirror live selectFromMatch pass 1: relax only the context filter first;
+    // probe cooldowns remain hard exclusions at this stage.
+    const contextRelaxed = match.channels.filter((row) => (
+      getCandidateEligibilityReasons(row, {
+        requestedModel,
+        bypassSourceModelCheck,
+        excludeChannelIds,
+        nowIso,
+        downstreamPolicy,
+        requiredContextTokens: undefined,
+        ignoreProbeCooldown: false,
+      }).length === 0
+    ));
+    if (contextRelaxed.length > 0) {
+      for (const row of contextRelaxed) {
+        const candidate = candidateMap.get(row.channel.id);
+        if (!candidate) continue;
+        candidate.eligible = true;
+        candidate.reason = '可用（上下文过滤放行 — 过滤不得单凭它清空候选池）';
+        candidate.reasonCodes = ['eligible'];
+      }
+      summary.push(`上下文过滤放行：${contextRelaxed.length} 个候选仅因上下文窗口被排除，已放行给路由选择`);
+      available.push(...contextRelaxed);
+    }
+  }
+
+  if (
+    available.length === 0
+    && (options.requiredContextTokens ?? 0) > 0
+    && config.contextAwareRouting !== 'off'
+  ) {
+    // Mirror live selectFromMatch pass 2: only after the context-only pass
+    // fails, relax probe-written cooldowns as the final availability fallback.
+    const fullRelaxed = match.channels.filter((row) => (
+      getCandidateEligibilityReasons(row, {
+        requestedModel,
+        bypassSourceModelCheck,
+        excludeChannelIds,
+        nowIso,
+        downstreamPolicy,
+        requiredContextTokens: undefined,
+        ignoreProbeCooldown: true,
+      }).length === 0
+    ));
+    if (fullRelaxed.length > 0) {
+      for (const row of fullRelaxed) {
+        const candidate = candidateMap.get(row.channel.id);
+        if (!candidate) continue;
+        candidate.eligible = true;
+        candidate.reason = '可用（探测冷却 + 上下文过滤联合放行 — 与实时选择的兜底一致）';
+        candidate.reasonCodes = ['eligible'];
+      }
+      summary.push(`探测冷却 + 上下文过滤放行：${fullRelaxed.length} 个候选被两类过滤器同时排除，已按实时路径的兜底放行`);
+      available.push(...fullRelaxed);
+    }
+  }
+
+  if (available.length === 0) {
+    // Live selection also relaxes probe-written cooldowns when there is no
+    // context requirement. Keep that path visible in the decision snapshot.
+    const probeRelaxed = match.channels.filter((row) => (
+      getCandidateEligibilityReasons(row, {
+        requestedModel,
+        bypassSourceModelCheck,
+        excludeChannelIds,
+        nowIso,
+        downstreamPolicy,
+        requiredContextTokens: undefined,
+        ignoreProbeCooldown: true,
+      }).length === 0
+    ));
+    if (probeRelaxed.length > 0) {
+      for (const row of probeRelaxed) {
+        const candidate = candidateMap.get(row.channel.id);
+        if (!candidate) continue;
+        candidate.eligible = true;
+        candidate.reason = '可用（探测冷却放行 — 探测是预测，不得单凭它清空候选池）';
+        candidate.reasonCodes = ['eligible'];
+      }
+      summary.push(`探测冷却放行：${probeRelaxed.length} 个候选仅有健康探测写入的冷却，已放行给路由选择`);
+      available.push(...probeRelaxed);
     }
   }
 
@@ -836,21 +927,26 @@ export function resolveDownstreamExclusionReason(
 ): string | null {
   if (!downstreamPolicy) return null;
 
-  const excludedSiteIds = Array.isArray(downstreamPolicy.excludedSiteIds)
-    ? downstreamPolicy.excludedSiteIds
+  // Allow-list semantics, same shape as the model / route dimensions: an empty
+  // list means "no restriction", a non-empty list means "only these". A site or
+  // credential that appears later stays out of a restricted key until it is
+  // explicitly allowed — the fail-closed direction, which is the one that makes
+  // sense for keys handed out to third parties.
+  const allowedSiteIds = Array.isArray(downstreamPolicy.allowedSiteIds)
+    ? downstreamPolicy.allowedSiteIds
     : [];
-  if (excludedSiteIds.includes(candidate.site.id)) {
-    return '站点已被下游密钥排除';
+  if (allowedSiteIds.length > 0 && !allowedSiteIds.includes(candidate.site.id)) {
+    return '站点未在下游密钥允许列表内';
   }
 
-  const excludedCredentialRefs = Array.isArray(downstreamPolicy.excludedCredentialRefs)
-    ? downstreamPolicy.excludedCredentialRefs
+  const allowedCredentialRefs = Array.isArray(downstreamPolicy.allowedCredentialRefs)
+    ? downstreamPolicy.allowedCredentialRefs
     : [];
-  if (excludedCredentialRefs.length <= 0) {
+  if (allowedCredentialRefs.length <= 0) {
     return null;
   }
 
-  for (const ref of excludedCredentialRefs) {
+  for (const ref of allowedCredentialRefs) {
     if (ref.kind === 'account_token') {
       if (
         candidate.channel.tokenId === ref.tokenId
@@ -858,7 +954,7 @@ export function resolveDownstreamExclusionReason(
         && candidate.account.id === ref.accountId
         && candidate.site.id === ref.siteId
       ) {
-        return 'API Key/令牌已被下游密钥排除';
+        return null;
       }
       continue;
     }
@@ -871,12 +967,12 @@ export function resolveDownstreamExclusionReason(
       const resolvedTokenValue = resolveChannelTokenValue(candidate);
       const accountApiToken = candidate.account.apiToken?.trim() || '';
       if (resolvedTokenValue && accountApiToken && resolvedTokenValue === accountApiToken) {
-        return 'API Key/令牌已被下游密钥排除';
+        return null;
       }
     }
   }
 
-  return null;
+  return 'API Key/令牌未在下游密钥允许列表内';
 }
 
 export function getCandidateEligibilityReasons(
@@ -968,7 +1064,11 @@ export function getCandidateEligibilityReasons(
     addReason('token_unavailable', '令牌不可用');
   }
 
-  if (candidate.channel.cooldownUntil && candidate.channel.cooldownUntil > nowIso) {
+  if (
+    candidate.channel.cooldownUntil
+    && candidate.channel.cooldownUntil > nowIso
+    && !(options.ignoreProbeCooldown && isProbeAttributableCooldown(candidate.channel))
+  ) {
     addReason('channel_cooldown', '冷却中', { cooldownUntil: candidate.channel.cooldownUntil });
   }
 

@@ -78,6 +78,25 @@ describe('responses conversion single source of truth', () => {
     ]);
   });
 
+  it('keeps the content key when a message item carries no meaningful content', () => {
+    // Regression: an empty-string content was normalized to `undefined`, the
+    // key disappeared at JSON serialization, and the upstream rejected the
+    // request with "Missing required parameter: 'input[0].content'" — Codex
+    // CLI tool-call turns through the responses face died on it.
+    const normalized = normalizeResponsesInputForCompatibility([
+      { type: 'message', role: 'user', content: '' },
+    ]) as Array<Record<string, unknown>>;
+
+    expect(normalized[0]).toEqual({ type: 'message', role: 'user', content: '' });
+    const serialized = JSON.parse(JSON.stringify(normalized[0])) as Record<string, unknown>;
+    expect(serialized.content).toBe('');
+
+    const roleOnly = normalizeResponsesInputForCompatibility([
+      { role: 'user', content: '' },
+    ]) as Array<Record<string, unknown>>;
+    expect(roleOnly[0]).toEqual({ role: 'user', type: 'message', content: '' });
+  });
+
   it('falls back to non-empty text and image sources when earlier compatibility fields are blank', () => {
     const normalized = normalizeResponsesInputForCompatibility([
       {
@@ -2009,6 +2028,40 @@ describe('convertResponsesBodyToOpenAiBody', () => {
         call_id: 'call_1',
         name: 'Glob',
         arguments: '{"pattern":"README*"}',
+      },
+    ]);
+  });
+
+  it('injects a placeholder reasoning item for DeepSeek models with whitespace-only reasoning and tool_calls', () => {
+    const result = convertOpenAiBodyToResponsesBody(
+      {
+        model: 'deepseek-v4-flash',
+        messages: [{
+          role: 'assistant',
+          content: 'final answer',
+          reasoning_content: ' ',
+          tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'test', arguments: '{}' } }],
+        }],
+      },
+      'deepseek-v4-flash',
+      false,
+    );
+
+    expect(result.input).toEqual([
+      {
+        type: 'reasoning',
+        summary: [{ type: 'summary_text', text: '(thinking omitted)' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'final answer' }],
+      },
+      {
+        type: 'function_call',
+        call_id: 'call_1',
+        name: 'test',
+        arguments: '{}',
       },
     ]);
   });

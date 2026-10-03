@@ -5,14 +5,14 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { eq } from 'drizzle-orm';
 
-const { startModelAvailabilityProbeSchedulerMock, stopModelAvailabilityProbeSchedulerMock } = vi.hoisted(() => ({
-  startModelAvailabilityProbeSchedulerMock: vi.fn(),
-  stopModelAvailabilityProbeSchedulerMock: vi.fn(),
+const { startChannelProbeSchedulerMock, stopChannelProbeSchedulerMock } = vi.hoisted(() => ({
+  startChannelProbeSchedulerMock: vi.fn(),
+  stopChannelProbeSchedulerMock: vi.fn(),
 }));
 
-vi.mock('../../services/modelAvailabilityProbeService.js', () => ({
-  startModelAvailabilityProbeScheduler: startModelAvailabilityProbeSchedulerMock,
-  stopModelAvailabilityProbeScheduler: stopModelAvailabilityProbeSchedulerMock,
+vi.mock('../../services/channelRecoveryProbeService.js', () => ({
+  startChannelProbeScheduler: startChannelProbeSchedulerMock,
+  stopChannelProbeScheduler: stopChannelProbeSchedulerMock,
 }));
 
 type ConfigModule = typeof import('../../config.js');
@@ -46,8 +46,8 @@ describe('settings model availability probe runtime setting', () => {
     await db.delete(schema.settings).run();
     config.modelAvailabilityProbeAllow = true;
     config.modelAvailabilityProbeEnabled = false;
-    startModelAvailabilityProbeSchedulerMock.mockReset();
-    stopModelAvailabilityProbeSchedulerMock.mockReset();
+    startChannelProbeSchedulerMock.mockReset();
+    stopChannelProbeSchedulerMock.mockReset();
   });
 
   afterAll(async () => {
@@ -69,8 +69,8 @@ describe('settings model availability probe runtime setting', () => {
     const updated = updateResponse.json() as { modelAvailabilityProbeEnabled?: boolean };
     expect(updated.modelAvailabilityProbeEnabled).toBe(true);
     expect(config.modelAvailabilityProbeEnabled).toBe(true);
-    expect(startModelAvailabilityProbeSchedulerMock).toHaveBeenCalledTimes(1);
-    expect(stopModelAvailabilityProbeSchedulerMock).not.toHaveBeenCalled();
+    expect(startChannelProbeSchedulerMock).toHaveBeenCalledTimes(1);
+    expect(stopChannelProbeSchedulerMock).not.toHaveBeenCalled();
 
     const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'model_availability_probe_enabled')).get();
     expect(saved?.value).toBe(JSON.stringify(true));
@@ -98,14 +98,14 @@ describe('settings model availability probe runtime setting', () => {
     const updated = updateResponse.json() as { modelAvailabilityProbeEnabled?: boolean };
     expect(updated.modelAvailabilityProbeEnabled).toBe(false);
     expect(config.modelAvailabilityProbeEnabled).toBe(false);
-    expect(stopModelAvailabilityProbeSchedulerMock).toHaveBeenCalledTimes(1);
-    expect(startModelAvailabilityProbeSchedulerMock).not.toHaveBeenCalled();
+    expect(stopChannelProbeSchedulerMock).toHaveBeenCalledTimes(1);
+    expect(startChannelProbeSchedulerMock).not.toHaveBeenCalled();
 
     const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'model_availability_probe_enabled')).get();
     expect(saved?.value).toBe(JSON.stringify(false));
   });
 
-  it('rejects enabling batch probe when allow flag is false', async () => {
+  it('rejects enabling automatic probes when allow flag is false', async () => {
     config.modelAvailabilityProbeAllow = false;
     config.modelAvailabilityProbeEnabled = false;
 
@@ -119,6 +119,6 @@ describe('settings model availability probe runtime setting', () => {
 
     expect(updateResponse.statusCode).toBe(403);
     expect(config.modelAvailabilityProbeEnabled).toBe(false);
-    expect(startModelAvailabilityProbeSchedulerMock).not.toHaveBeenCalled();
+    expect(startChannelProbeSchedulerMock).not.toHaveBeenCalled();
   });
 });

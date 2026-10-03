@@ -2,6 +2,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import {
   ACCOUNT_TOKEN_VALUE_STATUS_READY,
+  getPreferredAccountToken,
   isUsableAccountToken,
 } from './accountTokenService.js';
 import { clearRouteDecisionSnapshot, clearRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js';
@@ -23,6 +24,9 @@ export type PatternRouteChannelSyncResult = {
   routeIds: number[];
   removedChannels: number;
   createdChannels: number;
+  // Rows kept in place but re-derived (token/unit/source-model/priority/weight
+  // changed) so accumulated stats survive the rebuild.
+  updatedChannels: number;
 };
 
 type RebuildPatternRouteOptions = {
@@ -77,6 +81,7 @@ function createEmptyPatternRouteChannelSyncResult(): PatternRouteChannelSyncResu
     routeIds: [],
     removedChannels: 0,
     createdChannels: 0,
+    updatedChannels: 0,
   };
 }
 
@@ -195,11 +200,10 @@ async function getMatchedExactRouteChannelCandidates(
   };
 }
 
-export async function populateRouteChannelsByModelPattern(
-  routeId: number,
+async function collectRouteChannelCandidates(
   modelPattern: string,
   options: RebuildPatternRouteOptions = {},
-): Promise<number> {
+): Promise<PatternRouteChannelCandidate[]> {
   const excludedExactModelNames = new Set(
     (options.excludeExactModelPatterns || [])
       .map(normalizeModelKey)
@@ -210,7 +214,53 @@ export async function populateRouteChannelsByModelPattern(
     ? excludedExactModelNames
     : routeCandidates.exactModelNames;
   const availabilityCandidates = await getPatternTokenCandidates(modelPattern, availabilityExclusions);
-  const candidates = [...routeCandidates.candidates, ...availabilityCandidates];
+  return [...routeCandidates.candidates, ...availabilityCandidates];
+}
+
+// The same (account, token, unit, model) pair must never produce two rows; the
+// first candidate wins, which keeps the exact-route copies ahead of the
+// availability rows exactly like the historical insert order did.
+function dedupeRouteChannelCandidates(
+  candidates: PatternRouteChannelCandidate[],
+): PatternRouteChannelCandidate[] {
+  const seen = new Set<string>();
+  const deduped: PatternRouteChannelCandidate[] = [];
+  for (const candidate of candidates) {
+    const key = buildChannelPairKey(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(candidate);
+  }
+  return deduped;
+}
+
+async function insertRouteChannelCandidates(
+  routeId: number,
+  candidates: PatternRouteChannelCandidate[],
+): Promise<number> {
+  if (candidates.length === 0) return 0;
+  // One insert for the whole batch (drizzle chunks it when needed) instead of
+  // one statement per channel.
+  await db.insert(schema.routeChannels).values(candidates.map((candidate) => ({
+    routeId,
+    accountId: candidate.accountId,
+    tokenId: candidate.tokenId,
+    oauthRouteUnitId: candidate.oauthRouteUnitId ?? null,
+    sourceModel: candidate.sourceModel,
+    priority: candidate.priority,
+    weight: candidate.weight,
+    enabled: candidate.enabled,
+    manualOverride: false,
+  }))).run();
+  return candidates.length;
+}
+
+export async function populateRouteChannelsByModelPattern(
+  routeId: number,
+  modelPattern: string,
+  options: RebuildPatternRouteOptions = {},
+): Promise<number> {
+  const candidates = dedupeRouteChannelCandidates(await collectRouteChannelCandidates(modelPattern, options));
   if (candidates.length === 0) return 0;
 
   const existingChannels = await db.select().from(schema.routeChannels)
@@ -224,23 +274,45 @@ export async function populateRouteChannelsByModelPattern(
   })));
 
   const toInsert = candidates.filter((candidate) => !existingPairs.has(buildChannelPairKey(candidate)));
-  if (toInsert.length > 0) {
-    // One insert for the whole batch (drizzle chunks it when needed) instead of
-    // one statement per channel.
-    await db.insert(schema.routeChannels).values(toInsert.map((candidate) => ({
-      routeId,
-      accountId: candidate.accountId,
-      tokenId: candidate.tokenId,
-      oauthRouteUnitId: candidate.oauthRouteUnitId ?? null,
-      sourceModel: candidate.sourceModel,
-      priority: candidate.priority,
-      weight: candidate.weight,
-      enabled: candidate.enabled,
-      manualOverride: false,
-    }))).run();
+  return insertRouteChannelCandidates(routeId, toInsert);
+}
+
+const MATCH_EXACT_PAIR = 3;
+const MATCH_SAME_ACCOUNT_AND_MODEL = 2;
+const MATCH_SAME_ACCOUNT = 1;
+
+function channelPairKeyInput(channel: typeof schema.routeChannels.$inferSelect) {
+  return {
+    accountId: channel.accountId,
+    tokenId: channel.tokenId ?? null,
+    oauthRouteUnitId: channel.oauthRouteUnitId ?? null,
+    sourceModel: channel.sourceModel,
+  };
+}
+
+// Identity for an automatic channel is the account (plus route unit, when the
+// channel belongs to an OAuth pool) and the source model; the token binding is
+// a re-derivable attribute. Matching this loosely is what lets a rebuild keep
+// the row when a key is rotated or a source model was edited, instead of
+// deleting and re-inserting it (which would reset the accumulated stats).
+function scoreChannelCandidateMatch(
+  channel: typeof schema.routeChannels.$inferSelect,
+  candidate: PatternRouteChannelCandidate,
+): number {
+  if (buildChannelPairKey(channelPairKeyInput(channel)) === buildChannelPairKey(candidate)) {
+    return MATCH_EXACT_PAIR;
   }
 
-  return toInsert.length;
+  const channelUnit = channel.oauthRouteUnitId ?? null;
+  const candidateUnit = candidate.oauthRouteUnitId ?? null;
+  // Route-unit channels key on the unit, meaning an account identity is not
+  // enough to treat two of them as the same channel.
+  if (channelUnit !== null || candidateUnit !== null) return 0;
+
+  if (channel.accountId !== candidate.accountId) return 0;
+  return normalizeModelKey(channel.sourceModel || '') === normalizeModelKey(candidate.sourceModel || '')
+    ? MATCH_SAME_ACCOUNT_AND_MODEL
+    : MATCH_SAME_ACCOUNT;
 }
 
 export async function rebuildAutomaticRouteChannelsByModelPattern(
@@ -248,19 +320,21 @@ export async function rebuildAutomaticRouteChannelsByModelPattern(
   modelPattern: string,
   options: RebuildPatternRouteOptions = {},
 ): Promise<PatternRouteChannelSyncResult> {
-  const excludedExactModelNames = new Set(
-    (options.excludeExactModelPatterns || []).map(normalizeModelKey).filter(Boolean),
-  );
-  const routeCandidates = await getMatchedExactRouteChannelCandidates(modelPattern, excludedExactModelNames);
-  const availabilityExclusions = isExactModelPattern(modelPattern)
-    ? excludedExactModelNames
-    : routeCandidates.exactModelNames;
-  const availabilityCandidates = await getPatternTokenCandidates(modelPattern, availabilityExclusions);
-  const desiredPairs = new Set([...routeCandidates.candidates, ...availabilityCandidates].map(buildChannelPairKey));
-  const existingManualChannels = await db.select().from(schema.routeChannels)
-    .where(and(eq(schema.routeChannels.routeId, routeId), eq(schema.routeChannels.manualOverride, true)))
+  const existingChannels = await db.select().from(schema.routeChannels)
+    .where(eq(schema.routeChannels.routeId, routeId))
     .all();
-  const staleManualChannels = existingManualChannels.filter((channel: any) => {
+
+  // Valid manual overrides retain their settings and accumulated stats.
+  const autoChannels = existingChannels.filter((channel: { manualOverride: boolean | null }) => (
+    !channel.manualOverride
+  ));
+  const desiredCandidates = dedupeRouteChannelCandidates(
+    await collectRouteChannelCandidates(modelPattern, options),
+  );
+
+  const desiredPairs = new Set(desiredCandidates.map(buildChannelPairKey));
+  const staleManualChannels = existingChannels.filter((channel: typeof existingChannels[number]) => {
+    if (!channel.manualOverride) return false;
     const sourceModel = String(channel.sourceModel || '').trim();
     if (!sourceModel || !matchesModelPattern(sourceModel, modelPattern)) return false;
     return !desiredPairs.has(buildChannelPairKey({
@@ -272,26 +346,75 @@ export async function rebuildAutomaticRouteChannelsByModelPattern(
   });
   if (staleManualChannels.length > 0) {
     await db.delete(schema.routeChannels)
-      .where(inArray(schema.routeChannels.id, staleManualChannels.map((channel: any) => channel.id)))
+      .where(inArray(schema.routeChannels.id, staleManualChannels.map((channel: { id: number }) => channel.id)))
       .run();
   }
-  const removableChannels = await db.select().from(schema.routeChannels)
-    .where(
-      and(
-        eq(schema.routeChannels.routeId, routeId),
-        eq(schema.routeChannels.manualOverride, false),
-      ),
-    )
-    .all();
 
+  const scoredPairs: Array<{ score: number; candidateIndex: number; channel: typeof existingChannels[number] }> = [];
+  desiredCandidates.forEach((candidate, candidateIndex) => {
+    for (const channel of autoChannels) {
+      const score = scoreChannelCandidateMatch(channel, candidate);
+      if (score <= 0) continue;
+      scoredPairs.push({ score, candidateIndex, channel });
+    }
+  });
+  scoredPairs.sort((left, right) => (
+    right.score - left.score
+    || left.candidateIndex - right.candidateIndex
+    || left.channel.id - right.channel.id
+  ));
+
+  const matchedCandidateIndexes = new Set<number>();
+  const matchedChannelIds = new Set<number>();
+  const assignments: Array<{
+    candidate: PatternRouteChannelCandidate;
+    channel: typeof existingChannels[number];
+  }> = [];
+  for (const pair of scoredPairs) {
+    if (matchedCandidateIndexes.has(pair.candidateIndex) || matchedChannelIds.has(pair.channel.id)) continue;
+    matchedCandidateIndexes.add(pair.candidateIndex);
+    matchedChannelIds.add(pair.channel.id);
+    assignments.push({ candidate: desiredCandidates[pair.candidateIndex], channel: pair.channel });
+  }
+
+  let updatedChannels = 0;
+  for (const { candidate, channel } of assignments) {
+    const derived = {
+      tokenId: candidate.tokenId,
+      oauthRouteUnitId: candidate.oauthRouteUnitId ?? null,
+      sourceModel: candidate.sourceModel,
+      priority: candidate.priority,
+      weight: candidate.weight,
+      enabled: candidate.enabled,
+    };
+    const changed = channel.tokenId !== derived.tokenId
+      || (channel.oauthRouteUnitId ?? null) !== derived.oauthRouteUnitId
+      || (channel.sourceModel || '') !== derived.sourceModel
+      || (channel.priority ?? 0) !== derived.priority
+      || (channel.weight ?? 10) !== derived.weight
+      || !!channel.enabled !== derived.enabled;
+    if (!changed) continue;
+    // In-place re-derive: the row id and every accumulated stat column stay put.
+    await db.update(schema.routeChannels)
+      .set(derived)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .run();
+    updatedChannels += 1;
+  }
+
+  const removableChannels = autoChannels.filter((channel) => !matchedChannelIds.has(channel.id));
   if (removableChannels.length > 0) {
     await db.delete(schema.routeChannels)
       .where(inArray(schema.routeChannels.id, removableChannels.map((channel: { id: number }) => channel.id)))
       .run();
   }
 
-  const createdChannels = await populateRouteChannelsByModelPattern(routeId, modelPattern, options);
-  if (staleManualChannels.length > 0 || removableChannels.length > 0 || createdChannels > 0) {
+  const createdChannels = await insertRouteChannelCandidates(
+    routeId,
+    desiredCandidates.filter((_, index) => !matchedCandidateIndexes.has(index)),
+  );
+
+  if (staleManualChannels.length > 0 || removableChannels.length > 0 || createdChannels > 0 || updatedChannels > 0) {
     await clearRouteDecisionSnapshot(routeId);
   }
 
@@ -300,6 +423,7 @@ export async function rebuildAutomaticRouteChannelsByModelPattern(
     routeIds: [routeId],
     removedChannels: removableChannels.length + staleManualChannels.length,
     createdChannels,
+    updatedChannels,
   };
 }
 
@@ -314,6 +438,7 @@ export async function rebuildAllPatternRouteChannels(
     routeIds: [],
     removedChannels: 0,
     createdChannels: 0,
+    updatedChannels: 0,
   };
 
   for (const route of patternRoutes) {
@@ -322,13 +447,75 @@ export async function rebuildAllPatternRouteChannels(
     result.routeIds.push(route.id);
     result.removedChannels += routeResult.removedChannels;
     result.createdChannels += routeResult.createdChannels;
+    result.updatedChannels += routeResult.updatedChannels;
   }
 
-  if (result.removedChannels > 0 || result.createdChannels > 0) {
+  if (result.removedChannels > 0 || result.createdChannels > 0 || result.updatedChannels > 0) {
     await clearRouteDecisionSnapshots(result.routeIds);
   }
 
   return result;
+}
+
+// Returns the candidate the system would derive for this channel right now, or
+// null when the channel has no derivable default (e.g. it was added by hand or
+// its account no longer offers a matching model). Used by the "restore to
+// default" (reset) path so it can write the derived values back in place
+// without touching the accumulated stats.
+export async function findDerivedChannelCandidateForRoute(
+  modelPattern: string,
+  channel: {
+    accountId: number;
+    tokenId: number | null;
+    oauthRouteUnitId: number | null;
+    sourceModel: string | null;
+  },
+): Promise<PatternRouteChannelCandidate | null> {
+  const pattern = (modelPattern || '').trim();
+  if (!pattern) return null;
+
+  const emptyExclusions = new Set<string>();
+  // For exact routes the route's own channels must not re-echo their manual
+  // edits back as "derived" values; only availability counts as the default.
+  const isPattern = !isExactModelPattern(pattern);
+  const exactRouteCandidates = isPattern
+    ? (await getMatchedExactRouteChannelCandidates(pattern, emptyExclusions)).candidates
+    : [];
+  const availabilityExclusions = isPattern
+    ? (await getMatchedExactRouteChannelCandidates(pattern, emptyExclusions)).exactModelNames
+    : emptyExclusions;
+  const availabilityCandidates = await getPatternTokenCandidates(pattern, availabilityExclusions);
+  const candidates = dedupeRouteChannelCandidates([...exactRouteCandidates, ...availabilityCandidates]);
+  if (candidates.length === 0) return null;
+
+  const channelUnit = channel.oauthRouteUnitId ?? null;
+  if (channelUnit !== null) {
+    // Route-unit channels key on the unit; only the exact pair counts.
+    return candidates.find((candidate) => buildChannelPairKey(candidate) === buildChannelPairKey(channel)) ?? null;
+  }
+
+  const sameAccountAndModel = (candidate: PatternRouteChannelCandidate) => (
+    candidate.accountId === channel.accountId
+    && normalizeModelKey(candidate.sourceModel || '') === normalizeModelKey(channel.sourceModel || '')
+  );
+
+  // Prefer the account's preferred (default) token carrying the same model —
+  // that is what a fresh bind/reconcile would settle on. Fall back to the
+  // current binding when it is still derivable, then to any candidate for the
+  // account, so the channel is never left dangling.
+  const preferredToken = await getPreferredAccountToken(channel.accountId);
+  if (preferredToken) {
+    const onPreferred = candidates.find((candidate) => (
+      sameAccountAndModel(candidate) && candidate.tokenId === preferredToken.id
+    ));
+    if (onPreferred) return onPreferred;
+  }
+
+  const exactPair = candidates.find((candidate) => buildChannelPairKey(candidate) === buildChannelPairKey(channel));
+  if (exactPair) return exactPair;
+  return candidates.find(sameAccountAndModel)
+    ?? candidates.find((candidate) => candidate.accountId === channel.accountId)
+    ?? null;
 }
 
 export async function syncPatternRouteChannelsAfterAffectedRouteChanges(

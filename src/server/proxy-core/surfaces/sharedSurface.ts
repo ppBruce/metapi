@@ -342,6 +342,31 @@ export function wireStreamCancelOnClientDisconnect(
   };
 }
 
+/**
+ * Abort signal that fires when the downstream reply is gone mid-request.
+ *
+ * Non-stream body reads have no `wireStreamCancelOnClientDisconnect` wiring
+ * (that only fires for hijacked SSE replies). This closes the same gap for
+ * plain JSON bodies: if the client disconnects while the upstream body is
+ * still being read, the read is cancelled instead of running to completion
+ * (or hanging forever on a stalled upstream).
+ */
+export function wireReplyGoneAbortSignal(reply: FastifyReply): AbortSignal {
+  const controller = new AbortController();
+  const raw = reply?.raw as {
+    on?: (event: string, listener: () => void) => void;
+    writableEnded?: boolean;
+    destroyed?: boolean;
+  } | undefined;
+  if (!raw || typeof raw.on !== 'function') return controller.signal;
+  const onClose = (): void => {
+    if (raw.writableEnded) return;
+    controller.abort(new Error('client disconnected'));
+  };
+  raw.on('close', onClose);
+  return controller.signal;
+}
+
 export function createSurfaceDispatchRequest(input: {
   site: SiteProxyConfigLike & { url: string };
   accountExtraConfig?: string | null;
@@ -761,6 +786,30 @@ export function createSurfaceFailureToolkit(input: {
 
   return {
     log,
+    /**
+     * Record a failure mark for the selected channel without writing a proxy
+     * log row or deciding the retry. Paths that already log and decide locally
+     * (e.g. the channel-lease timeout) still must leave a cooldown mark,
+     * otherwise the router immediately reselects the same saturated channel.
+     */
+    async recordChannelFailure(args: {
+      selected: SurfaceSelectedChannel;
+      modelName: string;
+      status: number;
+      errorText: string;
+    }): Promise<void> {
+      const disposition = buildProxyFailureDisposition({
+        status: args.status,
+        errorText: args.errorText,
+        modelName: args.modelName,
+      });
+      if (!disposition.incrementFailure) return;
+      await tokenRouter.recordFailure(args.selected.channel.id, {
+        status: args.status,
+        errorText: args.errorText,
+        modelName: args.modelName,
+      });
+    },
     async handleUpstreamFailure(args: {
       selected: SurfaceSelectedChannel;
       requestedModel: string;

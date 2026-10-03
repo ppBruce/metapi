@@ -289,8 +289,6 @@ async function proxyTestStreamRequest(
   });
 }
 
-
-
 export type RuntimeRoutingWeightsPayload = {
   baseWeightFactor?: number;
   valueScoreFactor?: number;
@@ -300,8 +298,8 @@ export type RuntimeRoutingWeightsPayload = {
 };
 
 export type RuntimeSettingsPayload = {
-  payloadRules?: Record<string, unknown> | null;
   modelAvailabilityProbeEnabled?: boolean;
+  payloadRules?: Record<string, unknown> | null;
   sensitiveWordDetectionEnabled?: boolean;
   antiProbeMinTextLength?: number;
   codexUpstreamWebsocketEnabled?: boolean;
@@ -331,10 +329,17 @@ export type RuntimeSettingsPayload = {
   logCleanupProgramLogsEnabled?: boolean;
   logCleanupRetentionDays?: number;
   webhookUrl?: string;
+  /** Only a newly typed secret is sent; GET runtime settings exposes a mask. */
   webhookSecret?: string;
-  barkUrl?: string;
   webhookEnabled?: boolean;
-  barkEnabled?: boolean;
+  notifyChannels?: Array<{
+    id: string;
+    url: string;
+    secret?: string;
+    enabled?: boolean;
+    label?: string;
+    kind?: 'dingtalk' | 'feishu' | 'wecom' | 'custom';
+  }>;
   serverChanEnabled?: boolean;
   serverChanKey?: string;
   telegramEnabled?: boolean;
@@ -356,6 +361,7 @@ export type RuntimeSettingsPayload = {
   proxyFirstByteTimeoutSec?: number;
   proxyChannelFailoverMaxAttempts?: number;
   proxyRouteProbeRate?: number;
+  proxyConcurrencySpreadEnabled?: boolean;
   tokenRouterFailureCooldownMaxSec?: number;
   routeProbabilityFloor?: number;
   routeQuotaExhaustionExclude?: boolean;
@@ -756,10 +762,9 @@ export const api = {
         proxyUrl && proxyUrl.trim() ? { url, proxyUrl: proxyUrl.trim() } : { url },
       ),
     }),
-  getSiteDisabledModels: (siteId: number) =>
-    request(`/api/sites/${siteId}/disabled-models`),
-  updateSiteDisabledModels: (siteId: number, models: string[]) =>
-    request(`/api/sites/${siteId}/disabled-models`, {
+  // Per-key disabled models: only this account's rows are replaced.
+  updateAccountDisabledModels: (accountId: number, models: string[]) =>
+    request(`/api/accounts/${accountId}/models/disabled`, {
       method: 'PUT',
       body: JSON.stringify({ models }),
     }),
@@ -957,6 +962,8 @@ export const api = {
     }),
   deleteChannel: (id: number) =>
     request(`/api/channels/${id}`, { method: 'DELETE' }),
+  resetChannel: (id: number) =>
+    request(`/api/channels/${id}/reset`, { method: 'POST' }),
   rebuildRoutes: (refreshModels = true, wait = false) =>
     request('/api/routes/rebuild', {
       method: 'POST',
@@ -1449,7 +1456,6 @@ export const api = {
     }),
   testNotification: () =>
     request('/api/settings/notify/test', { method: 'POST' }),
-
 
   // Models marketplace
   getModelsMarketplace: (options?: {

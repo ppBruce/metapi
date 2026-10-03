@@ -1,9 +1,8 @@
-# ppBruce/metapi 1.8.0 custom deployment; persistent data remains in ./data/ppbruce.
+# ppBruce/metapi 1.8.5 custom deployment; persistent data remains in ./data/ppbruce.
 services:
   metapi:
-    image: metapi:1.8.0-custom
-    ports:
-    - 4000:4000
+    image: metapi:1.8.5-custom
+    network_mode: host
     volumes:
     - ./data/ppbruce:/app/data
     environment:
