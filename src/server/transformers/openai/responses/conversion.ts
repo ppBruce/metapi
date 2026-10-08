@@ -1003,6 +1003,10 @@ export function convertResponsesBodyToOpenAiBody(
     if (!isRecord(item)) return;
 
     const itemType = asTrimmedString(item.type).toLowerCase();
+    if (itemType === 'additional_tools') {
+      return;
+    }
+
     if (itemType.startsWith('mcp_') && isResponsesMcpItem(item)) {
       const toolCall = toResponsesMcpCompatToolCall(item, `call_${Date.now()}_${functionCallIndex}`);
       if (toolCall) {

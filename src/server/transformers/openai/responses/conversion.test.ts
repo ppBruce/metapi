@@ -97,6 +97,27 @@ describe('responses conversion single source of truth', () => {
     expect(roleOnly[0]).toEqual({ role: 'user', type: 'message', content: '' });
   });
 
+  it('preserves additional_tools items without converting them to messages', () => {
+    const tools = [{ type: 'custom', name: 'exec' }];
+    const normalized = normalizeResponsesInputForCompatibility([
+      { type: 'additional_tools', id: 'at_1', role: 'developer', tools },
+      { type: 'message', role: 'user', content: 'hello' },
+    ]) as Array<Record<string, unknown>>;
+
+    expect(normalized[0]).toEqual({
+      type: 'additional_tools',
+      id: 'at_1',
+      role: 'developer',
+      tools,
+    });
+    expect(normalized[0].content).toBeUndefined();
+    expect(normalized[1]).toEqual({
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'hello' }],
+    });
+  });
+
   it('falls back to non-empty text and image sources when earlier compatibility fields are blank', () => {
     const normalized = normalizeResponsesInputForCompatibility([
       {
