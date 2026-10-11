@@ -6816,7 +6816,7 @@ textarea {
   /* --- Mobile Cards --- */
   .mobile-card {
     padding: 12px;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-md);
     box-shadow: var(--shadow-sm);
   }
 
