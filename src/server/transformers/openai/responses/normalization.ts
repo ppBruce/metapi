@@ -241,6 +241,10 @@ export function normalizeResponsesMessageItem(item: Record<string, unknown>): Re
     return normalizeResponsesToolLifecycleItem(item) ?? item;
   }
 
+  if (type === 'additional_tools' || type === 'reasoning') {
+    return withNormalizedResponsesInputStatus(item);
+  }
+
   const role = asTrimmedString(item.role).toLowerCase() || 'user';
   const normalizedContent = normalizeResponsesMessageContent(
     firstMeaningfulValue(item.content, item.text),
@@ -255,7 +259,7 @@ export function normalizeResponsesMessageItem(item: Record<string, unknown>): Re
     });
   }
 
-  if (asTrimmedString(item.role)) {
+  if (!type && asTrimmedString(item.role)) {
     return withNormalizedResponsesInputStatus({
       ...item,
       type: 'message',
