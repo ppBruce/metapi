@@ -2253,6 +2253,22 @@ export default function ProxyLogs() {
                                           >
                                             {detailLog.username || '未知账号'}
                                           </strong>
+                                          {detailLog.tokenName ? (
+                                            <>
+                                              ，令牌:{' '}
+                                              <strong
+                                                style={{
+                                                  color:
+                                                    'var(--color-text-primary)',
+                                                }}
+                                              >
+                                                {detailLog.tokenName}
+                                              </strong>
+                                              {detailLog.tokenGroup
+                                                ? `（${detailLog.tokenGroup}）`
+                                                : ''}
+                                            </>
+                                          ) : null}
                                         </>
                                       )}
                                     </div>

@@ -58,6 +58,7 @@ let proxyLogDownstreamApiKeyIdColumnAvailable: boolean | null = null;
 let proxyLogClientColumnsAvailable: boolean | null = null;
 let proxyLogStreamTimingColumnsAvailable: boolean | null = null;
 let proxyLogRequestTraceIdColumnAvailable: boolean | null = null;
+let proxyLogTokenIdColumnAvailable: boolean | null = null;
 
 function buildMysqlPoolOptions(
   connectionString = config.dbUrl,
@@ -784,6 +785,26 @@ function ensureProxyLogRequestTraceIdSchema() {
 }
 
 
+function ensureProxyLogTokenIdSchema() {
+  if (!tableExists('proxy_logs')) {
+    return;
+  }
+
+  if (!tableColumnExists('proxy_logs', 'token_id')) {
+    execSqliteLegacyCompat('ALTER TABLE proxy_logs ADD COLUMN token_id integer;');
+  }
+  try {
+    execSqliteLegacyCompat(
+      'CREATE INDEX IF NOT EXISTS proxy_logs_token_id_created_at_idx ON proxy_logs(token_id, created_at);',
+    );
+  } catch {
+    // Ignore duplicate/unsupported index creation on older sqlite builds.
+  }
+
+  proxyLogTokenIdColumnAvailable = true;
+}
+
+
 function normalizeSchemaErrorMessage(error: unknown): string {
   if (typeof error === 'object' && error && 'message' in error) {
     return String((error as { message?: unknown }).message || '');
@@ -856,6 +877,33 @@ export async function hasProxyLogCacheTokensColumns(): Promise<boolean> {
   );
   proxyLogCacheTokensColumnsAvailable = Number(result.rowCount || 0) > 0;
   return proxyLogCacheTokensColumnsAvailable;
+}
+
+export async function hasProxyLogTokenIdColumn(): Promise<boolean> {
+  if (proxyLogTokenIdColumnAvailable !== null) {
+    return proxyLogTokenIdColumnAvailable;
+  }
+
+  if (runtimeDbDialect === 'sqlite') {
+    proxyLogTokenIdColumnAvailable = tableExists('proxy_logs')
+      && tableColumnExists('proxy_logs', 'token_id');
+    return proxyLogTokenIdColumnAvailable;
+  }
+
+  if (runtimeDbDialect === 'mysql') {
+    if (!mysqlPool) return false;
+    const [rows] = await mysqlPool.query('SHOW COLUMNS FROM `proxy_logs` LIKE ?', ['token_id']);
+    proxyLogTokenIdColumnAvailable = Array.isArray(rows) && rows.length > 0;
+    return proxyLogTokenIdColumnAvailable;
+  }
+
+  if (!pgPool) return false;
+  const result = await pgPool.query(
+    'SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2 LIMIT 1',
+    ['proxy_logs', 'token_id'],
+  );
+  proxyLogTokenIdColumnAvailable = Number(result.rowCount || 0) > 0;
+  return proxyLogTokenIdColumnAvailable;
 }
 
 export async function ensureProxyLogCacheTokensColumns(): Promise<boolean> {
@@ -1337,6 +1385,7 @@ export async function ensureProxyLogStreamTimingColumns(): Promise<boolean> {
   if (runtimeDbDialect === 'sqlite') {
     ensureProxyLogStreamTimingSchema();
     ensureProxyLogRequestTraceIdSchema();
+    ensureProxyLogTokenIdSchema();
     proxyLogStreamTimingColumnsAvailable = tableExists('proxy_logs')
       && requiredColumns.every((column) => tableColumnExists('proxy_logs', column.name));
     return proxyLogStreamTimingColumnsAvailable;
@@ -1716,6 +1765,7 @@ function initSqliteDb() {
   ensureProxyLogClientSchema();
   ensureProxyLogStreamTimingSchema();
   ensureProxyLogRequestTraceIdSchema();
+  ensureProxyLogTokenIdSchema();
   ensureProxyVideoTaskSchema();
   ensureProxyFileSchema();
   ensureProbeLogsSchema();

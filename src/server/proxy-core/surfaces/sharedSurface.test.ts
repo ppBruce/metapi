@@ -601,6 +601,7 @@ describe('selectSurfaceChannelForAttempt', () => {
       clientAppName: 'App',
       clientConfidence: 'high',
       requestTraceId: null,
+      tokenId: null,
       errorMessage: 'normalized error',
       retryCount: 1,
       createdAt: '2026-03-21 22:00:00',

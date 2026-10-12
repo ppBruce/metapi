@@ -69,6 +69,7 @@ const BOOTSTRAP_OWNED_LEGACY_COLUMNS = [
   'proxy_logs.client_app_name',
   'proxy_logs.client_confidence',
   'proxy_logs.downstream_api_key_id',
+  'proxy_logs.token_id',
 ];
 
 const BOOTSTRAP_OWNED_LEGACY_INDEXES = [
@@ -83,6 +84,7 @@ const BOOTSTRAP_OWNED_LEGACY_INDEXES = [
   'proxy_logs_client_family_created_at_idx',
   'proxy_logs_request_trace_id_created_at_idx',
   'proxy_logs_downstream_api_key_created_at_idx',
+  'proxy_logs_token_id_created_at_idx',
   'probe_logs_created_at_idx',
   'probe_logs_site_created_at_idx',
   'probe_logs_account_created_at_idx',

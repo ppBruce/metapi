@@ -254,6 +254,7 @@ async function logProxy(
       channelId: selected.channel.id,
       accountId: selected.account.id,
       downstreamApiKeyId,
+      tokenId: selected.channel.tokenId ?? null,
       modelRequested,
       modelActual: selected.actualModel || modelRequested,
       status,

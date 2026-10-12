@@ -225,7 +225,7 @@ export function buildSurfaceChannelBusyMessage(waitMs: number): string {
 export async function writeSurfaceProxyLog(input: {
   warningScope: string;
   selected: {
-    channel: { routeId: number | null; id: number | null };
+    channel: { routeId: number | null; id: number | null; tokenId?: number | null };
     account: { id: number | null };
     actualModel?: string | null;
   };
@@ -292,6 +292,7 @@ export async function writeSurfaceProxyLog(input: {
       clientConfidence: input.clientContext?.clientConfidence || null,
       errorMessage: normalizedErrorMessage,
       requestTraceId: input.traceId || null,
+      tokenId: input.selected.channel.tokenId ?? null,
       retryCount: input.retryCount,
       createdAt,
     });

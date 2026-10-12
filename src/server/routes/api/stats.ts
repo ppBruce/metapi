@@ -376,6 +376,10 @@ function mapProxyLogRow(
       name?: string | null;
       url?: string | null;
     } | null;
+    account_tokens?: {
+      name?: string | null;
+      tokenGroup?: string | null;
+    } | null;
     downstream_api_keys: {
       id?: number | null;
       name?: string | null;
@@ -412,6 +416,9 @@ function mapProxyLogRow(
     clientConfidence: clientMeta.clientConfidence,
     usageSource: normalizeProxyLogUsageSource(legacyMeta.usageSource),
     username: row.accounts?.username || null,
+    tokenId: typeof row.proxy_logs.tokenId === 'number' ? row.proxy_logs.tokenId : null,
+    tokenName: row.account_tokens?.name || null,
+    tokenGroup: row.account_tokens?.tokenGroup || null,
     siteId: row.sites?.id || null,
     siteName: row.sites?.name || null,
     siteUrl: row.sites?.url || null,
@@ -681,6 +688,10 @@ export async function statsRoutes(app: FastifyInstance) {
               name: schema.sites.name,
               url: schema.sites.url,
             },
+            account_tokens: {
+              name: schema.accountTokens.name,
+              tokenGroup: schema.accountTokens.tokenGroup,
+            },
             downstream_api_keys: {
               id: schema.downstreamApiKeys.id,
               name: schema.downstreamApiKeys.name,
@@ -694,6 +705,10 @@ export async function statsRoutes(app: FastifyInstance) {
             eq(schema.proxyLogs.accountId, schema.accounts.id),
           )
           .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+          .leftJoin(
+            schema.accountTokens,
+            eq(schema.proxyLogs.tokenId, schema.accountTokens.id),
+          )
           .leftJoin(
             schema.downstreamApiKeys,
             eq(
@@ -715,6 +730,10 @@ export async function statsRoutes(app: FastifyInstance) {
         id?: number | null;
         name?: string | null;
         url?: string | null;
+      } | null;
+      account_tokens: {
+        name?: string | null;
+        tokenGroup?: string | null;
       } | null;
       downstream_api_keys: {
         id?: number | null;
