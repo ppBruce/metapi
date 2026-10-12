@@ -1472,6 +1472,42 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     expect(roundTripped.input).toEqual(source.input);
   });
 
+  it('merges additional_tools tools into the request tool set, deduping by name', () => {
+    const result = convertResponsesBodyToOpenAiBody(
+      {
+        model: 'gpt-5',
+        tools: [
+          { type: 'function', name: 'lookup', parameters: { type: 'object' } },
+        ],
+        input: [
+          {
+            type: 'additional_tools',
+            id: 'at_1',
+            role: 'developer',
+            tools: [
+              { type: 'custom', name: 'exec' },
+              // same name as the top-level tool -> must be deduped, not duplicated
+              { type: 'function', name: 'lookup', parameters: { type: 'object' } },
+            ],
+          },
+          { type: 'message', role: 'user', content: 'hello' },
+        ],
+      },
+      'gpt-5',
+      false,
+    ) as Record<string, any>;
+
+    // additional_tools must not leak into messages
+    expect(result.messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ]);
+    // both tools present exactly once; flat form normalized to nested function form
+    expect(result.tools).toEqual([
+      { type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } },
+      { type: 'custom', name: 'exec' },
+    ]);
+  });
+
   it('preserves remaining request fields needed for OpenAI-compatible downstream fallback', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {
