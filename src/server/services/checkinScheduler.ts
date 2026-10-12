@@ -8,6 +8,7 @@ import { formatUtcSqlDateTime } from './localTimeService.js';
 import { buildCheckinSummaryMessage, checkinAll } from './checkinService.js';
 import * as routeRefreshWorkflow from './routeRefreshWorkflow.js';
 import { sendNotification } from './notifyService.js';
+import { attemptPlatformHttpSelfHeal, notePlatformHttpHealthy } from './platformHttpSelfHeal.js';
 import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dailySummaryService.js';
 import { cleanupConfiguredLogs } from './logCleanupService.js';
 import { startModelsDevPriceSync, stopModelsDevPriceSync } from './modelPriceCatalogService.js';
@@ -318,6 +319,41 @@ const MODEL_REFRESH_FAILURE_EVENT_COOLDOWN_MS = 6 * 60 * 60_000;
 const modelRefreshFailureStreaks = new Map<number, number>();
 const modelRefreshFailureEventAtMs = new Map<number, number>();
 
+// A connect-class refresh failure means the upstream connection (not the
+// credential) is the problem: rebuild the outbound pool instead of waiting
+// for a manual restart (2026-10-05: four days of timeouts cleared only by a
+// restart). The rebuild itself throttles through platformHttpSelfHeal; this
+// event is cooldown-limited so a long outage cannot flood the events table.
+const SELF_HEAL_EVENT_COOLDOWN_MS = 6 * 60 * 60_000;
+let selfHealEventAtMs = 0;
+
+function isConnectClassRefreshFailure(item: any): boolean {
+  if (item?.status !== 'failed') return false;
+  if (String(item?.errorCode || '').toLowerCase() === 'timeout') return true;
+  const text = `${item?.errorMessage || ''} ${item?.message || ''} ${item?.error || ''}`.toLowerCase();
+  return /timed out|timeout|aborted|fetch failed|econn|socket hang|network/.test(text);
+}
+
+function describeRefreshFailure(item: any): string {
+  return String(item?.errorMessage || item?.message || item?.error || item?.errorCode || 'unknown')
+    .replace(/\s+/g, ' ').trim().slice(0, 160);
+}
+
+async function reportPlatformSelfHeal(reason: string): Promise<void> {
+  const healed = attemptPlatformHttpSelfHeal(reason.slice(0, 200));
+  if (!healed) return;
+  const nowMs = Date.now();
+  if (nowMs - selfHealEventAtMs < SELF_HEAL_EVENT_COOLDOWN_MS) return;
+  selfHealEventAtMs = nowMs;
+  await db.insert(schema.events).values({
+    type: 'status',
+    title: '上游连接自愈',
+    message: `检测到上游连接异常（${reason.slice(0, 180)}），已自动重建出站连接池（第 ${healed.attempt} 次，问题持续会退避重试）。`,
+    level: 'warning',
+    createdAt: formatUtcSqlDateTime(new Date()),
+  }).run();
+}
+
 async function handleFailedModelRefreshes(refresh: Array<any>): Promise<void> {
   const failures = refresh.filter((item) => item?.status === 'failed' && typeof item?.accountId === 'number');
   const failedAccountIds = new Set(failures.map((item) => item.accountId));
@@ -358,6 +394,14 @@ async function handleFailedModelRefreshes(refresh: Array<any>): Promise<void> {
       createdAt: formatUtcSqlDateTime(new Date()),
     }).run();
   }
+
+  const connectFailures = failures.filter(isConnectClassRefreshFailure);
+  if (connectFailures.length > 0) {
+    const sample = connectFailures[0];
+    await reportPlatformSelfHeal(
+      `模型刷新连接失败（${connectFailures.length} 个账号，如 #${sample?.accountId ?? '?'}：${describeRefreshFailure(sample)}）`,
+    );
+  }
 }
 
 function createModelRefreshTask(cronExpr: string) {
@@ -376,12 +420,16 @@ function createModelRefreshTask(cronExpr: string) {
         const outcome = await routeRefreshWorkflow.refreshModelsAndRebuildRoutesWithSchedulerBound();
         if (!outcome.completed) {
           console.warn('[Scheduler] Model refresh did not complete within the scheduler bound; keeping existing route state');
+          await reportPlatformSelfHeal('模型刷新未在调度边界内完成（疑似上游连接卡死）');
           return;
         }
         const result = outcome.result;
         const refresh = Array.isArray(result?.refresh) ? result.refresh : [];
         const succeeded = refresh.filter((item: any) => item?.status === 'success').length;
         const failed = refresh.filter((item: any) => item?.status === 'failed').length;
+        if (refresh.length > 0 && failed === 0) {
+          notePlatformHttpHealthy();
+        }
         const rebuild = result?.rebuild;
         const firstFailure = refresh.find((item: any) => item?.status === 'failed') as any;
         const failureDetail = String(firstFailure?.message || firstFailure?.error || '')
@@ -596,4 +644,5 @@ export function __resetCheckinSchedulerForTests() {
   checkinPassStartedAtMs = 0;
   balancePassInFlight = null;
   modelRefreshPassInFlight = null;
+  selfHealEventAtMs = 0;
 }

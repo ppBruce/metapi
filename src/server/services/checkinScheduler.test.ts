@@ -8,6 +8,13 @@ const validateMock = vi.fn(() => true);
 const allMock = vi.fn();
 const refreshAllBalancesMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
+const schedulerBoundMock = vi.fn(async (...args: any[]): Promise<{ completed: boolean; result?: any }> => ({
+  completed: true,
+  result: await (refreshModelsAndRebuildRoutesMock as any)(...args),
+}));
+const attemptPlatformHttpSelfHealMock = vi.fn((_reason: string) => ({ attempt: 1 }));
+const notePlatformHttpHealthyMock = vi.fn();
+const insertValuesMock = vi.fn((..._args: unknown[]) => ({ run: async () => undefined }));
 const recoverAccountSessionMock = vi.fn();
 const startModelsDevPriceSyncMock = vi.fn();
 const stopModelsDevPriceSyncMock = vi.fn();
@@ -36,11 +43,15 @@ vi.mock('../db/index.js', () => {
   return {
     db: {
       select: () => queryChain,
+      insert: () => ({
+        values: (...args: unknown[]) => insertValuesMock(...args),
+      }),
     },
     schema: {
       settings: { key: 'key' },
       accounts: { checkinEnabled: 'checkinEnabled', status: 'status' },
       sites: { id: 'id' },
+      events: { id: 'id' },
     },
   };
 });
@@ -59,13 +70,15 @@ vi.mock('./balanceService.js', () => ({
   recoverAccountSession: (...args: unknown[]) => recoverAccountSessionMock(...args),
 }));
 
+vi.mock('./platformHttpSelfHeal.js', () => ({
+  attemptPlatformHttpSelfHeal: (...args: unknown[]) => attemptPlatformHttpSelfHealMock(...args),
+  notePlatformHttpHealthy: (...args: unknown[]) => notePlatformHttpHealthyMock(...args),
+}));
+
 vi.mock('./routeRefreshWorkflow.js', () => ({
   // The scheduler pass goes through the bounded wrapper; keep delegating to the
   // shared mock so the dedupe assertions below still observe one call per pass.
-  refreshModelsAndRebuildRoutesWithSchedulerBound: async (...args: any[]) => ({
-    completed: true,
-    result: await (refreshModelsAndRebuildRoutesMock as any)(...args),
-  }),
+  refreshModelsAndRebuildRoutesWithSchedulerBound: (...args: any[]) => schedulerBoundMock(...args),
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
 
@@ -87,6 +100,10 @@ describe('checkinScheduler', () => {
     allMock.mockReset();
     refreshAllBalancesMock.mockReset();
     refreshModelsAndRebuildRoutesMock.mockReset();
+    schedulerBoundMock.mockClear();
+    attemptPlatformHttpSelfHealMock.mockClear();
+    notePlatformHttpHealthyMock.mockClear();
+    insertValuesMock.mockClear();
     startModelsDevPriceSyncMock.mockReset();
     stopModelsDevPriceSyncMock.mockReset();
     sendNotificationMock.mockReset();
@@ -361,5 +378,61 @@ describe('checkinScheduler', () => {
     expect(modelCall).toBeDefined();
     await modelCall![1]();
     expect(recoverAccountSessionMock).toHaveBeenCalledWith(17);
+  });
+
+  it('rebuilds the outbound pool when a refresh fails with a connect-class error', async () => {
+    refreshModelsAndRebuildRoutesMock.mockResolvedValue({
+      refresh: [{
+        accountId: 17,
+        status: 'failed',
+        errorCode: 'timeout',
+        errorMessage: 'cookie#1: timeout: The operation was aborted due to timeout',
+      }],
+      rebuild: {},
+    });
+    refreshAllBalancesMock.mockResolvedValue(undefined);
+    const scheduler = await import('./checkinScheduler.js');
+    await scheduler.startScheduler();
+    const modelCall = (scheduleMock.mock.calls as unknown as Array<[string, () => Promise<void>]>)
+      .find((call) => call[0] === '*/30 * * * *');
+    expect(modelCall).toBeDefined();
+    await modelCall![1]();
+
+    expect(attemptPlatformHttpSelfHealMock).toHaveBeenCalledTimes(1);
+    expect(String(attemptPlatformHttpSelfHealMock.mock.calls[0]![0])).toContain('连接失败');
+    expect(insertValuesMock).toHaveBeenCalledTimes(1);
+    expect((insertValuesMock.mock.calls[0]![0] as { title?: string }).title).toBe('上游连接自愈');
+  });
+
+  it('rebuilds the outbound pool when the refresh pass exceeds its scheduler bound', async () => {
+    schedulerBoundMock.mockResolvedValueOnce({ completed: false });
+    refreshAllBalancesMock.mockResolvedValue(undefined);
+    const scheduler = await import('./checkinScheduler.js');
+    await scheduler.startScheduler();
+    const modelCall = (scheduleMock.mock.calls as unknown as Array<[string, () => Promise<void>]>)
+      .find((call) => call[0] === '*/30 * * * *');
+    expect(modelCall).toBeDefined();
+    await modelCall![1]();
+
+    expect(attemptPlatformHttpSelfHealMock).toHaveBeenCalledTimes(1);
+    expect(insertValuesMock).toHaveBeenCalledTimes(1);
+    expect((insertValuesMock.mock.calls[0]![0] as { level?: string }).level).toBe('warning');
+  });
+
+  it('ends the self-heal episode after a clean refresh pass', async () => {
+    refreshModelsAndRebuildRoutesMock.mockResolvedValue({
+      refresh: [{ accountId: 1, status: 'success' }],
+      rebuild: {},
+    });
+    refreshAllBalancesMock.mockResolvedValue(undefined);
+    const scheduler = await import('./checkinScheduler.js');
+    await scheduler.startScheduler();
+    const modelCall = (scheduleMock.mock.calls as unknown as Array<[string, () => Promise<void>]>)
+      .find((call) => call[0] === '*/30 * * * *');
+    expect(modelCall).toBeDefined();
+    await modelCall![1]();
+
+    expect(notePlatformHttpHealthyMock).toHaveBeenCalledTimes(1);
+    expect(attemptPlatformHttpSelfHealMock).not.toHaveBeenCalled();
   });
 });
