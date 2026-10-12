@@ -466,6 +466,10 @@ export default function Sites() {
   );
   const [exactPageSize, setExactPageSize] = usePersistedPageSize('sites');
   const effectivePageSize = exactPageSize;
+  // resetKey = 排序模式 only：切换排序才回到第 1 页；列表在挂载/刷新后从空填充
+  // 时（0→N）绝不能重置 —— 那会和 URL 的 ?page=N 恢复互相拉扯，先画一帧第 1 页
+  // 再跳回来（移动端可见的「页面来回闪烁」）。越界页码由 resolveClientPagination
+  // 收敛，列表缩短无需重置。
   const {
     page: safePage,
     setPage,
@@ -473,7 +477,7 @@ export default function Sites() {
     pageSize,
     pagedItems: pagedSites,
     showControls: showSitePagination,
-  } = useClientPagination(sortedSites, `${sortMode}:${sites.length}`, effectivePageSize);
+  } = useClientPagination(sortedSites, sortMode, effectivePageSize);
   const activeDragIndex = activeDragSiteId == null
     ? -1
     : pagedSites.findIndex((site) => site.id === activeDragSiteId);
@@ -499,12 +503,21 @@ export default function Sites() {
   };
 
   // 页码持久化到 URL（?page=N），跳详情页返回后仍停留在原页。
+  // 只在 URL 本身变化（前进/后退/外链进入）时把 URL 页同步回 state；不能把
+  // safePage 放进依赖里 —— 点击翻页时 setPage(next) 是紧急更新（先画新页），
+  // navigate 是低优先级 transition（URL 后提交），中间那一帧会把「新状态 vs
+  // 旧 URL」误判为不一致而把页码拽回旧页，移动端就能看到 3→2→3 的来回闪。
+  // 用 ref 读最新 safePage 做比较，effect 只随 location.search 触发。
+  const safePageRef = useRef(safePage);
+  useEffect(() => {
+    safePageRef.current = safePage;
+  });
   useEffect(() => {
     const urlPage = Number.parseInt(new URLSearchParams(location.search).get('page') || '', 10);
-    if (Number.isFinite(urlPage) && urlPage >= 1 && urlPage !== safePage) {
+    if (Number.isFinite(urlPage) && urlPage >= 1 && urlPage !== safePageRef.current) {
       setPage(urlPage);
     }
-  }, [location.search, safePage, setPage]);
+  }, [location.search, setPage]);
 
   const normalizedFormPlatform = String(form.platform ?? '').trim();
 
@@ -1297,6 +1310,18 @@ export default function Sites() {
     }
   };
 
+  // 切换排序会把分页重置回第 1 页（useClientPagination 的 resetKey 变了）；
+  // 清掉 URL 里残留的 ?page=N，与每页条数切换同一处理 —— 否则 URL 同步
+  // effect 会用旧页码把我们刚重置的页码拽回旧页。
+  const handleSortModeChange = (nextValue: string) => {
+    setSortMode(nextValue as SortMode);
+    const params = new URLSearchParams(location.search);
+    if (params.get('page') !== null) {
+      params.delete('page');
+      navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
+    }
+  };
+
   return (
     <div className="animate-fade-in">
       <div className="page-header">
@@ -1318,7 +1343,7 @@ export default function Sites() {
             <ModernSelect
             size="sm"
             value={sortMode}
-            onChange={(nextValue) => setSortMode(nextValue as SortMode)}
+            onChange={handleSortModeChange}
             options={[
             { value: 'custom', label: '默认排序' },
             { value: 'balance-desc', label: '余额高到低' },
@@ -1395,7 +1420,7 @@ export default function Sites() {
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>排序方式</div>
               <ModernSelect
                 value={sortMode}
-                onChange={(nextValue) => setSortMode(nextValue as SortMode)}
+                onChange={handleSortModeChange}
                 options={[
                   { value: 'custom', label: '默认排序' },
                   { value: 'balance-desc', label: '余额高到低' },
@@ -2024,7 +2049,18 @@ export default function Sites() {
       )}
 
       <div className="card" style={{ overflowX: 'auto', paddingBottom: 12 }}>
-        {sites.length > 0 ? (
+        {!loaded ? (
+          // 首次加载显示骨架：加载期 sites 为空，若走空态分支会先画一帧
+          // 「暂无站点」再换成列表（移动端可见的闪烁之一）。
+          <div
+            aria-busy="true"
+            style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}
+          >
+            <div className="skeleton" style={{ width: '100%', height: 64, borderRadius: 'var(--radius-md)' }} />
+            <div className="skeleton" style={{ width: '100%', height: 64, borderRadius: 'var(--radius-md)' }} />
+            <div className="skeleton" style={{ width: '100%', height: 64, borderRadius: 'var(--radius-md)' }} />
+          </div>
+        ) : sites.length > 0 ? (
           <DndContext
             sensors={siteSortSensors}
             collisionDetection={closestCenter}
