@@ -59,6 +59,10 @@ type RuntimeSettings = {
   checkinCron: string;
   checkinScheduleMode: 'cron' | 'interval';
   checkinIntervalHours: number;
+  turnstileSolverEnabled: boolean;
+  turnstileSolverBaseUrl: string;
+  turnstileSolverApiKeyMasked: string;
+  turnstileSolverTimeoutSeconds: number;
   balanceRefreshCron: string;
   logCleanupCron: string;
   logCleanupUsageLogsEnabled: boolean;
@@ -133,6 +137,11 @@ export default function Settings() {
     checkinCron: '0 8 * * *',
     checkinScheduleMode: 'cron',
     checkinIntervalHours: 6,
+    // Turnstile 过盾求解器：默认关闭，与历史版本行为一致
+    turnstileSolverEnabled: false,
+    turnstileSolverBaseUrl: '',
+    turnstileSolverApiKeyMasked: '',
+    turnstileSolverTimeoutSeconds: 60,
     balanceRefreshCron: '0 * * * *',
     logCleanupCron: '0 6 * * *',
     logCleanupUsageLogsEnabled: false,
@@ -167,6 +176,9 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [testingCheckin, setTestingCheckin] = useState(false);
+  // Turnstile 求解器 API Key：显示服务端掩码，只有用户输入的新值才提交；
+  // 留空提交 = 保留已存 key（自建求解器通常根本不需要 key）。
+  const [turnstileSolverApiKeyDraft, setTurnstileSolverApiKeyDraft] = useState('');
   const [savingProxyTransport, setSavingProxyTransport] = useState(false);
   const [savingProxyFailureRules, setSavingProxyFailureRules] = useState(false);
   const [payloadVisualRules, setPayloadVisualRules] = useState<VisualPayloadRule[]>([]);
@@ -419,6 +431,12 @@ export default function Settings() {
         checkinIntervalHours: Number(runtimeInfo.checkinIntervalHours) >= 1
           ? Math.min(24, Math.trunc(Number(runtimeInfo.checkinIntervalHours)))
           : 6,
+        turnstileSolverEnabled: !!runtimeInfo.turnstileSolverEnabled,
+        turnstileSolverBaseUrl: String(runtimeInfo.turnstileSolverBaseUrl || ''),
+        turnstileSolverApiKeyMasked: String(runtimeInfo.turnstileSolverApiKeyMasked || ''),
+        turnstileSolverTimeoutSeconds: Number(runtimeInfo.turnstileSolverTimeoutSeconds) >= 15
+          ? Math.min(180, Math.trunc(Number(runtimeInfo.turnstileSolverTimeoutSeconds)))
+          : 60,
         balanceRefreshCron: runtimeInfo.balanceRefreshCron || '0 * * * *',
         logCleanupCron: runtimeInfo.logCleanupCron || '0 6 * * *',
         logCleanupUsageLogsEnabled: !!runtimeInfo.logCleanupUsageLogsEnabled,
@@ -539,6 +557,11 @@ export default function Settings() {
         checkinCron: runtime.checkinCron,
         checkinScheduleMode: runtime.checkinScheduleMode,
         checkinIntervalHours: runtime.checkinIntervalHours,
+        turnstileSolverEnabled: runtime.turnstileSolverEnabled,
+        turnstileSolverBaseUrl: runtime.turnstileSolverBaseUrl,
+        // 只有用户输入了新 key 才提交；留空 = 保留服务端已存的 key。
+        ...(turnstileSolverApiKeyDraft.trim() ? { turnstileSolverApiKey: turnstileSolverApiKeyDraft.trim() } : {}),
+        turnstileSolverTimeoutSeconds: runtime.turnstileSolverTimeoutSeconds,
         balanceRefreshCron: runtime.balanceRefreshCron,
         logCleanupCron: runtime.logCleanupCron,
         logCleanupUsageLogsEnabled: runtime.logCleanupUsageLogsEnabled,
@@ -546,6 +569,7 @@ export default function Settings() {
         logCleanupRetentionDays: runtime.logCleanupRetentionDays,
       });
       toast.success('定时任务设置已保存');
+      setTurnstileSolverApiKeyDraft('');
     } catch (err) {
       const errMessage = err instanceof Error ? err.message : String(err);
       toast.error(errMessage || '保存失败');
@@ -1101,6 +1125,73 @@ export default function Settings() {
                 onChange={(e) => setRuntime((prev) => ({ ...prev, balanceRefreshCron: e.target.value }))}
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
+            </div>
+          </div>
+          <div
+            style={{
+              marginTop: 16,
+              paddingTop: 16,
+              borderTop: '1px solid var(--color-border-light)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--color-text-primary)' }}>
+                Turnstile 过盾求解器
+              </span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-text-secondary)', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={runtime.turnstileSolverEnabled}
+                  onChange={(e) => setRuntime((prev) => ({ ...prev, turnstileSolverEnabled: e.target.checked }))}
+                  style={{ width: 16, height: 16, marginTop: 0, flexShrink: 0 }}
+                />
+                启用
+              </label>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10, lineHeight: 1.45 }}>
+              自动签到被站点 Turnstile 校验拦截时，实时调用求解器获取 token 后重放签到。
+              默认关闭，未配置时签到行为与历史版本完全一致。
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(220px, 1fr) minmax(160px, 180px)', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>求解器地址</div>
+                <input
+                  value={runtime.turnstileSolverBaseUrl}
+                  onChange={(e) => setRuntime((prev) => ({ ...prev, turnstileSolverBaseUrl: e.target.value }))}
+                  placeholder="http://127.0.0.1:5091（自建求解器）"
+                  style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                  disabled={!runtime.turnstileSolverEnabled}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>API Key（可留空）</div>
+                <input
+                  type="password"
+                  value={turnstileSolverApiKeyDraft}
+                  onChange={(e) => setTurnstileSolverApiKeyDraft(e.target.value)}
+                  placeholder={runtime.turnstileSolverApiKeyMasked || (runtime.turnstileSolverEnabled ? '自建求解器可留空' : '')}
+                  autoComplete="off"
+                  style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                  disabled={!runtime.turnstileSolverEnabled}
+                />
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(220px, 1fr) minmax(160px, 180px)', gap: 12, marginTop: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>求解超时（秒）</div>
+                <input
+                  type="number"
+                  value={runtime.turnstileSolverTimeoutSeconds}
+                  onChange={(e) => setRuntime((prev) => ({ ...prev, turnstileSolverTimeoutSeconds: Math.min(180, Math.max(15, Math.trunc(Number(e.target.value) || 60))) }))}
+                  style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                  disabled={!runtime.turnstileSolverEnabled}
+                />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 2 }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.45 }}>
+                  云端求解服务需填 API Key；自建求解器（如 turnstile-solver）通常无需鉴权，留空即可。
+                </div>
+              </div>
             </div>
           </div>
           <div

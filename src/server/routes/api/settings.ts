@@ -73,6 +73,10 @@ interface RuntimeSettingsBody {
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
+  turnstileSolverEnabled?: boolean;
+  turnstileSolverBaseUrl?: string;
+  turnstileSolverApiKey?: string;
+  turnstileSolverTimeoutSeconds?: number;
   balanceRefreshCron?: string;
   logCleanupCron?: string;
   logCleanupUsageLogsEnabled?: boolean;
@@ -138,6 +142,38 @@ function maskSecret(value: string): string {
   if (!value) return '';
   if (value.length <= 8) return '****';
   return `${value.slice(0, 4)}****${value.slice(-4)}`;
+}
+
+/**
+ * Read the Turnstile solver config from the settings table.
+ * Absent/unparseable config falls back to "disabled with empty fields",
+ * which keeps historical behavior: without a config, checkin flows run
+ * exactly as before this feature existed.
+ */
+const TURNSTILE_SOLVER_CONFIG_KEY = 'turnstile_solver_config';
+async function readTurnstileSolverConfig(): Promise<{ enabled: boolean; baseUrl: string; apiKey: string; timeoutSeconds: number }> {
+  try {
+    const row = await db.select({ value: schema.settings.value })
+      .from(schema.settings)
+      .where(eq(schema.settings.key, TURNSTILE_SOLVER_CONFIG_KEY))
+      .get();
+    if (!row?.value) {
+      return { enabled: false, baseUrl: '', apiKey: '', timeoutSeconds: 60 };
+    }
+    const parsed: unknown = JSON.parse(String(row.value));
+    if (!parsed || typeof parsed !== 'object') {
+      return { enabled: false, baseUrl: '', apiKey: '', timeoutSeconds: 60 };
+    }
+    const p = parsed as Record<string, unknown>;
+    return {
+      enabled: p.enabled !== false,
+      baseUrl: String(p.baseUrl || '').trim(),
+      apiKey: String(p.apiKey || '').trim(),
+      timeoutSeconds: Math.min(180, Math.max(15, Number(p.timeoutSeconds) || 60)),
+    };
+  } catch {
+    return { enabled: false, baseUrl: '', apiKey: '', timeoutSeconds: 60 };
+  }
 }
 
 
@@ -597,10 +633,16 @@ async function getRuntimeSettingsResponse(currentAdminIp = '', tunnelClientView 
   const { resolveGlobalSensitiveWordDetection, resolveAntiProbeMinTextLength } = await import('../../services/sensitiveWordDetectionService.js');
   const sensitiveWordDetectionEnabled = await resolveGlobalSensitiveWordDetection();
   const antiProbeMinTextLength = await resolveAntiProbeMinTextLength();
+  const turnstileSolverConfig = await readTurnstileSolverConfig();
   return {
     checkinCron: config.checkinCron,
     checkinScheduleMode: config.checkinScheduleMode,
     checkinIntervalHours: config.checkinIntervalHours,
+    // Turnstile 过盾求解器：enabled + masked key（不回显明文 apiKey）
+    turnstileSolverEnabled: turnstileSolverConfig.enabled,
+    turnstileSolverBaseUrl: turnstileSolverConfig.baseUrl,
+    turnstileSolverApiKeyMasked: maskSecret(turnstileSolverConfig.apiKey),
+    turnstileSolverTimeoutSeconds: turnstileSolverConfig.timeoutSeconds,
     balanceRefreshCron: config.balanceRefreshCron,
     logCleanupCron: config.logCleanupCron,
     logCleanupUsageLogsEnabled: config.logCleanupUsageLogsEnabled,
@@ -947,6 +989,52 @@ export async function settingsRoutes(app: FastifyInstance) {
       upsertSetting('checkin_cron', config.checkinCron);
       upsertSetting('checkin_schedule_mode', config.checkinScheduleMode);
       upsertSetting('checkin_interval_hours', config.checkinIntervalHours);
+    }
+
+    // Turnstile solver: settings-table JSON `turnstile_solver_config`
+    // ({ enabled, baseUrl, apiKey, timeoutSeconds }). apiKey is optional —
+    // self-hosted solvers (turnstile-solver container, jsdom-based) usually
+    // require no auth, only hosted cloud services need a key.
+    const turnstileSolverTouched = body.turnstileSolverEnabled !== undefined
+      || body.turnstileSolverBaseUrl !== undefined
+      || body.turnstileSolverApiKey !== undefined
+      || body.turnstileSolverTimeoutSeconds !== undefined;
+    if (turnstileSolverTouched) {
+      const prev = await readTurnstileSolverConfig();
+      const nextEnabled = body.turnstileSolverEnabled !== undefined
+        ? !!body.turnstileSolverEnabled
+        : prev.enabled;
+      // baseUrl is required whenever the solver is enabled. Empty body value
+      // means "keep the current one" (same convention as notification secrets).
+      const nextBaseUrl = body.turnstileSolverBaseUrl !== undefined
+        ? String(body.turnstileSolverBaseUrl || '').trim()
+        : prev.baseUrl;
+      if (nextEnabled && !nextBaseUrl) {
+        return reply.code(400).send({ success: false, message: '启用 Turnstile 过盾时求解器地址不能为空' });
+      }
+      if (nextBaseUrl && !isValidHttpUrl(nextBaseUrl)) {
+        return reply.code(400).send({ success: false, message: 'Turnstile 求解器地址无效，请填写 http/https 地址' });
+      }
+      // Only a freshly typed key replaces the stored one; masked/empty input
+      // preserves the existing key (mirrors webhookSecret handling).
+      const nextApiKey = body.turnstileSolverApiKey !== undefined && body.turnstileSolverApiKey.trim()
+        ? String(body.turnstileSolverApiKey).trim()
+        : prev.apiKey;
+      const nextTimeoutSeconds = body.turnstileSolverTimeoutSeconds !== undefined
+        ? Math.min(180, Math.max(15, Math.trunc(Number(body.turnstileSolverTimeoutSeconds) || 60)))
+        : prev.timeoutSeconds;
+      if (nextEnabled) {
+        const changed = JSON.stringify({ enabled: prev.enabled, baseUrl: prev.baseUrl, timeoutSeconds: prev.timeoutSeconds })
+          !== JSON.stringify({ enabled: nextEnabled, baseUrl: nextBaseUrl, timeoutSeconds: nextTimeoutSeconds })
+          || (body.turnstileSolverApiKey !== undefined && body.turnstileSolverApiKey.trim() !== '');
+        if (changed) changedLabels.push(`Turnstile 过盾求解器（${nextBaseUrl}）`);
+      }
+      upsertSetting('turnstile_solver_config', {
+        enabled: nextEnabled,
+        baseUrl: nextBaseUrl,
+        apiKey: nextApiKey,
+        timeoutSeconds: nextTimeoutSeconds,
+      });
     }
 
     if (body.balanceRefreshCron !== undefined) {
