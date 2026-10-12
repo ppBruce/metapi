@@ -24,6 +24,30 @@ function hasFreeSuffix(modelName: string): boolean {
   return /:free$/i.test(String(modelName || '').trim()) || /-free$/i.test(String(modelName || '').trim());
 }
 
+/**
+ * Canonical lookup key that KEEPS the free label: drops the provider prefix
+ * (so `stepfun/step-5-preview` and `step-5-preview` collapse to one key, like
+ * `canonicalizeModelName`) but unlike it preserves `:free` / `-free`.
+ *
+ * Needed because the disabled index stores free and non-free entries in
+ * disjoint canonical sets (`canonicalFree` / `canonicalNonFree`): passing a
+ * free-stripped key makes the lookup hit the wrong set, letting a non-free
+ * disable wrongly block its free sibling (and vice versa). Mirror the
+ * prefix-drop rule of `canonicalizeModelName` (ollama-style `owner:tag`
+ * namespaces keep their full name) and stop before the free strip.
+ */
+export function canonicalLookupKeyPreservingFree(modelName: string): string {
+  let value = normalizeRawModelName(modelName);
+  if (!value) return '';
+  const slashParts = value.split('/').filter(Boolean);
+  if (slashParts.length > 1) {
+    const last = slashParts[slashParts.length - 1]!;
+    const tagFreeLast = last.replace(/:free$/i, '').replace(/-free$/i, '');
+    if (!tagFreeLast.includes(':')) value = last;
+  }
+  return value;
+}
+
 function makeEntry() {
   return { raw: new Set<string>(), canonicalFree: new Set<string>(), canonicalNonFree: new Set<string>() };
 }
