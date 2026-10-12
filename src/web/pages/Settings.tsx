@@ -191,7 +191,6 @@ export default function Settings() {
   const [savingSecurity, setSavingSecurity] = useState(false);
   const [adminIpAllowlistText, setAdminIpAllowlistText] = useState('');
   const [clearingCache, setClearingCache] = useState(false);
-  const [clearingUsage, setClearingUsage] = useState(false);
   const [migrationDialect, setMigrationDialect] = useState<DbDialect>('postgres');
   const [migrationConnectionString, setMigrationConnectionString] = useState('');
   const [connectionMode, setConnectionMode] = useState<'shorthand' | 'advanced'>('shorthand');
@@ -852,20 +851,6 @@ export default function Settings() {
     }
   };
 
-  const handleClearUsage = async () => {
-    if (!window.confirm('确认清理占用统计与使用日志？')) return;
-    setClearingUsage(true);
-    try {
-      const res = await api.clearUsageData();
-      toast.success(`占用统计已清理（日志 ${res.deletedProxyLogs || 0} 条）`);
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      toast.error(errMessage || '清理占用失败');
-    } finally {
-      setClearingUsage(false);
-    }
-  };
-
   const closeFactoryResetModal = () => {
     if (factoryResetting) return;
     setFactoryResetOpen(false);
@@ -1007,6 +992,40 @@ export default function Settings() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 480px), 1fr))', gap: 16 }}>
+        <div className="card animate-slide-up stagger-2" style={{ padding: 20, order: 1, height: '100%' }}>
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>重置操作</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 12 }}>
+            重新拉取站点模型列表并重建路由通道，不影响账号、令牌数据。
+          </div>
+          <button onClick={handleClearCache} disabled={clearingCache} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', whiteSpace: 'nowrap' }}>
+            {clearingCache ? <><span className="spinner spinner-sm" /> 清理中...</> : '清除缓存并重建路由'}
+          </button>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, margin: '14px 0 12px' }}>
+            清空全部数据库内容并切回默认 SQLite；管理员 Token 保留，完成后自动刷新。
+          </div>
+          <button
+            onClick={() => setFactoryResetOpen(true)}
+            disabled={isTunnelClientView}
+            title={isTunnelClientView ? '公网隧道访问时不可用，请在本机/内网控制台操作' : undefined}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              fontSize: 13,
+              fontWeight: 500,
+              padding: '6px 12px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--color-danger)',
+              color: 'var(--color-danger)',
+              background: 'transparent',
+              whiteSpace: 'nowrap',
+              cursor: isTunnelClientView ? 'not-allowed' : 'pointer',
+            }}
+          >
+            重新初始化系统
+          </button>
+        </div>
+
         <div className="card animate-slide-up stagger-2" style={{ padding: 20, order: 1 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>管理员登录令牌</div>
           <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg-inset)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 12 }}>
@@ -1074,8 +1093,18 @@ export default function Settings() {
         </div>
 
         <div className="card animate-slide-up stagger-2" style={{ padding: 20, order: 3, gridColumn: '1 / -1' }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>定时任务</div>
-          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(140px, 180px) minmax(140px, 180px) max-content', gap: 12, alignItems: 'end', marginBottom: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>定时任务</div>
+            <button
+              onClick={triggerScheduleCheckin}
+              disabled={testingCheckin}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', whiteSpace: 'nowrap', flexShrink: 0 }}
+            >
+              {testingCheckin ? '触发中...' : '测试一次签到'}
+            </button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(140px, 180px) minmax(140px, 180px)', gap: 12, marginBottom: 12 }}>
             <div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>签到方式</div>
               <ModernSelect
@@ -1088,7 +1117,11 @@ export default function Settings() {
               />
             </div>
             <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>签到间隔</div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                签到间隔{runtime.checkinScheduleMode !== 'interval' && (
+                  <span style={{ color: 'var(--color-text-muted)', opacity: 0.75 }}>（间隔方式可用）</span>
+                )}
+              </div>
               <ModernSelect
                 value={String(runtime.checkinIntervalHours)}
                 onChange={(value) => setRuntime((prev) => ({
@@ -1099,14 +1132,6 @@ export default function Settings() {
                 options={CHECKIN_INTERVAL_OPTIONS}
               />
             </div>
-            <button
-              onClick={triggerScheduleCheckin}
-              disabled={testingCheckin}
-              className="btn btn-ghost"
-              style={{ border: '1px solid var(--color-border)', whiteSpace: 'nowrap' }}
-            >
-              {testingCheckin ? '触发中...' : '测试一次签到'}
-            </button>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
             <div>
@@ -2215,33 +2240,7 @@ export default function Settings() {
           )}
         </div>
 
-        <div style={{ order: 0, gridColumn: '1 / -1' }}><UpdateCenterSection /></div>
-
-        <div className="card animate-slide-up stagger-7" style={{ padding: 20, order: 10, border: '1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border))' }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10, color: 'var(--color-danger)' }}>危险操作</div>
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 12 }}>
-            重新初始化系统会清空当前 metapi 使用中的全部数据库内容；若当前运行在外部 MySQL/Postgres，也会先清空该外部库中的 metapi 数据，然后切回默认 SQLite。
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 14 }}>
-            完成后管理员 Token 保留当前值不变，页面将自动刷新并恢复登录态。
-          </div>
-          <button
-            onClick={() => setFactoryResetOpen(true)}
-            disabled={isTunnelClientView}
-            title={isTunnelClientView ? '公网隧道访问时不可用，请在本机/内网控制台操作' : undefined}
-            className="btn btn-danger"
-          >
-            重新初始化系统
-          </button>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}>
-            <button onClick={handleClearCache} disabled={clearingCache} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-              {clearingCache ? <><span className="spinner spinner-sm" /> 清理中...</> : '清除缓存并重建路由'}
-            </button>
-            <button onClick={handleClearUsage} disabled={clearingUsage} className="btn btn-link btn-link-warning">
-              {clearingUsage ? <><span className="spinner spinner-sm" /> 清理中...</> : '清除占用与使用日志'}
-            </button>
-          </div>
-        </div>
+        <div style={{ order: 0, height: '100%', display: 'flex' }}><UpdateCenterSection /></div>
 
         <div className="card animate-slide-up stagger-7" style={{ padding: 20, order: 9 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>会话与安全</div>
@@ -2279,7 +2278,20 @@ export default function Settings() {
                 clearAuthSession(localStorage);
                 window.location.reload();
               }}
-              className="btn btn-danger"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                fontSize: 13,
+                fontWeight: 500,
+                padding: '6px 12px',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--color-danger)',
+                color: 'var(--color-danger)',
+                background: 'transparent',
+                whiteSpace: 'nowrap',
+                cursor: 'pointer',
+              }}
             >
               退出登录
             </button>
