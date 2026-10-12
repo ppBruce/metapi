@@ -4,7 +4,7 @@ import { resolveModelAvailabilityProbeTimeoutMs } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { isUsableAccountToken, ACCOUNT_TOKEN_VALUE_STATUS_READY } from './accountTokenService.js';
 import { probeRuntimeModel } from './runtimeModelProbe.js';
-import { isModelDisabledForSite, loadSiteDisabledModelsIndex, canonicalLookupKeyPreservingFree } from './siteDisabledModels.js';
+import { isModelDisabledForSite, loadSiteDisabledModelsIndex } from './siteDisabledModels.js';
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -104,9 +104,6 @@ async function diagnoseNoProbeTargets(
     ? Math.trunc(Number(options.accountId))
     : null;
   const canonicalModel = canonicalizeModelName(modelName) || modelName.toLowerCase();
-  // Disabled-index lookups need the free label intact (the index keeps free and
-  // non-free entries in disjoint sets), so build a separate free-preserving key.
-  const disabledLookupKey = canonicalLookupKeyPreservingFree(modelName);
 
   // 1. Fetch all rows within site/account scope, then match by canonical name in JS
   const allScopedRows = await db.select({
@@ -176,16 +173,24 @@ async function diagnoseNoProbeTargets(
   }
 
   // 2. Rows exist in scope — determine why they were filtered out.
+  // Only the row's OWN model name decides whether it is disabled. Never probe
+  // the bare requested display name: a site may expose both `foo:free` and
+  // `foo`, and disabling the non-free variant must not make the (still
+  // enabled) free variant report as blocked. Matching by canonical name is
+  // what caused that cross-variant leak.
   const disabledModelsIndex = await loadSiteDisabledModelsIndex();
   const activeRows = matchingRows.filter((r: any) => r.siteStatus === 'active' && r.accountStatus === 'active');
   const disabledBySiteModel = activeRows.filter((r: any) =>
     isModelDisabledForSite(disabledModelsIndex, r.siteId, r.modelName, r.accountId)
-    || isModelDisabledForSite(disabledModelsIndex, r.siteId, disabledLookupKey, r.accountId),
   );
 
   if (activeRows.length > 0 && disabledBySiteModel.length === activeRows.length) {
     const siteName = activeRows[0]!.siteName || `站点 ${activeRows[0]!.siteId}`;
-    return `模型 "${modelName}" 在 ${siteName} 被「站点禁用模型」屏蔽，请先在站点设置中移除该模型的禁用。`;
+    const blockedName = disabledBySiteModel[0]!.modelName || modelName;
+    const hint = blockedName && blockedName !== modelName
+      ? `（实际被禁用：${blockedName}）`
+      : '';
+    return `模型 "${modelName}" 在 ${siteName} 被「站点禁用模型」屏蔽${hint}，请先在站点设置中移除该模型的禁用。`;
   }
 
   const inactiveAccounts = matchingRows.filter((r: any) => r.accountStatus !== 'active');
@@ -375,7 +380,6 @@ async function collectMarketplaceProbeTargets(
 ): Promise<MarketplaceProbeTarget[]> {
   const disabledModelsIndex = await loadSiteDisabledModelsIndex();
   const canonicalModel = canonicalizeModelName(normalized) || normalized.toLowerCase();
-  const disabledLookupKey = canonicalLookupKeyPreservingFree(normalized);
 
   const siteId = Number.isFinite(options.siteId as number) && Number(options.siteId) > 0
     ? Math.trunc(Number(options.siteId))
@@ -412,8 +416,9 @@ async function collectMarketplaceProbeTargets(
   const targetsByAccount = new Map<number, MarketplaceProbeTarget>();
   for (const hit of accountHits) {
     if (targetsByAccount.has(hit.account.id)) continue;
-    if (isModelDisabledForSite(disabledModelsIndex, hit.site.id, hit.modelName, hit.account.id)
-      || isModelDisabledForSite(disabledModelsIndex, hit.site.id, disabledLookupKey, hit.account.id)) {
+    // Match the row's own model name only. Checking the bare requested name
+    // here too would let a disabled non-free variant block the free variant.
+    if (isModelDisabledForSite(disabledModelsIndex, hit.site.id, hit.modelName, hit.account.id)) {
       continue;
     }
     targetsByAccount.set(hit.account.id, {
@@ -455,8 +460,8 @@ async function collectMarketplaceProbeTargets(
 
   for (const hit of tokenHits) {
     if (!isUsableAccountToken(hit.token)) continue;
-    if (isModelDisabledForSite(disabledModelsIndex, hit.site.id, hit.modelName, hit.account.id)
-      || isModelDisabledForSite(disabledModelsIndex, hit.site.id, disabledLookupKey, hit.account.id)) {
+    // Own model name only — see the account-targets loop above.
+    if (isModelDisabledForSite(disabledModelsIndex, hit.site.id, hit.modelName, hit.account.id)) {
       continue;
     }
     if (targetsByAccount.has(hit.account.id)) {
