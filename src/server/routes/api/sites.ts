@@ -1088,6 +1088,15 @@ export async function sitesRoutes(app: FastifyInstance) {
       const accountIds = accountRows.map((row: any) => row.id).filter((id: any) => Number.isFinite(id) && id > 0);
 
       if (accountIds.length > 0) {
+        // Drop this site's usage logs together with the accounts. proxy_logs
+        // carries no FK to accounts/sites, so leaving them would orphan the
+        // rows (they surface as "unknown account/site" and vanish from any
+        // per-site filter). Consistent with the log_cleanup retention policy:
+        // logs are ephemeral, not a permanent archive.
+        await tx.delete(schema.proxyLogs)
+          .where(inArray(schema.proxyLogs.accountId, accountIds))
+          .run();
+
         const tokenRows = await tx.select({ id: schema.accountTokens.id })
           .from(schema.accountTokens)
           .where(inArray(schema.accountTokens.accountId, accountIds))
