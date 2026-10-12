@@ -38,6 +38,13 @@ const QUICK_TUNNEL_URL_RE = /https:\/\/([a-z0-9-]+)\.trycloudflare\.com/gi;
 const SHORT_ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const DEFAULT_TUNNEL_WORKER_URL = 'https://abc-tunnel.us';
 const QUICK_TUNNEL_RETRY_DELAYS_MS = [10_000, 30_000, 60_000, 300_000] as const;
+// Quick-tunnel edge transport protocol. http2 (TCP/7844) survives networks that
+// black-hole QUIC/UDP better than quic; mirrors upstream quick-tunnel settings.
+const QUICK_TUNNEL_PROTOCOL_OPTIONS = new Set(['http2', 'quic', 'auto']);
+const DEFAULT_QUICK_TUNNEL_PROTOCOL = 'http2';
+// Keep cloudflared retrying transient connection/protocol errors in-process
+// (default is 5) so a black-holed edge IP does not kill the connector.
+const QUICK_TUNNEL_RETRIES = '99';
 const CLOUDFLARED_DOWNLOAD_DEFAULT_BASE_URL = 'https://github.com/cloudflare/cloudflared/releases/latest/download';
 // Hard cap for the one-time binary download: a blocked network (GitHub
 // unreachable, black-holed packets) otherwise hangs the enable request forever
@@ -64,6 +71,20 @@ let retryTimer: NodeJS.Timeout | null = null;
 let retryAttempt = 0;
 let healthProbeTimer: NodeJS.Timeout | null = null;
 let healthProbeFailures = 0;
+
+/**
+ * Resolve the cloudflared edge transport protocol for quick tunnels.
+ * Defaults to http2; override via TUNNEL_TRANSPORT_PROTOCOL or
+ * CLOUDFLARED_PROTOCOL (http2|quic|auto). Invalid values fall back to http2.
+ */
+export function resolveQuickTunnelTransportProtocol(env: NodeJS.ProcessEnv = process.env): string {
+  const requested = String(
+    env.TUNNEL_TRANSPORT_PROTOCOL || env.CLOUDFLARED_PROTOCOL || DEFAULT_QUICK_TUNNEL_PROTOCOL,
+  )
+    .trim()
+    .toLowerCase();
+  return QUICK_TUNNEL_PROTOCOL_OPTIONS.has(requested) ? requested : DEFAULT_QUICK_TUNNEL_PROTOCOL;
+}
 
 export function getQuickTunnelRetryDelay(attempt: number): number {
   const index = Math.max(0, Math.min(Math.floor(attempt), QUICK_TUNNEL_RETRY_DELAYS_MS.length - 1));
@@ -744,6 +765,8 @@ export async function startCloudflareTunnel(): Promise<TunnelStatus> {
       '--url',
       `http://127.0.0.1:${localPort}`,
       '--no-autoupdate',
+      '--retries',
+      QUICK_TUNNEL_RETRIES,
     ];
 
     const localTmp = join(tunnelDir(), 'tmp');
@@ -752,6 +775,7 @@ export async function startCloudflareTunnel(): Promise<TunnelStatus> {
       cwd: tunnelDir(),
       env: {
         ...process.env,
+        TUNNEL_TRANSPORT_PROTOCOL: resolveQuickTunnelTransportProtocol(),
         TMPDIR: localTmp,
         TEMP: localTmp,
         TMP: localTmp,

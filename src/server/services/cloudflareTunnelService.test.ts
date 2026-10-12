@@ -22,6 +22,7 @@ import {
   isLikelyTunnelRequest,
   registerStableTunnelMapping,
   resolveCloudflaredDownloadProxyUrl,
+  resolveQuickTunnelTransportProtocol,
   waitForPublicUrlHealthy,
 } from './cloudflareTunnelService.js';
 
@@ -64,6 +65,28 @@ describe('cloudflare tunnel access helpers', () => {
     expect(isLikelyTunnelRequest({
       headers: { host: '127.0.0.1:5000' },
     })).toBe(false);
+  });
+});
+
+describe('quick tunnel transport protocol', () => {
+  it('defaults to http2 when no override is set', () => {
+    expect(resolveQuickTunnelTransportProtocol({} as NodeJS.ProcessEnv)).toBe('http2');
+  });
+
+  it('honors TUNNEL_TRANSPORT_PROTOCOL and CLOUDFLARED_PROTOCOL, case/whitespace tolerant', () => {
+    expect(resolveQuickTunnelTransportProtocol({ TUNNEL_TRANSPORT_PROTOCOL: 'quic' } as NodeJS.ProcessEnv)).toBe('quic');
+    expect(resolveQuickTunnelTransportProtocol({ TUNNEL_TRANSPORT_PROTOCOL: '  HTTP2  ' } as NodeJS.ProcessEnv)).toBe('http2');
+    expect(resolveQuickTunnelTransportProtocol({ CLOUDFLARED_PROTOCOL: 'auto' } as NodeJS.ProcessEnv)).toBe('auto');
+    // TUNNEL_TRANSPORT_PROTOCOL wins over CLOUDFLARED_PROTOCOL.
+    expect(resolveQuickTunnelTransportProtocol({
+      TUNNEL_TRANSPORT_PROTOCOL: 'http2',
+      CLOUDFLARED_PROTOCOL: 'quic',
+    } as NodeJS.ProcessEnv)).toBe('http2');
+  });
+
+  it('falls back to http2 on invalid values', () => {
+    expect(resolveQuickTunnelTransportProtocol({ TUNNEL_TRANSPORT_PROTOCOL: 'bogus' } as NodeJS.ProcessEnv)).toBe('http2');
+    expect(resolveQuickTunnelTransportProtocol({ CLOUDFLARED_PROTOCOL: '' } as NodeJS.ProcessEnv)).toBe('http2');
   });
 });
 
