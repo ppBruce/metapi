@@ -10,6 +10,7 @@ import {
   SITE_CHART_HEADER_MIN_HEIGHT,
 } from './chartShared.js';
 import { SegmentedToggle } from './SegmentedToggle.js';
+import ChartLoadingState from './ChartLoadingState.js';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -176,7 +177,7 @@ export default function SiteTrendChart({ active = true }: SiteTrendChartProps) {
         <div style={headerStyleWithMinHeight}>
           <div className="skeleton" style={{ width: 200, height: 32, borderRadius: 'var(--radius-sm)' }} />
         </div>
-        <div className="skeleton" style={{ width: '100%', height: 300, borderRadius: 'var(--radius-sm)' }} />
+        <ChartLoadingState height={300} />
       </div>
     );
   }

@@ -47,6 +47,10 @@ export default function PaginationControls({
 
   const goTo = (nextPage: number) => onPageChange(nextPage);
   const showPageNavigation = totalPages > 1;
+  // The numeric window slides away from page 1 on deep pages, so reaching the
+  // first page otherwise means clicking "上一页" repeatedly. Offer it only
+  // when it is not already a numbered button — never duplicate a page.
+  const firstPageOutsideWindow = pageNumbers.length > 0 && !pageNumbers.includes(1);
 
   return (
     <div className={className} style={style}>
@@ -61,6 +65,17 @@ export default function PaginationControls({
           >
             上一页
           </button>
+          {firstPageOutsideWindow && (
+            <button
+              type="button"
+              className="pagination-btn"
+              onClick={() => goTo(1)}
+              aria-label="回到第一页"
+              title="回到第一页"
+            >
+              首页
+            </button>
+          )}
           {pageNumbers.map((n) => (
             <button
               key={n}
