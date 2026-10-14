@@ -14,10 +14,8 @@ import {
 import {
   SortableContext,
   sortableKeyboardCoordinates,
-  useSortable,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import CenteredModal from '../components/CenteredModal.js';
@@ -63,6 +61,8 @@ import { SITE_DOCS_URL } from '../docsLink.js';
 import { getSiteInitializationPreset } from '../../shared/siteInitializationPresets.js';
 import { parseBatchApiKeys } from '../../shared/apiKeyBatch.js';
 import { StatusPill, StatusText } from '../components/StatusText.js';
+import { SortableAccountMobileCard, SortableAccountTableRow } from './accounts/SortableAccountItems.js';
+import AccountRebindModal from './accounts/AccountRebindModal.js';
 
 type ConnectionsSegment = 'session' | 'apikey' | 'tokens';
 
@@ -133,101 +133,6 @@ function resolveConnectionsSegment(search: string): ConnectionsSegment {
 type AccountsProps = {
   siteId?: number;
 };
-
-/**
- * 列表拖拽排序：与「站点管理」保持一致的交互 —— 整行/整卡就是拖拽面，没有独立把手。
- * listeners 落在 <tr>/<div> 自身，靠 sensor 的 activationConstraint（鼠标 6px 位移、
- * 触屏 180ms 长按）把「拖动排序」和「点击行内的按钮」区分开。
- */
-function SortableAccountTableRow({
-  id,
-  label,
-  disabled,
-  className,
-  dataTestId,
-  isDropTarget,
-  rowRef,
-  children,
-}: {
-  id: number;
-  label?: string | null;
-  disabled: boolean;
-  className: string;
-  dataTestId?: string;
-  isDropTarget?: boolean;
-  rowRef: (node: HTMLTableRowElement | null) => void;
-  children: React.ReactNode;
-}) {
-  const sortable = useSortable({ id, disabled });
-  const translatedTransform = sortable.transform
-    ? { ...sortable.transform, scaleX: 1, scaleY: 1 }
-    : null;
-
-  return (
-      <tr
-        ref={(node) => {
-          sortable.setNodeRef(node);
-          rowRef(node);
-        }}
-        // 不用 {...sortable.attributes}：那会带上 role="button"，把 <tr> 变成按钮、
-        // 破坏表格语义。键盘拖拽只需要 listeners + 可聚焦元素。
-        {...sortable.listeners}
-        tabIndex={disabled ? undefined : 0}
-        aria-roledescription={disabled ? undefined : '可拖拽排序的连接行'}
-        aria-describedby={sortable.attributes['aria-describedby']}
-        aria-label={disabled || !label ? undefined : `拖拽调整「${label}」的顺序`}
-        data-testid={dataTestId}
-        className={`${className} ${sortable.isDragging ? 'site-sort-dragging' : ''} ${
-          !disabled ? 'site-row-draggable' : ''
-        } ${isDropTarget ? 'site-sort-drop-before' : ''}`.trim()}
-        style={{
-          transform: CSS.Translate.toString(translatedTransform),
-          transition: sortable.isDragging ? undefined : (sortable.transition || undefined),
-          position: 'relative',
-          zIndex: sortable.isDragging ? 3 : undefined,
-        }}
-      >
-        {children}
-      </tr>
-  );
-}
-
-function SortableAccountMobileCard({
-  id,
-  label,
-  disabled,
-  isDropTarget,
-  children,
-}: {
-  id: number;
-  label?: string | null;
-  disabled: boolean;
-  isDropTarget?: boolean;
-  children: React.ReactNode;
-}) {
-  const sortable = useSortable({ id, disabled });
-  return (
-      <div
-        ref={sortable.setNodeRef}
-        {...sortable.listeners}
-        tabIndex={disabled ? undefined : 0}
-        aria-roledescription={disabled ? undefined : '可拖拽排序的连接卡片'}
-        aria-describedby={sortable.attributes['aria-describedby']}
-        aria-label={disabled || !label ? undefined : `拖拽调整「${label}」的顺序`}
-        className={`${sortable.isDragging ? 'site-sort-dragging' : ''} ${
-          !disabled ? 'site-card-draggable' : ''
-        } ${isDropTarget ? 'site-sort-drop-before' : ''}`.trim()}
-        style={{
-          transform: CSS.Translate.toString(sortable.transform),
-          transition: sortable.isDragging ? undefined : (sortable.transition || undefined),
-          position: 'relative',
-          zIndex: sortable.isDragging ? 3 : undefined,
-        }}
-      >
-        {children}
-      </div>
-  );
-}
 
 export default function Accounts({ siteId: filterSiteId }: AccountsProps = {}) {
   const location = useLocation();
@@ -2418,200 +2323,23 @@ export default function Accounts({ siteId: filterSiteId }: AccountsProps = {}) {
           </CenteredModal>
 
           {activeSegment === 'session' && (
-            <CenteredModal
+            <AccountRebindModal
               open={Boolean(rebindTarget)}
+              accountLabel={activeRebindTarget ? resolveAccountDisplayName(activeRebindTarget) : ''}
+              siteName={activeRebindTarget?.site?.name || '-'}
+              form={rebindForm}
+              verifyResult={rebindVerifyResult}
+              verifying={rebindVerifying}
+              saving={rebindSaving}
+              showUserId={platformRequiresUserId(activeRebindTarget?.site?.platform)}
+              showSub2Api={isRebindSub2Api}
+              inputStyle={inputStyle}
               onClose={closeRebindPanel}
-              title="重新绑定 Session Token"
-              maxWidth={820}
-              bodyStyle={{ display: 'flex', flexDirection: 'column', gap: 12 }}
-              footer={
-                <button onClick={closeRebindPanel} className="btn btn-ghost">
-                  取消
-                </button>
-              }
-            >
-              {activeRebindTarget ? (
-                <>
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: 'var(--color-text-muted)',
-                      marginBottom: 12,
-                    }}
-                  >
-                    连接: {resolveAccountDisplayName(activeRebindTarget)} @{' '}
-                    {activeRebindTarget.site?.name || '-'}。请粘贴新的 Session
-                    Token，验证成功后再绑定。
-                  </div>
-
-                  <div
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'minmax(0, 1fr) 220px',
-                      gap: 10,
-                      marginBottom: 10,
-                    }}
-                  >
-                    <textarea
-                      placeholder="粘贴新的 Session Token"
-                      value={rebindForm.accessToken}
-                      onChange={(e) => {
-                        setRebindForm((prev) => ({
-                          ...prev,
-                          accessToken: e.target.value.trim(),
-                        }));
-                        setRebindVerifyResult(null);
-                      }}
-                      style={{
-                        ...inputStyle,
-                        fontFamily: 'var(--font-mono)',
-                        height: 74,
-                        resize: 'none' as const,
-                      }}
-                    />
-                    {platformRequiresUserId(activeRebindTarget?.site?.platform) && (
-                      <input
-                        placeholder="用户 ID（可选）"
-                        value={rebindForm.platformUserId}
-                        onChange={(e) => {
-                          setRebindForm((prev) => ({
-                            ...prev,
-                            platformUserId: e.target.value.replace(/\D/g, ''),
-                          }));
-                          setRebindVerifyResult(null);
-                        }}
-                        style={inputStyle}
-                      />
-                    )}
-                  </div>
-                  {isRebindSub2Api && (
-                    <>
-                      <div
-                        style={{
-                          display: 'grid',
-                          gridTemplateColumns: 'minmax(0, 1fr) 220px',
-                          gap: 10,
-                          marginBottom: 4,
-                        }}
-                      >
-                        <input
-                          placeholder="Sub2API refresh_token（可选）"
-                          value={rebindForm.refreshToken}
-                          onChange={(e) =>
-                            setRebindForm((prev) => ({
-                              ...prev,
-                              refreshToken: e.target.value.trim(),
-                            }))
-                          }
-                          style={{
-                            ...inputStyle,
-                            fontFamily: 'var(--font-mono)',
-                          }}
-                        />
-                        <input
-                          placeholder="token_expires_at（可选）"
-                          value={rebindForm.tokenExpiresAt}
-                          onChange={(e) =>
-                            setRebindForm((prev) => ({
-                              ...prev,
-                              tokenExpiresAt: e.target.value.replace(/\D/g, ''),
-                            }))
-                          }
-                          style={inputStyle}
-                        />
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: 'var(--color-text-muted)',
-                          marginBottom: 10,
-                        }}
-                      >
-                        留空将保持原有 refresh_token
-                        不变。配置后可用于托管自动续期。
-                      </div>
-                    </>
-                  )}
-
-                  {rebindVerifyResult &&
-                    rebindVerifyResult.success &&
-                    rebindVerifyResult.tokenType === 'session' && (
-                      <div
-                        className="alert alert-success animate-scale-in"
-                        style={{ marginBottom: 10 }}
-                      >
-                        <div className="alert-title">Session Token 有效</div>
-                        <div style={{ fontSize: 12, marginTop: 4 }}>
-                          用户:{' '}
-                          {rebindVerifyResult.userInfo?.username || '未知'}
-                          {rebindVerifyResult.apiToken
-                            ? `，已识别 API Key (${String(rebindVerifyResult.apiToken).slice(0, 8)}...)`
-                            : ''}
-                        </div>
-                      </div>
-                    )}
-                  {rebindVerifyResult &&
-                    (!rebindVerifyResult.success ||
-                      rebindVerifyResult.tokenType !== 'session') && (
-                      <div
-                        className="alert alert-error animate-scale-in"
-                        style={{ marginBottom: 10 }}
-                      >
-                        <div className="alert-title">
-                          {rebindVerifyResult.message ||
-                            'Token 无效或类型不正确'}
-                        </div>
-                      </div>
-                    )}
-
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button
-                      onClick={handleVerifyRebindToken}
-                      disabled={
-                        rebindVerifying || !rebindForm.accessToken.trim()
-                      }
-                      className="btn btn-ghost"
-                      style={{ border: '1px solid var(--color-border)' }}
-                    >
-                      {rebindVerifying ? (
-                        <>
-                          <span className="spinner spinner-sm" />
-                          验证中...
-                        </>
-                      ) : (
-                        '验证 Token'
-                      )}
-                    </button>
-                    <button
-                      onClick={handleSubmitRebind}
-                      disabled={
-                        rebindSaving ||
-                        !(
-                          rebindVerifyResult?.success &&
-                          rebindVerifyResult?.tokenType === 'session'
-                        )
-                      }
-                      className="btn btn-primary"
-                    >
-                      {rebindSaving ? (
-                        <>
-                          <span
-                            className="spinner spinner-sm"
-                            style={{
-                              borderTopColor: 'white',
-                              borderColor: 'rgba(255,255,255,0.3)',
-                            }}
-                          />
-                          绑定中...
-                        </>
-                      ) : (
-                        '确认重新绑定'
-                      )}
-                    </button>
-                  </div>
-                </>
-              ) : null}
-            </CenteredModal>
+              onFormChange={setRebindForm}
+              onClearVerification={() => setRebindVerifyResult(null)}
+              onVerify={handleVerifyRebindToken}
+              onSubmit={handleSubmitRebind}
+            />
           )}
 
           <EditAccountModal
