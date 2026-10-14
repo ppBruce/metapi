@@ -215,13 +215,14 @@ const headerStyle: React.CSSProperties = {
 const toggleGroupStyle: React.CSSProperties = {
   display: 'inline-flex',
   gap: 0,
-  borderRadius: 'var(--radius-sm)',
+  borderRadius: 'var(--radius-md)',
   border: '1px solid var(--color-border)',
   overflow: 'hidden',
 };
 
 const toggleBtnBase: React.CSSProperties = {
-  padding: '6px 12px',
+  height: 34,
+  padding: '0 12px',
   fontSize: 12,
   fontWeight: 500,
   cursor: 'pointer',

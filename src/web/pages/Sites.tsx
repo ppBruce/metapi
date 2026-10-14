@@ -358,12 +358,13 @@ export default function Sites() {
   const [probeSaving, setProbeSaving] = useState(false);
   const [probeLatencyThreshold, setProbeLatencyThreshold] = useState('0');
   const [probing, setProbing] = useState(false);
-  type ProbeLogEntry = { time: string; text: string; color?: string };
+  type ProbeLogEntry = { id: number; time: string; text: string; color?: string };
   const [probeLog, setProbeLog] = useState<ProbeLogEntry[]>([]);
   const [probeCompleted, setProbeCompleted] = useState(false);
   const probeAbortRef = useRef<AbortController | null>(null);
   const autoDetectTimerRef = useRef<number | null>(null);
   const probeLogEndRef = useRef<HTMLDivElement | null>(null);
+  const probeLogSeqRef = useRef(0);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const selectedInitializationPreset = useMemo(
     () => getSiteInitializationPreset(selectedInitializationPresetId),
@@ -682,7 +683,10 @@ export default function Sites() {
     const siteId = editor.editingSiteId;
     const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const addLog = (text: string, color?: string) =>
-      setProbeLog((prev) => [...prev, { time: now(), text, color }]);
+      setProbeLog((prev) => [
+        ...prev,
+        { id: probeLogSeqRef.current++, time: now(), text, color },
+      ]);
 
     probeAbortRef.current?.abort();
     const controller = new AbortController();
@@ -769,7 +773,11 @@ export default function Sites() {
               .then((res: any) => {
                 setAvailableModels(Array.isArray(res?.models) ? res.models : []);
               })
-              .catch(() => {})
+              .catch((err: unknown) => {
+                // Silent before: the model list silently kept stale data.
+                console.warn('[sites] failed to refresh available models after probe', err);
+                toast.error('刷新可用模型失败');
+              })
               .finally(() => setProbeCompleted(true));
           } else if (type === 'error') {
             addLog(d.message || '探测失败', 'var(--color-danger)');
@@ -779,7 +787,11 @@ export default function Sites() {
               .then((res: any) => {
                 setAvailableModels(Array.isArray(res?.models) ? res.models : []);
               })
-              .catch(() => {})
+              .catch((err: unknown) => {
+                // Silent before: the model list silently kept stale data.
+                console.warn('[sites] failed to refresh available models after probe', err);
+                toast.error('刷新可用模型失败');
+              })
               .finally(() => setProbeCompleted(true));
           }
         } catch { /* ignore parse errors */ }
@@ -804,7 +816,7 @@ export default function Sites() {
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
       if (e instanceof Error && e.name === 'AbortError') {
-        setProbeLog((prev) => [...prev, { time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '已手动停止', color: 'var(--color-text-muted)' }]);
+        setProbeLog((prev) => [...prev, { id: probeLogSeqRef.current++, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '已手动停止', color: 'var(--color-text-muted)' }]);
         return;
       }
       addLog(eMessage || '探测失败', 'var(--color-danger)');
@@ -1970,8 +1982,8 @@ export default function Sites() {
                   fontFamily: 'var(--font-mono)', maxHeight: 200, overflowY: 'auto',
                   lineHeight: 1.8,
                 }}>
-                  {probeLog.map((entry, i) => (
-                    <div key={i} style={{ color: entry.color || 'var(--color-text-secondary)' }}>
+                  {probeLog.map((entry) => (
+                    <div key={entry.id} style={{ color: entry.color || 'var(--color-text-secondary)' }}>
                       <span style={{ color: 'var(--color-text-muted)', marginRight: 8 }}>{entry.time}</span>
                       {entry.text}
                     </div>
@@ -2369,15 +2381,8 @@ export default function Sites() {
                         })()}
                       </div>
                     </td>
-                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                      <a
-                        href={site.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{ color: 'var(--color-text-muted)', textDecoration: 'underline' }}
-                      >
-                        {formatDateTimeLocal(site.createdAt)}
-                      </a>
+                    <td style={{ color: 'var(--color-text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
+                      {formatDateTimeLocal(site.createdAt)}
                     </td>
                     <td className="site-balance-cell">
                       <SiteBalanceDisplay

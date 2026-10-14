@@ -396,7 +396,8 @@ function InlineToggle({
   ];
 
   const base: React.CSSProperties = {
-    padding: '6px 12px',
+    height: 34,
+    padding: '0 12px',
     fontSize: 12,
     fontWeight: 600,
     border: '1px solid var(--color-border)',

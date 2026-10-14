@@ -1673,7 +1673,7 @@ export default function ProxyLogs() {
                       <div className="mobile-summary-metric-label">{tr('输入/输出')}</div>
                       <div className="mobile-summary-metric-value">
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                          <span>
+                          <span style={{ color: 'var(--color-text-primary)', fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>
                             {formatProxyLogTokenPair(
                               resolveProxyLogInputTokens(detailLog),
                               detailLog.completionTokens,
@@ -1896,7 +1896,6 @@ export default function ProxyLogs() {
                       </td>
                       <td
                         style={{
-                          fontSize: 12,
                           whiteSpace: 'nowrap',
                           fontVariantNumeric: 'tabular-nums',
                           color: 'var(--color-text-secondary)',
@@ -2078,7 +2077,7 @@ export default function ProxyLogs() {
                         }}
                       >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, lineHeight: 1.25 }}>
-                          <span>
+                          <span style={{ color: 'var(--color-text-primary)', fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>
                             {formatProxyLogTokenPair(
                               resolveProxyLogInputTokens(detailLog),
                               detailLog.completionTokens,

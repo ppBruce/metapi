@@ -130,11 +130,15 @@ export default function CheckinLog() {
   // 兼容旧命名：后面渲染统一用 filtered
   const filtered = statusFilteredLogs;
 
-  const countBy = useMemo(
-    () => (target: Exclude<LogFilter, 'all'>) =>
-      timeFilteredLogs.filter((log) => getStatus(log) === target).length,
-    [timeFilteredLogs],
-  );
+  // One pass over timeFilteredLogs for all three tab counts — the old countBy
+  // re-walked the whole list once per status (3 full filters per render).
+  const statusCounts = useMemo(() => {
+    const counts: Record<Exclude<LogFilter, 'all'>, number> = { success: 0, failed: 0, skipped: 0 };
+    for (const log of timeFilteredLogs) {
+      counts[getStatus(log)] += 1;
+    }
+    return counts;
+  }, [timeFilteredLogs]);
 
   const hasActiveTimeRange = Boolean(fromInput || toInput);
 
@@ -239,9 +243,9 @@ export default function CheckinLog() {
     <div className="pill-tabs">
       {[
         { key: 'all' as const, label: '全部', count: timeFilteredLogs.length },
-        { key: 'success' as const, label: '成功', count: countBy('success') },
-        { key: 'failed' as const, label: '失败', count: countBy('failed') },
-        { key: 'skipped' as const, label: '跳过', count: countBy('skipped') },
+        { key: 'success' as const, label: '成功', count: statusCounts.success },
+        { key: 'failed' as const, label: '失败', count: statusCounts.failed },
+        { key: 'skipped' as const, label: '跳过', count: statusCounts.skipped },
       ].map((tab) => (
         <button
           key={tab.key}
@@ -464,7 +468,7 @@ export default function CheckinLog() {
                 const reason = getFailureReason(log);
                 return (
                   <tr key={log.checkin_logs?.id || log.id}>
-                    <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                    <td style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                       {formatCheckinLogTime(
                         log.checkin_logs?.createdAt || log.createdAt,
                       )}

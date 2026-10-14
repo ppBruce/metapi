@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
@@ -17,6 +17,7 @@ import DateTimeInput from '../components/DateTimeInput.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { usePersistedPageSize } from '../components/usePersistedPageSize.js';
 import { StatusText } from '../components/StatusText.js';
+import { sanitizeRichHtml } from './helpers/siteAnnouncementPresentation.js';
 
 type ProbeLog = {
   id: number;
@@ -160,6 +161,9 @@ export default function ProbeLogs() {
 
   const [page, setPage] = useState(parseInt(searchParams.get('page') || '1'));
   const [pageSize, setPageSize] = usePersistedPageSize('probeLogs');
+  // Monotonic request sequence guards: only the newest fetch may apply its result.
+  const logsRequestSeqRef = useRef(0);
+  const statsRequestSeqRef = useRef(0);
 
   // 筛选选项数据
   const [filterOptions, setFilterOptions] = useState<{
@@ -193,6 +197,9 @@ export default function ProbeLogs() {
   }, [filterOptions.models, modelName]);
 
   const fetchLogs = async () => {
+    // Fast filter/page changes fire overlapping fetches; only the newest
+    // response may land, or a slow earlier answer overwrites the fresh list.
+    const requestSeq = ++logsRequestSeqRef.current;
     setLoading(true);
     try {
       const params = new URLSearchParams();
@@ -206,21 +213,25 @@ export default function ProbeLogs() {
       params.set('offset', ((page - 1) * pageSize).toString());
 
       const data = await api.getProbeLogs(params.toString());
+      if (requestSeq !== logsRequestSeqRef.current) return;
       setLogs(data.logs);
       setTotal(data.total);
     } catch (error) {
+      if (requestSeq !== logsRequestSeqRef.current) return;
       toast.error('获取测活日志失败');
     } finally {
-      setLoading(false);
+      if (requestSeq === logsRequestSeqRef.current) setLoading(false);
     }
   };
 
   const fetchStats = async () => {
+    const requestSeq = ++statsRequestSeqRef.current;
     try {
       const params = new URLSearchParams();
       if (startTime) params.set('startTime', new Date(startTime).toISOString());
       if (endTime) params.set('endTime', new Date(endTime).toISOString());
       const data = await api.getProbeLogStats(params.toString());
+      if (requestSeq !== statsRequestSeqRef.current) return;
       setStats(data);
     } catch (error) {
       console.error('获取统计失败', error);
@@ -229,8 +240,13 @@ export default function ProbeLogs() {
 
   useEffect(() => {
     fetchLogs();
-    fetchStats();
   }, [siteId, accountId, modelName, status, startTime, endTime, page, pageSize]);
+
+  // Stats only depend on the time range — paging/site/status flips must not
+  // re-fetch them (they previously shared the list effect's deps).
+  useEffect(() => {
+    fetchStats();
+  }, [startTime, endTime]);
 
   // 初始化加载筛选选项
   useEffect(() => {
@@ -331,7 +347,7 @@ export default function ProbeLogs() {
       html = html.replace(/%%KATEX_DISPLAY_(\d+)%%/g, (_m, idx) => {
         const tex = formulas[parseInt(idx)];
         try {
-          return `<div class="katex-display-block">${katex.renderToString(tex, { displayMode: true, throwOnError: false, trust: true })}</div>`;
+          return `<div class="katex-display-block">${katex.renderToString(tex, { displayMode: true, throwOnError: false, trust: false })}</div>`;
         } catch {
           return `<code class="katex-fallback">${tex}</code>`;
         }
@@ -340,7 +356,7 @@ export default function ProbeLogs() {
       html = html.replace(/%%KATEX_INLINE_(\d+)%%/g, (_m, idx) => {
         const tex = formulas[parseInt(idx)];
         try {
-          return katex.renderToString(tex, { displayMode: false, throwOnError: false, trust: true });
+          return katex.renderToString(tex, { displayMode: false, throwOnError: false, trust: false });
         } catch {
           return `<code class="katex-fallback">${tex}</code>`;
         }
@@ -349,6 +365,9 @@ export default function ProbeLogs() {
 
     return html;
   };
+
+  // 上游返回的 HTML 属不可信内容(管理台存储型 XSS 风险),统一经白名单消毒后再注入。
+  const renderMarkdownWithLatexSafe = (text: string): string => sanitizeRichHtml(renderMarkdownWithLatex(text));
 
   // 清理乱码、解析 JSON 提取内容、渲染 Markdown
   const renderResponseText = (raw: string | null | undefined): string => {
@@ -395,20 +414,25 @@ export default function ProbeLogs() {
       if (content !== null && content !== undefined) {
         const cleanContent = String(content);
         try {
-          return renderMarkdownWithLatex(cleanContent);
+          return renderMarkdownWithLatexSafe(cleanContent);
         } catch {
           return cleanContent;
         }
       }
-      // JSON 解析成功但没有提取到内容字段，说明可能是其他格式的响应，直接渲染为格式化 JSON
-      return `<pre class="text-xs whitespace-pre-wrap break-all">${JSON.stringify(parsed, null, 2)}</pre>`;
+      // JSON 解析成功但没有提取到内容字段,说明可能是其他格式的响应,直接渲染为格式化 JSON
+            // (转义后输出:响应内容来自上游,不可信)
+            const escapedJson = JSON.stringify(parsed, null, 2)
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;');
+            return `<pre class="text-xs whitespace-pre-wrap break-all">${escapedJson}</pre>`;
     } catch {
       // 不是有效 JSON，当作普通文本处理
     }
 
-    // 普通文本：Markdown 渲染，支持换行和基本格式
+    // 普通文本:Markdown 渲染,支持换行和基本格式
     try {
-      return renderMarkdownWithLatex(text);
+      return renderMarkdownWithLatexSafe(text);
     } catch {
       return text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
@@ -691,7 +715,7 @@ export default function ProbeLogs() {
                       <td>
                         <StatusText badgeClass={STATUS_COLORS[log.status]} style={{ fontSize: 11 }}>{STATUS_LABELS[log.status]}</StatusText>
                       </td>
-                      <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                      <td style={{ color: 'var(--color-text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
                         {fmtDateTime(log.createdAt)}
                       </td>
                       <td style={{ fontWeight: 500 }}>

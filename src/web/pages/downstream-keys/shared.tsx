@@ -138,7 +138,8 @@ export function TrendChartFallback({ height = 260 }: { height?: number }) {
 
 export function RangeToggle({ range, onChange }: { range: Range; onChange: (r: Range) => void }) {
   const base: React.CSSProperties = {
-    padding: '6px 12px',
+    height: 34,
+    padding: '0 12px',
     fontSize: 12,
     fontWeight: 600,
     border: '1px solid var(--color-border)',
@@ -154,7 +155,7 @@ export function RangeToggle({ range, onChange }: { range: Range; onChange: (r: R
   };
 
   return (
-    <div style={{ display: 'inline-flex', borderRadius: 'var(--radius-sm)', overflow: 'hidden' }}>
+    <div style={{ display: 'inline-flex', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
       <button type="button" onClick={() => onChange('24h')} style={{ ...base, ...(range === '24h' ? active : {}), borderRight: 'none' }}>
         24h
       </button>
