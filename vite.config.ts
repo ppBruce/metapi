@@ -1,7 +1,7 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
-import { resolveDevProxyTarget } from './src/web/devProxyTarget';
+import { resolveDevProxyTarget } from './src/web/devProxyTarget.ts';
 import { readFileSync } from 'node:fs';
 
 const packageVersion = (() => {
@@ -31,9 +31,6 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: '../../dist/web',
       emptyOutDir: true,
-      rollupOptions: {
-        output: {},
-      },
     },
     server: {
       host: frontendHost,
@@ -43,11 +40,13 @@ export default defineConfig(({ mode }) => {
           target: proxyTarget,
           changeOrigin: true,
         },
-        '^/monitor-proxy($|/)': {
+        '^/v1($|/)': {
           target: proxyTarget,
           changeOrigin: true,
         },
-        '^/v1($|/)': {
+        // The server also registers /v1beta/models (Gemini surface); forward it
+        // in dev so the endpoint is reachable through the Vite dev server.
+        '^/v1beta($|/)': {
           target: proxyTarget,
           changeOrigin: true,
         },
