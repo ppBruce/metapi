@@ -899,7 +899,27 @@ export async function statsRoutes(app: FastifyInstance) {
         .all();
     })();
 
-    const [clientOptionRows, summaryRow, siteRows, modelOptionRows, downstreamKeyRows] = await Promise.all([
+    // Site filter options are derived from the usage logs themselves, not
+    // from every row in `sites`. Logs join through accounts, so a site whose
+    // accounts were removed (or never had any) has no rows left — listing it
+    // anyway is what kept deleted sites in the dropdown while every log
+    // query for them returned nothing.
+    const siteRows = await (async () => {
+      const query = db
+        .select({
+          id: schema.sites.id,
+          name: schema.sites.name,
+          status: schema.sites.status,
+        })
+        .from(schema.proxyLogs)
+        .innerJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+        .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .groupBy(schema.sites.id)
+        .orderBy(schema.sites.id);
+      return query.all();
+    })();
+
+    const [clientOptionRows, summaryRow, modelOptionRows, downstreamKeyRows] = await Promise.all([
       clientOptionRowsPromise,
       (async () => {
         let summaryQuery = db
@@ -930,14 +950,6 @@ export async function statsRoutes(app: FastifyInstance) {
         }
         return summaryQuery.get();
       })(),
-      db
-        .select({
-          id: schema.sites.id,
-          name: schema.sites.name,
-          status: schema.sites.status,
-        })
-        .from(schema.sites)
-        .all(),
       modelOptionRowsPromise,
       db
         .select({

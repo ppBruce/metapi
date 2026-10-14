@@ -815,6 +815,69 @@ describe('stats proxy logs routes', () => {
     );
   });
 
+  it('only lists sites that carry usage logs as site filter options', async () => {
+    const site = await db
+      .insert(schema.sites)
+      .values({
+        name: 'with-logs-site',
+        url: 'https://with-logs.example.com',
+        platform: 'new-api',
+      })
+      .returning()
+      .get();
+
+    const account = await db
+      .insert(schema.accounts)
+      .values({
+        siteId: site.id,
+        username: 'with-logs-user',
+        accessToken: 'with-logs-token',
+        status: 'active',
+      })
+      .returning()
+      .get();
+
+    await db
+      .insert(schema.proxyLogs)
+      .values({
+        accountId: account.id,
+        modelRequested: 'gpt-4.1',
+        modelActual: 'gpt-4.1',
+        status: 'success',
+        totalTokens: 12,
+        estimatedCost: 0.12,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T13:00:00.000Z')),
+      })
+      .run();
+
+    // A leftover row that has no usage at all (the "deleted site still in the
+    // dropdown" ghost) must not be offered as a filter option.
+    await db
+      .insert(schema.sites)
+      .values({
+        name: 'ghost-site',
+        url: 'https://ghost.example.com',
+        platform: 'new-api',
+        status: 'disabled',
+      })
+      .returning()
+      .get();
+
+    const metaResponse = await app.inject({
+      method: 'GET',
+      url: '/api/stats/proxy-logs?view=meta',
+    });
+
+    expect(metaResponse.statusCode).toBe(200);
+    const metaBody = metaResponse.json() as {
+      sites: Array<{ id: number; name: string }>;
+    };
+
+    const siteNames = metaBody.sites.map((row) => row.name);
+    expect(siteNames).toContain('with-logs-site');
+    expect(siteNames).not.toContain('ghost-site');
+  });
+
   it('folds retry attempts sharing a requestTraceId into one request-level row with retryCount', async () => {
     const site = await db
       .insert(schema.sites)
