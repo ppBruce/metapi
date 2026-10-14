@@ -1819,7 +1819,7 @@ export default function Sites() {
             </div>
           </div>
 
-          <div style={{ display: selectedOauthProvider ? 'none' : 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
+          <div style={{ display: selectedOauthProvider ? 'none' : 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
             <div style={{ padding: 14, border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'color-mix(in srgb, var(--color-surface) 82%, transparent)' }}>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>请求体参数覆盖（paramOverride）</div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5, marginBottom: 8 }}>
@@ -1839,40 +1839,6 @@ export default function Sites() {
                   minHeight: 52,
                 }}
               />
-            </div>
-            <div style={{ padding: '14px', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'color-mix(in srgb, var(--color-surface) 82%, transparent)' }}>
-              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>凭证提示</div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
-                添加账号时的凭证验证策略提示
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {(['auto', 'api_key', 'session'] as const).map((mode) => (
-                  <label
-                    key={mode}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      cursor: 'pointer',
-                      fontSize: 13,
-                      color: 'var(--color-text-secondary)',
-                    }}
-                  >
-                    <input
-                      type="radio"
-                      name="credentialMode"
-                      value={mode}
-                      checked={form.protocolProfile.credentialMode === mode}
-                      onChange={(e) => setForm((prev) => ({
-                        ...prev,
-                        protocolProfile: { ...prev.protocolProfile, credentialMode: e.target.value },
-                      }))}
-                      style={{ accentColor: 'var(--color-primary)', width: 14, height: 14 }}
-                    />
-                    {mode === 'auto' ? '自动' : mode === 'api_key' ? 'API Key（sk-...）' : 'Session Cookie'}
-                  </label>
-                ))}
-              </div>
             </div>
           </div>
 
