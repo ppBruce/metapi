@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { checkpointSqliteWal } from '../db/index.js';
 import { getLogCleanupCutoffUtc } from './logCleanupService.js';
 import { purgeExpiredProxyFiles } from './proxyFileStore.js';
+import { purgeExpiredProxyVideoTasks } from './proxyVideoTaskStore.js';
 
 let retentionTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -45,9 +46,20 @@ export function startProxyFileRetentionService(): void {
   const runCleanup = async () => {
     try {
       const result = await cleanupExpiredProxyFiles();
-      if (!result.enabled || result.deleted <= 0) return;
-      checkpointSqliteWal('PASSIVE');
-      console.info(`[proxy-file-retention] deleted ${result.deleted} files before ${result.cutoffUtc}`);
+      if (!result.enabled) return;
+      if (result.deleted > 0) {
+        checkpointSqliteWal('PASSIVE');
+        console.info(`[proxy-file-retention] deleted ${result.deleted} files before ${result.cutoffUtc}`);
+      }
+      // Video task rows carry an upstream credential and otherwise only ever
+      // leave via an explicit DELETE — expire them on the same window.
+      if (result.cutoffUtc) {
+        const videoTasksDeleted = await purgeExpiredProxyVideoTasks(result.cutoffUtc);
+        if (videoTasksDeleted > 0) {
+          checkpointSqliteWal('PASSIVE');
+          console.info(`[proxy-file-retention] deleted ${videoTasksDeleted} video tasks before ${result.cutoffUtc}`);
+        }
+      }
     } catch (error) {
       console.warn('[proxy-file-retention] cleanup failed', error);
     }

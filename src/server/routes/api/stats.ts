@@ -87,6 +87,14 @@ const limitModelsMarketplaceRead = createRateLimitGuard({
   max: 30,
   windowMs: 60_000,
 });
+// Request-trace metrics run a GROUP BY over proxy_logs with a window that can
+// stretch to 90 days; unbounded repeat calls can pin the DB the same way the
+// marketplace/model reads can, so bound this endpoint too.
+const limitProxyRequestMetricsRead = createRateLimitGuard({
+  bucket: 'proxy-request-metrics-read',
+  max: 30,
+  windowMs: 60_000,
+});
 // Probe endpoints hit upstreams directly — bound them so a loop cannot
 // turn into an upstream probe storm.
 const limitModelProbe = createRateLimitGuard({
@@ -1132,6 +1140,7 @@ export async function statsRoutes(app: FastifyInstance) {
 
   app.get(
     '/api/stats/proxy-request-metrics',
+    { preHandler: [limitProxyRequestMetricsRead] },
     async (request) => {
       const query = (request.query || {}) as Record<string, unknown>;
       // Keep unbounded scans opt-in: request-level metrics default to the last 24h.

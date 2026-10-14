@@ -3,8 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { fallbackTokenCost } from './modelPricingService.js';
-import {getResolvedTimeZone, toLocalDayKeyFromStoredUtc, toLocalDayStartUtcFromStoredUtc, toLocalHourStartUtcFromStoredUtc, type StoredUtcDateTimeInput} from './localTimeService.js';
+import { getResolvedTimeZone, toLocalDayKeyFromStoredUtc, toLocalDayStartUtcFromStoredUtc, toLocalHourStartUtcFromStoredUtc, type StoredUtcDateTimeInput } from './localTimeService.js';
 import { clearSnapshotCache } from './snapshotCacheService.js';
+import { sendNotification } from './notifyService.js';
 
 const USAGE_PROJECTOR_KEY = 'usage-aggregates-v1';
 const PROJECTION_BATCH_SIZE = 1_000;
@@ -841,10 +842,32 @@ export async function requestUsageAggregatesRecompute(fromLogId = 1): Promise<vo
 
 export function startUsageAggregationProjectorScheduler() {
   if (projectionTimer) return;
-  void runUsageAggregationProjectionPass();
+  void runUsageAggregationProjectionPassSafely();
   projectionTimer = setInterval(() => {
-    void runUsageAggregationProjectionPass();
+    void runUsageAggregationProjectionPassSafely();
   }, PROJECTION_INTERVAL_MS);
+}
+
+/**
+ * Scheduler entry wrapper: the projector rethrows on failure (direct callers
+ * may want to observe the error), but the 5s scheduler must not leave that
+ * rejection unhandled — a dead projector would otherwise only land in the
+ * global unhandledRejection log, with no event/notification and no way to
+ * tell "retryable hiccup" from "needs attention".
+ */
+async function runUsageAggregationProjectionPassSafely(): Promise<void> {
+  try {
+    await runUsageAggregationProjectionPass();
+  } catch (error) {
+    console.error('[UsageAggregation] projection pass failed:', error);
+    try {
+      await sendNotification(
+        '使用量投影失败',
+        `使用量聚合投影任务异常：${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      );
+    } catch {}
+  }
 }
 
 export async function stopUsageAggregationProjectorScheduler() {

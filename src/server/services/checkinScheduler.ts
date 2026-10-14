@@ -213,11 +213,28 @@ async function runIntervalCheckinPass(now = new Date()) {
 }
 
 async function executeIntervalCheckinPass(now = new Date()) {
-  const rows = await db
-    .select()
-    .from(schema.accounts)
-    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-    .all();
+  let rows: any[];
+  try {
+    rows = await db
+      .select()
+      .from(schema.accounts)
+      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .all();
+  } catch (err) {
+    // The account load used to sit outside any try scope: a failed read made
+    // the whole pass a silent unhandled rejection. Surface it like every
+    // other interval-check-in failure instead.
+    console.error('[Scheduler] Interval check-in account load error:', err);
+    try {
+      await sendNotification(
+        '间隔签到失败',
+        `间隔签到任务异常：${err instanceof Error ? err.message : String(err)}`,
+        'error',
+        { bypassThrottle: true },
+      );
+    } catch {}
+    return;
+  }
 
   const dueAccountIds = selectDueIntervalCheckinAccountIds(
     rows

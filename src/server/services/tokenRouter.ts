@@ -692,8 +692,32 @@ export class TokenRouter {
       downstreamPolicy,
       requiredContextTokens,
     };
+    // The relaxation rounds below re-derive eligibility reasons for the same
+    // candidate set (full → minus context filter → minus probe cooldown) and
+    // the empty-pool diagnostic re-derives the full set again; cache per
+    // (channel, variant) so each variant is computed at most once per channel.
+    type EligibilityVariant = 'full' | 'no-context' | 'no-context-probe-ok';
+    const eligibilityCache = new Map<string, CandidateEligibilityReason[]>();
+    const eligibilityReasonsFor = (
+      candidate: RouteChannelCandidate,
+      variant: EligibilityVariant,
+    ): CandidateEligibilityReason[] => {
+      const cacheKey = `${candidate.channel.id}:${variant}`;
+      const cached = eligibilityCache.get(cacheKey);
+      if (cached) return cached;
+      const options = variant === 'full'
+        ? eligibilityOptions
+        : {
+          ...eligibilityOptions,
+          requiredContextTokens: undefined,
+          ...(variant === 'no-context-probe-ok' ? { ignoreProbeCooldown: true } : {}),
+        };
+      const reasons = this.getCandidateEligibilityReasons(candidate, options);
+      eligibilityCache.set(cacheKey, reasons);
+      return reasons;
+    };
     let available = match.channels.filter((candidate) => (
-      this.getCandidateEligibilityReasons(candidate, eligibilityOptions).length === 0
+      eligibilityReasonsFor(candidate, 'full').length === 0
     ));
 
     if (
@@ -706,10 +730,7 @@ export class TokenRouter {
       // (site upgraded, misparsed error) and the requirement is an estimate —
       // fall back to the full candidate set and let the attempt itself decide.
       available = match.channels.filter((candidate) => (
-        this.getCandidateEligibilityReasons(candidate, {
-          ...eligibilityOptions,
-          requiredContextTokens: undefined,
-        }).length === 0
+        eligibilityReasonsFor(candidate, 'no-context').length === 0
       ));
     }
 
@@ -721,11 +742,7 @@ export class TokenRouter {
       // exclusions are deliberately not relaxed: retrying a usage-limited
       // account, or one that just failed real traffic, only wastes the request.
       available = match.channels.filter((candidate) => (
-        this.getCandidateEligibilityReasons(candidate, {
-          ...eligibilityOptions,
-          requiredContextTokens: undefined,
-          ignoreProbeCooldown: true,
-        }).length === 0
+        eligibilityReasonsFor(candidate, 'no-context-probe-ok').length === 0
       ));
       if (available.length > 0) {
         console.warn(
@@ -745,7 +762,7 @@ export class TokenRouter {
         poolSize: match.channels.length,
         candidates: match.channels.map((candidate) => ({
           channelId: candidate.channel.id,
-          reasons: this.getCandidateEligibilityReasons(candidate, eligibilityOptions),
+          reasons: eligibilityReasonsFor(candidate, 'full'),
         })),
       });
       return null;

@@ -455,6 +455,9 @@ async function waitForTunnelUrl(proc: ChildProcessWithoutNullStreams, timeoutMs 
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      // Detach listeners: a timed-out wait otherwise keeps accumulating data
+      // listeners and its buffer closure on a child that outlives the wait.
+      cleanup();
       reject(new Error('启动隧道超时：未从 cloudflared 输出中解析到公网 URL'));
     }, timeoutMs);
 
@@ -491,19 +494,45 @@ async function waitForTunnelUrl(proc: ChildProcessWithoutNullStreams, timeoutMs 
   });
 }
 
-function killProcessTree(pid: number | null | undefined) {
+const KILL_ESCALATION_TIMEOUT_MS = 2000;
+const KILL_POLL_INTERVAL_MS = 100;
+
+function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const tick = () => {
+      if (!isProcessRunning(pid)) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      const timer = setTimeout(tick, KILL_POLL_INTERVAL_MS);
+      timer.unref?.();
+    };
+    tick();
+  });
+}
+
+async function killProcessTree(pid: number | null | undefined): Promise<void> {
   if (!pid || !isProcessRunning(pid)) return;
   try {
     process.kill(pid, 'SIGTERM');
   } catch {
-    // ignore
+    return;
   }
+  // A wedged cloudflared ignores SIGTERM. Leaving it alive lets the next
+  // startCloudflareTunnel spawn a second connector racing the old one for the
+  // same local port, so confirm exit and escalate to SIGKILL.
+  if (await waitForProcessExit(pid, KILL_ESCALATION_TIMEOUT_MS)) return;
   try {
-    // best-effort force after short delay handled by caller if needed
-    process.kill(pid, 0);
+    process.kill(pid, 'SIGKILL');
   } catch {
     return;
   }
+  await waitForProcessExit(pid, KILL_ESCALATION_TIMEOUT_MS);
 }
 
 function stopTunnelHealthProbe() {
@@ -702,7 +731,7 @@ export async function stopCloudflareTunnel(options?: { persistDisabled?: boolean
     }
   }
   const pid = child?.pid || readStateFile().pid;
-  killProcessTree(pid);
+  await killProcessTree(pid);
   child = null;
   currentTunnelUrl = null;
   // Keep shortId + stable public URL so the same address comes back after restart.

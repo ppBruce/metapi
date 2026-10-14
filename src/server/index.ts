@@ -32,6 +32,7 @@ import { proxyRoutes } from './routes/proxy/router.js';
 import { startScheduler, stopScheduler } from './services/checkinScheduler.js';
 import * as routeRefreshWorkflow from './services/routeRefreshWorkflow.js';
 import { startProxyFileRetentionService, stopProxyFileRetentionService } from './services/proxyFileRetentionService.js';
+import { encryptLegacyProxyVideoTaskTokens } from './services/proxyVideoTaskStore.js';
 import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
@@ -398,6 +399,14 @@ if (existsSync(webDir)) {
     }
     return reply.sendFile('index.html');
   });
+}
+
+// Legacy video task rows stored upstream tokens in plaintext. Migrate them
+// before accepting requests; after a restored old backup the data-shape pass
+// runs again without relying on a permanent marker.
+const migratedVideoTaskTokens = await encryptLegacyProxyVideoTaskTokens();
+if (migratedVideoTaskTokens > 0) {
+  console.info(`[proxy-video-tasks] encrypted ${migratedVideoTaskTokens} legacy task credentials`);
 }
 
 // Start scheduler
