@@ -112,6 +112,7 @@ export const zhToEnSupplemental: Record<string, string> = {
   '导出失败': 'Export failed',
   '导航': 'navigation',
   '导入': 'import',
+  '备份 / 恢复': 'Backup/Restore',
   '导入 / 导出': 'Import/Export',
   '导入/导出': 'Import/Export',
   '导入失败': 'Import failed',

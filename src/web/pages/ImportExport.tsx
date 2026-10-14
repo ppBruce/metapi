@@ -527,7 +527,7 @@ export default function ImportExport() {
     <div className="animate-fade-in" style={{ width: '100%', maxWidth: 1320, margin: '0 auto' }}>
       <div className="page-header" style={{ alignItems: 'flex-end', marginBottom: 18 }}>
         <div>
-          <h2 className="page-title" style={{ marginBottom: 6 }}>{tr('导入 / 导出')}</h2>
+          <h2 className="page-title" style={{ marginBottom: 6 }}>{tr('备份 / 恢复')}</h2>
           <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
             支持配置型备份、分区备份与手动恢复。
           </div>

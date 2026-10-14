@@ -88,7 +88,7 @@ const zhToEn: Record<string, string> = {
   '系统设置': 'System Settings',
   '站点管理': 'Site Management',
   '账号管理': 'Connection Management',
-  '导入 / 导出': 'Import / Export',
+  '备份 / 恢复': 'Backup / Restore',
   '品牌': 'Brands',
   '全部品牌': 'All Brands',
   '其他': 'Other',
