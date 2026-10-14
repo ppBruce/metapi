@@ -40,7 +40,8 @@
     "typecheck:web:test": "tsc -p tsconfig.web.test.json",
     "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
     "typecheck:desktop": "tsc --noEmit -p tsconfig.desktop.json",
-    "typecheck": "npm run typecheck:web && npm run typecheck:web:test && npm run typecheck:server && npm run typecheck:desktop",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck": "npm run typecheck:web && npm run typecheck:web:test && npm run typecheck:server && npm run typecheck:desktop && npm run typecheck:node",
     "dist:desktop": "npm run build && electron-builder --config electron-builder.yml --publish never",
     "dist:desktop:mac:intel": "npm run build && electron-builder --config electron-builder.yml --publish never --mac --x64",
     "package:desktop": "npm run dist:desktop",
@@ -66,7 +67,7 @@
     "smoke:db:postgres": "tsx scripts/dev/db-smoke.ts --db-type postgres",
     "test": "cross-env NODE_ENV=test vitest run --root .",
     "test:watch": "cross-env NODE_ENV=test vitest --root .",
-    "lint": "eslint src/ scripts/ --max-warnings 0",
+    "lint": "eslint src/ scripts/ vite.config.ts vitest.config.ts drizzle.config.ts eslint.config.js --max-warnings 0",
     "brand:colors": "tsx scripts/dev/generate-brand-icon-colors.ts"
   },
   "dependencies": {

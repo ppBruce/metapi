@@ -171,6 +171,58 @@ jobs:
       - name: Run typecheck
         run: npm run typecheck
 
+  node-compat:
+    name: Node Compatibility (${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # engines is ">=24 <27": verify the security-relevant renderer path and
+    # root configs on both supported majors without re-running the full
+    # heavyweight suites (test-core shards, builds, schema DB jobs).
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Verify KaTeX import smoke
+        run: |
+          node --input-type=module -e "
+          import katex from 'katex';
+          import { existsSync } from 'node:fs';
+          const options = { displayMode: false, throwOnError: false, trust: false };
+          const inline = katex.renderToString('E = mc^2', options);
+          const display = katex.renderToString('\\\\frac{a}{b}', { ...options, displayMode: true });
+          if (!inline.includes('class=\"katex\"')) throw new Error('katex inline render missing class');
+          if (!display.includes('katex-display')) throw new Error('katex display render missing class');
+          if (!katex.renderToString('\\\\frac{', options)) throw new Error('katex fallback render failed');
+          if (!existsSync('node_modules/katex/dist/katex.min.css')) throw new Error('katex stylesheet missing');
+          console.log('katex smoke OK on', process.version, '(', katex.version, ')');
+          "
+
+      - name: Run renderer-focused tests
+        run: |
+          npm test -- \
+            src/web/pages/probeLogs.layout.test.tsx \
+            src/web/pages/probeLogs.detail-modal.test.tsx \
+            src/web/pages/helpers/sanitizeRichHtml.test.ts \
+            src/web/pages/helpers/siteAnnouncementPresentation.test.tsx \
+            src/web/pages/siteAnnouncements.test.tsx
+
+      - name: Typecheck root configs
+        run: npm run typecheck:node
+
   repo-drift:
     name: Repo Drift Check
     runs-on: ubuntu-latest
