@@ -5,8 +5,6 @@ import { useToast } from '../components/Toast.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { PillTabBg } from '../components/PillTabBg.js';
-import { marked } from 'marked';
-import katex from 'katex';
 import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
 import PaginationControls from '../components/PaginationControls.js';
@@ -17,7 +15,7 @@ import DateTimeInput from '../components/DateTimeInput.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { usePersistedPageSize } from '../components/usePersistedPageSize.js';
 import { StatusText } from '../components/StatusText.js';
-import { sanitizeRichHtml } from './helpers/siteAnnouncementPresentation.js';
+import { renderProbeResponseText as renderResponseText } from './helpers/probeLogResponseRender.js';
 
 type ProbeLog = {
   id: number;
@@ -295,148 +293,6 @@ export default function ProbeLogs() {
   // 避免中英文界面下时间格式不统一。
   const fmtDateTime = (value?: string | null) =>
     formatDateTimeLocal(value, language === 'zh' ? 'zh-CN' : 'en-US');
-
-  // LaTeX 公式占位符前缀，用于在 marked 渲染前后安全传递
-  const KATEX_DISPLAY = '%%KATEX_DISPLAY_';
-  const KATEX_INLINE = '%%KATEX_INLINE_';
-  const KATEX_END = '%%';
-
-  // 在 marked 渲染前后处理 LaTeX：预提取 → 渲染 Markdown → 替换为 KaTeX HTML
-  const renderMarkdownWithLatex = (text: string): string => {
-    const formulas: string[] = [];
-
-    // 提取 LaTeX 公式并替换为占位符，防止被 marked 误解析
-    // 匹配顺序重要：$$ 必须在 $ 之前，\[ 在 \( 之前
-    const sanitized = text
-      // 块级公式：$$ ... $$
-      .replace(/\$\$([\s\S]+?)\$\$/g, (_m, tex) => {
-        const idx = formulas.length;
-        formulas.push(tex.trim());
-        return KATEX_DISPLAY + idx + KATEX_END;
-      })
-      // 块级公式：\[ ... \]
-      .replace(/\\\[([\s\S]+?)\\\]/g, (_m, tex) => {
-        const idx = formulas.length;
-        formulas.push(tex.trim());
-        return KATEX_DISPLAY + idx + KATEX_END;
-      })
-      // 行内公式：$ ... $（不匹配 $$，不跨行，不匹配空内容）
-      .replace(/(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)/g, (_m, tex) => {
-        const idx = formulas.length;
-        formulas.push(tex.trim());
-        return KATEX_INLINE + idx + KATEX_END;
-      })
-      // 行内公式：\( ... \)
-      .replace(/\\\((.+?)\\\)/g, (_m, tex) => {
-        const idx = formulas.length;
-        formulas.push(tex.trim());
-        return KATEX_INLINE + idx + KATEX_END;
-      });
-
-    // 用 marked 渲染 Markdown
-    let html: string;
-    try {
-      html = String(marked.parse(sanitized, { gfm: true, breaks: true }));
-    } catch {
-      html = sanitized;
-    }
-
-    // 将占位符替换为 KaTeX 渲染后的 HTML
-    if (formulas.length > 0) {
-      // 块级公式：用 <div> 居中包裹
-      html = html.replace(/%%KATEX_DISPLAY_(\d+)%%/g, (_m, idx) => {
-        const tex = formulas[parseInt(idx)];
-        try {
-          return `<div class="katex-display-block">${katex.renderToString(tex, { displayMode: true, throwOnError: false, trust: false })}</div>`;
-        } catch {
-          return `<code class="katex-fallback">${tex}</code>`;
-        }
-      });
-      // 行内公式
-      html = html.replace(/%%KATEX_INLINE_(\d+)%%/g, (_m, idx) => {
-        const tex = formulas[parseInt(idx)];
-        try {
-          return katex.renderToString(tex, { displayMode: false, throwOnError: false, trust: false });
-        } catch {
-          return `<code class="katex-fallback">${tex}</code>`;
-        }
-      });
-    }
-
-    return html;
-  };
-
-  // 上游返回的 HTML 属不可信内容(管理台存储型 XSS 风险),统一经白名单消毒后再注入。
-  const renderMarkdownWithLatexSafe = (text: string): string => sanitizeRichHtml(renderMarkdownWithLatex(text));
-
-  // 清理乱码、解析 JSON 提取内容、渲染 Markdown
-  const renderResponseText = (raw: string | null | undefined): string => {
-    const text = String(raw || '').trim();
-    if (!text) return '-';
-
-    // 检测疑似二进制/乱码内容：统计 UTF-8 替换字符 (U+FFFD) 和控制字符比例。
-    // 注意：中文等非 ASCII 正常文本不应被过滤，所以只看 U+FFFD 和控制字符，不看非 ASCII 字符本身。
-    const replacementCharCount = (text.match(/\uFFFD/g) || []).length;
-    const controlCharCount = (text.match(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g) || []).length;
-    const garbageRatio = (replacementCharCount + controlCharCount) / Math.max(text.length, 1);
-
-    if (garbageRatio > 0.15) {
-      // 疑似二进制/压缩数据未正常解码。不直接丢弃，而是显示可读提示 + 可展开原始数据。
-      // 尝试提取其中可读的 ASCII 片段作为预览
-      const readableSnippets = text
-        .replace(/[^\x20-\x7E\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\n\r]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .substring(0, 200);
-      const escapedRaw = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const escapedSnippet = readableSnippets.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return (
-        '<div class="probe-binary-notice">'
-        + `<div class="probe-binary-hint">⚠ 上游返回了疑似二进制/压缩数据（替换字符 ${replacementCharCount} 个，控制字符 ${controlCharCount} 个），可能未正常解码。</div>`
-        + (readableSnippets ? `<div class="probe-binary-snippet">可读片段：${escapedSnippet}</div>` : '')
-        + `<details class="probe-binary-details"><summary>查看原始数据（${text.length} 字符）</summary><pre class="probe-binary-raw">${escapedRaw}</pre></details>`
-        + '</div>'
-      );
-    }
-
-    // 尝试解析 JSON（完整的 API 响应对象）
-    try {
-      const parsed = JSON.parse(text);
-      // OpenAI / 标准聊天响应格式
-      const content = parsed?.choices?.[0]?.message?.content
-        || parsed?.choices?.[0]?.delta?.content
-        || parsed?.message?.content
-        || parsed?.output?.[0]?.content?.[0]?.text
-        || parsed?.content
-        || parsed?.text
-        || parsed?.output
-        || null;
-      if (content !== null && content !== undefined) {
-        const cleanContent = String(content);
-        try {
-          return renderMarkdownWithLatexSafe(cleanContent);
-        } catch {
-          return cleanContent;
-        }
-      }
-      // JSON 解析成功但没有提取到内容字段,说明可能是其他格式的响应,直接渲染为格式化 JSON
-            // (转义后输出:响应内容来自上游,不可信)
-            const escapedJson = JSON.stringify(parsed, null, 2)
-              .replace(/&/g, '&amp;')
-              .replace(/</g, '&lt;')
-              .replace(/>/g, '&gt;');
-            return `<pre class="text-xs whitespace-pre-wrap break-all">${escapedJson}</pre>`;
-    } catch {
-      // 不是有效 JSON，当作普通文本处理
-    }
-
-    // 普通文本:Markdown 渲染,支持换行和基本格式
-    try {
-      return renderMarkdownWithLatexSafe(text);
-    } catch {
-      return text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-  };
 
   return (
     <div className="animate-fade-in">
