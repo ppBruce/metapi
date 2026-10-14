@@ -1,11 +1,11 @@
 import * as net from 'node:net';
 import { createHash } from 'node:crypto';
 import { promises as dns } from 'node:dns';
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { asc, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { fetch, getSetCookies, type Cookie, type Response } from 'undici';
+import { Agent, fetch, getSetCookies, type Cookie, type RequestInit as UndiciRequestInit, type Response } from 'undici';
 import { config } from '../config.js';
 import { normalizeSiteProxyUrl, withExplicitProxyRequestInit } from './siteProxy.js';
 import { withSystemProxyRequestInit } from './systemProxy.js';
@@ -51,6 +51,28 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 const iconCache = new Map<string, CacheEntry>();
 const missCache = new Map<string, number>();
+/**
+ * All three maps are bounded: /api/site-favicon is an unauthenticated route,
+ * so any reachable client can mint arbitrary cache keys via ?url=. Without a
+ * cap, each entry (≤512KB icon + page-fetch metadata) would stay resident
+ * forever and both the process heap and the data dir could be grown without
+ * limit. Insertion-order eviction (same shape as proxyChannelCoordinator) is
+ * plenty — the hot set is a handful of configured sites.
+ */
+const ICON_CACHE_MAX_ENTRIES = 1_000;
+const MISS_CACHE_MAX_ENTRIES = 2_000;
+const INFLIGHT_MAX_ENTRIES = 512;
+const DISK_CACHE_MAX_FILES = 2_000;
+let lastDiskSweepAt = 0;
+const DISK_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+function evictOldestBeyond<K, V>(map: Map<K, V>, maxEntries: number): void {
+  while (map.size > maxEntries) {
+    const oldest = map.keys().next().value as K | undefined;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
 /**
  * In-flight de-duplication. The usage-log page renders one badge per row, so a
  * cold cache turns ten rows of the same site into ten simultaneous upstream
@@ -124,10 +146,52 @@ function writeDiskCache(key: string, payload: IconPayload, expiresAt: number): v
       }),
       'utf8',
     );
+    sweepDiskCache();
   } catch {
     // A disk cache is an optimisation: never let a read-only FS / full disk
     // break icon serving, and don't retry the mkdir on every write.
     diskCacheDirReady = existsSync(diskCacheDir());
+  }
+}
+
+/**
+ * Bounded-disk maintenance, throttled to once an hour so a hot cache costs
+ * nothing. Files older than one TTL are expired by definition (mtime == write
+ * time); if the directory still exceeds the cap, drop the oldest beyond it.
+ * Runs opportunistically from writeDiskCache and is always best-effort.
+ */
+function sweepDiskCache(): void {
+  const now = Date.now();
+  if (now - lastDiskSweepAt < DISK_SWEEP_INTERVAL_MS) return;
+  lastDiskSweepAt = now;
+  try {
+    const dir = diskCacheDir();
+    if (!existsSync(dir)) return;
+    const entries: Array<{ name: string; mtimeMs: number }> = [];
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.json')) continue;
+      try {
+        entries.push({ name, mtimeMs: statSync(join(dir, name)).mtimeMs });
+      } catch {
+        /* raced with another sweep */
+      }
+    }
+    const fresh: Array<{ name: string; mtimeMs: number }> = [];
+    for (const entry of entries) {
+      if (now - entry.mtimeMs > CACHE_TTL_MS) {
+        try { unlinkSync(join(dir, entry.name)); } catch { /* best effort */ }
+      } else {
+        fresh.push(entry);
+      }
+    }
+    if (fresh.length > DISK_CACHE_MAX_FILES) {
+      fresh.sort((a, b) => a.mtimeMs - b.mtimeMs);
+      for (const entry of fresh.slice(0, fresh.length - DISK_CACHE_MAX_FILES)) {
+        try { unlinkSync(join(dir, entry.name)); } catch { /* best effort */ }
+      }
+    }
+  } catch {
+    /* best effort */
   }
 }
 
@@ -139,6 +203,7 @@ function dedupeInFlight<T>(key: string, run: () => Promise<T>): Promise<T> {
     inflight.delete(key);
   });
   inflight.set(key, pending);
+  evictOldestBeyond(inflight, INFLIGHT_MAX_ENTRIES);
   return pending;
 }
 
@@ -175,6 +240,7 @@ function readCache(key: string): IconPayload | null {
   const fromDisk = readDiskCache(key);
   if (fromDisk) {
     iconCache.set(key, { ...fromDisk, expiresAt: Date.now() + CACHE_TTL_MS });
+    evictOldestBeyond(iconCache, ICON_CACHE_MAX_ENTRIES);
     return fromDisk;
   }
   return null;
@@ -183,6 +249,7 @@ function readCache(key: string): IconPayload | null {
 function writeCache(key: string, payload: IconPayload): void {
   const expiresAt = Date.now() + CACHE_TTL_MS;
   iconCache.set(key, { ...payload, expiresAt });
+  evictOldestBeyond(iconCache, ICON_CACHE_MAX_ENTRIES);
   missCache.delete(key);
   writeDiskCache(key, payload, expiresAt);
 }
@@ -206,6 +273,18 @@ const FAVICON_COMPAT_CANDIDATES = ['/favicon.png', '/favicon.svg', '/logo.svg', 
 export const BRAND_ICON_VERSION = '1.97.0';
 export const BRAND_ICON_CDN_BASE = `https://registry.npmmirror.com/@lobehub/icons-static-png/${BRAND_ICON_VERSION}/files`;
 
+/**
+ * The brand CDN is a constant, server-chosen origin: the path segment is
+ * validated against a strict key pattern, so there is no attacker-controlled
+ * hostname to rebind. It therefore keeps the system-proxy fallback (the
+ * npmmirror mirror is the reachable one from mainland China) instead of the
+ * guarded direct dispatcher.
+ */
+const BRAND_ICON_POLICY: IconFetchPolicy = {
+  trustedOrigin: new URL(BRAND_ICON_CDN_BASE).origin,
+  proxyUrl: null,
+};
+
 /** Remember recent misses so a logo-less site is not re-probed on every render. */
 function isNegativelyCached(key: string): boolean {
   const until = missCache.get(key);
@@ -219,28 +298,86 @@ function isNegativelyCached(key: string): boolean {
 
 function markMiss(key: string): void {
   missCache.set(key, Date.now() + NEGATIVE_CACHE_TTL_MS);
+  evictOldestBeyond(missCache, MISS_CACHE_MAX_ENTRIES);
+}
+
+/** IPv4 ranges that are not routable on the public internet. */
+function isPrivateIPv4(octets: number[]): boolean {
+  const [first, second] = octets;
+  if (first === 10) return true; // 10.0.0.0/8 private
+  if (first === 127) return true; // 127.0.0.0/8 loopback
+  if (first === 0) return true; // 0.0.0.0/8 "this network"
+  if (first === 169 && second === 254) return true; // link-local
+  if (first === 172 && second! >= 16 && second! <= 31) return true; // 172.16.0.0/12 private
+  if (first === 192 && second === 168) return true; // 192.168.0.0/16 private
+  if (first === 100 && second! >= 64 && second! <= 127) return true; // CGNAT
+  if (first === 198 && (second === 18 || second === 19)) return true; // benchmarking
+  return false;
+}
+
+/** Expand a canonical IPv6 literal to its 16 bytes; null when it does not parse. */
+function ipv6Bytes(literal: string): number[] | null {
+  const halves = literal.split('::');
+  if (halves.length > 2) return null;
+  const parseGroups = (part: string): number[] | null => {
+    if (!part) return [];
+    const groups: number[] = [];
+    for (const group of part.split(':')) {
+      if (group.includes('.')) {
+        // Dotted tail, e.g. `::ffff:127.0.0.1`.
+        const octets = group.split('.').map(Number);
+        if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
+        groups.push((octets[0]! << 8) | octets[1]!, (octets[2]! << 8) | octets[3]!);
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+      groups.push(Number.parseInt(group, 16));
+    }
+    return groups;
+  };
+  const left = parseGroups(halves[0]!);
+  if (!left) return null;
+  let groups: number[];
+  if (halves.length === 1) {
+    if (left.length !== 8) return null;
+    groups = left;
+  } else {
+    const right = parseGroups(halves[1]!);
+    if (!right) return null;
+    const omitted = 8 - left.length - right.length;
+    if (omitted < 0) return null;
+    groups = [...left, ...Array<number>(omitted).fill(0), ...right];
+  }
+  return groups.flatMap((group) => [group >> 8, group & 0xff]);
+}
+
+/**
+ * IPv6 literals that carry an IPv4 address inside them, so a wrapper that
+ * looks public can still dial a private host: 6to4 (2002::/16) and the
+ * well-known NAT64 prefix (64:ff9b::/96) embed one verbatim, and Teredo
+ * (2001::/32) is a deprecated relay scheme whose whole range is refused rather
+ * than decoded — a wrong decode would silently re-open the same hole.
+ */
+function ipv6ReachesPrivate(bytes: number[]): boolean {
+  const [first, second, third, fourth] = bytes;
+  if (first === 0x20 && second === 0x02) return isPrivateIPv4(bytes.slice(2, 6));
+  if (first === 0x20 && second === 0x01 && third === 0x00 && fourth === 0x00) return true;
+  if (first === 0x00 && second === 0x64 && third === 0xff && fourth === 0x9b) {
+    return isPrivateIPv4(bytes.slice(12));
+  }
+  return false;
 }
 
 export function isPrivateHostname(hostname: string): boolean {
   const ip = net.isIP(hostname);
-  if (ip === 4) {
-    const parts = hostname.split('.').map(Number);
-    if (parts[0] === 10) return true;
-    if (parts[0] === 127) return true;
-    if (parts[0] === 0) return true;
-    if (parts[0] === 169 && parts[1] === 254) return true;
-    if (parts[0] === 172 && parts[1]! >= 16 && parts[1]! <= 31) return true;
-    if (parts[0] === 192 && parts[1] === 168) return true;
-    if (parts[0] === 100 && parts[1]! >= 64 && parts[1]! <= 127) return true;
-    if (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19)) return true;
-    return false;
-  }
+  if (ip === 4) return isPrivateIPv4(hostname.split('.').map(Number));
   if (ip === 6) {
     const lower = hostname.toLowerCase();
     if (lower === '::1' || lower === '::' || lower.startsWith('::ffff:')) return true;
-    if (lower.startsWith('fe80')) return true;
-    if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
-    return false;
+    if (lower.startsWith('fe80')) return true; // link-local
+    if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // unique-local
+    const bytes = ipv6Bytes(lower);
+    return bytes !== null && ipv6ReachesPrivate(bytes);
   }
   return false;
 }
@@ -254,6 +391,79 @@ export async function resolvesToPrivate(hostname: string): Promise<boolean> {
     return true; // Be conservative: if DNS fails, refuse to fetch.
   }
 }
+
+/**
+ * Connect-time address guard, installed as the `lookup` of the icon fetch
+ * dispatcher (see `iconGuardAgent`).
+ *
+ * `resolvesToPrivate` is a PREFLIGHT: it asks "may this origin be fetched at
+ * all" from one resolver round, and the connection then resolves the hostname
+ * again on its own. Between the two answers an attacker who controls the DNS
+ * zone can flip a public record to `127.0.0.1` (or let a mixed `::1` + public
+ * record — which a tunnel DNS legitimately serves, observed live — resolve to
+ * the loopback side). Neither is visible to a preflight.
+ *
+ * Running the filter HERE, inside the connector, on the very addresses
+ * `net.connect` is about to try, is what closes that window: the answer that
+ * is validated is the answer that gets dialled.
+ *
+ * - untrusted host: private answers are dropped, so a mixed record keeps its
+ *   public address (those hosts stay reachable) and an all-private record
+ *   fails the connection instead of being dialled;
+ * - host the admin configured as a site: every answer is kept, because an
+ *   internal NewAPI deployment legitimately lives on a private address.
+ */
+export function createIconConnectLookup(trustPrivateHost: boolean): net.LookupFunction {
+  return (hostname, options, callback) => {
+    void (async () => {
+      let answers: Array<{ address: string; family: number }>;
+      try {
+        const resolved = await dns.lookup(hostname, { verbatim: true, all: true });
+        answers = Array.isArray(resolved) ? resolved : [resolved];
+      } catch (error) {
+        callback((error as NodeJS.ErrnoException) ?? new Error(`dns lookup failed for ${hostname}`), '');
+        return;
+      }
+      const requestedFamily = options?.family || 0;
+      const allowed = answers.filter((answer) =>
+        (trustPrivateHost || !isPrivateHostname(answer.address))
+        && (requestedFamily === 0 || answer.family === requestedFamily));
+      if (allowed.length === 0) {
+        const error = new Error(
+          `icon fetch refused: ${hostname} resolves to ${answers.map((answer) => answer.address).join(', ')}`,
+        ) as NodeJS.ErrnoException;
+        error.code = 'ECONNREFUSED';
+        callback(error, '');
+        return;
+      }
+      if (options?.all) {
+        callback(null, allowed);
+        return;
+      }
+      const first = allowed[0]!;
+      callback(null, first.address, first.family);
+    })();
+  };
+}
+
+/**
+ * Dispatcher for icon fetches that are NOT vouched for by a configured site.
+ * Everything else in this file either goes through a configured site proxy
+ * (which dials the proxy, so the proxy owns the target's resolution) or keeps
+ * the previous direct behaviour for a configured origin.
+ */
+const iconGuardAgent = new Agent({
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 300_000,
+  connections: 32,
+  // Same reasoning as siteProxy's global agent: pipelining > 1 puts several
+  // requests on one socket, so one upstream closing it fails them all at once.
+  pipelining: 1,
+  connect: {
+    rejectUnauthorized: true,
+    lookup: createIconConnectLookup(false),
+  },
+});
 
 /**
  * Declared icon links, ranked the way a browser picks a tab icon:
@@ -373,10 +583,61 @@ export function decodeDataUriIcon(
 
 type RedirectCookie = Cookie & { origin: string; path: string; expiresAt: number };
 
+/**
+ * Where one icon lookup may dial, decided once and consulted on every hop
+ * (page, declared icon, conventional path, compatibility sweep, redirect):
+ * - `trustedOrigin`: the exact scheme, host, and port of an admin-configured
+ *   site. Private addresses are legitimate there and ONLY there.
+ * - `proxyUrl`: that site's own proxy. Only requests to the configured
+ *   origin use it; cross-origin redirects and declared icons use the guarded
+ *   direct dispatcher, since a proxy resolves the target outside our guard.
+ */
+type IconFetchPolicy = {
+  trustedOrigin: string | null;
+  proxyUrl: string | null;
+};
+
+const UNTRUSTED_ICON_POLICY: IconFetchPolicy = { trustedOrigin: null, proxyUrl: null };
+
+/** Pick the dispatcher for one hop: site proxy, then trusted direct, then guarded direct. */
+export function buildIconRequestInit(
+  url: URL,
+  policy: IconFetchPolicy,
+  referer: string | undefined,
+  cookieHeader: string,
+  signal: AbortSignal,
+): UndiciRequestInit {
+  const base: UndiciRequestInit = {
+    headers: {
+      ...BROWSER_HEADERS,
+      ...(referer ? { Referer: referer } : {}),
+      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+    },
+    signal,
+    redirect: 'manual' as const,
+  };
+  const trusted = policy.trustedOrigin !== null && url.origin === policy.trustedOrigin;
+  // The site proxy may resolve arbitrary targets on its own. Only the
+  // configured origin is allowed through it; a page-declared CDN icon or a
+  // cross-origin redirect must go through the connect-time DNS guard instead.
+  if (trusted && policy.proxyUrl) return withExplicitProxyRequestInit(policy.proxyUrl, base);
+  if (trusted) {
+    // Unchanged behaviour for a configured origin: direct, or through the
+    // host's own system proxy (HTTPS_PROXY…) when one is configured — that is
+    // how an upstream only reachable through the host proxy still resolves.
+    return withSystemProxyRequestInit(process.env, base);
+  }
+  // Anything else — an unconfigured origin, or a redirect / declared icon on
+  // another host — dials directly through the guarded dispatcher. The system
+  // proxy is deliberately NOT borrowed here: it resolves the hostname itself,
+  // which would put the target's address outside this guard's reach.
+  return { ...base, dispatcher: iconGuardAgent };
+}
+
 async function fetchIconResource(
   target: string | URL,
   referer?: string,
-  proxyUrl?: string | null,
+  policy: IconFetchPolicy = UNTRUSTED_ICON_POLICY,
 ): Promise<Response | null> {
   let url = new URL(target);
   const initialOrigin = url.origin;
@@ -403,21 +664,8 @@ async function fetchIconResource(
     // host's proxy times out here, and the lookup silently degrades to a guessed
     // path (observed: a relay whose page declares its logo inline resolved to an
     // unrelated /logo.svg because the page fetch never completed).
-    const requestInit = {
-      headers: {
-        ...BROWSER_HEADERS,
-        ...(referer ? { Referer: referer } : {}),
-        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-      },
-      signal,
-      redirect: 'manual' as const,
-    };
-    const response = await fetch(
-      url,
-      proxyUrl
-        ? withExplicitProxyRequestInit(proxyUrl, requestInit)
-        : withSystemProxyRequestInit(process.env, requestInit),
-    );
+    // Both of those are reserved for a configured origin; see buildIconRequestInit.
+    const response = await fetch(url, buildIconRequestInit(url, policy, referer, cookieHeader, signal));
     if (!REDIRECT_STATUSES.has(response.status)) return response;
 
     for (const cookie of getSetCookies(response.headers)) {
@@ -445,10 +693,10 @@ async function fetchIconResource(
 async function fetchImage(
   target: string | URL,
   referer?: string,
-  proxyUrl?: string | null,
+  policy: IconFetchPolicy = UNTRUSTED_ICON_POLICY,
 ): Promise<IconPayload | null> {
   try {
-    const response = await fetchIconResource(target, referer, proxyUrl);
+    const response = await fetchIconResource(target, referer, policy);
     if (!response) return null;
     const contentType = response.headers.get('content-type') || '';
     if (!response.ok || !contentType.startsWith('image/')) {
@@ -497,6 +745,35 @@ type DeclaredIconResolution = {
   oversizedInline: IconPayload | null;
 };
 
+async function readHtmlResponseWithinLimit(response: Response): Promise<string | null> {
+  const contentLength = Number(response.headers.get('content-length') || '');
+  if (Number.isFinite(contentLength) && contentLength > MAX_HTML_BYTES) {
+    await response.body?.cancel().catch(() => {});
+    return null;
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const chunks: Buffer[] = [];
+  let received = 0;
+  let exceeded = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_HTML_BYTES) {
+        exceeded = true;
+        await reader.cancel().catch(() => {});
+        break;
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return exceeded ? null : Buffer.concat(chunks).toString('utf8');
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /**
  * Read the page at the origin and return the first declared icon that actually
  * resolves, in browser preference order (see extractIconCandidates). Only an HTML
@@ -505,11 +782,11 @@ type DeclaredIconResolution = {
  */
 async function resolveDeclaredPageIcon(
   origin: string,
-  proxyUrl: string | null,
+  policy: IconFetchPolicy,
 ): Promise<DeclaredIconResolution> {
   const none: DeclaredIconResolution = { chosen: null, oversizedInline: null };
   try {
-    const page = await fetchIconResource(origin, origin, proxyUrl);
+    const page = await fetchIconResource(origin, origin, policy);
     if (!page) return none;
     if (!page.ok) {
       await page.body?.cancel();
@@ -521,7 +798,8 @@ async function resolveDeclaredPageIcon(
       return none;
     }
 
-    const html = (await page.text()).slice(0, MAX_HTML_BYTES);
+    const html = await readHtmlResponseWithinLimit(page);
+    if (html === null) return none;
     let oversizedInline: IconPayload | null = null;
     for (const candidate of extractIconCandidates(html)) {
       if (candidate.inline) {
@@ -532,9 +810,12 @@ async function resolveDeclaredPageIcon(
       }
       const resolvedUrl = resolveIconUrl(candidate.href, origin);
       if (!resolvedUrl) continue;
-      // A crafted href could point at internal infrastructure; re-check.
-      if (await resolvesToPrivate(resolvedUrl.hostname)) continue;
-      const payload = await fetchImage(resolvedUrl, origin, proxyUrl);
+      // A crafted href could point at internal infrastructure; re-check — unless
+      // it is the configured origin's own host, which the admin already vouched
+      // for (an internal deployment declares its logo on itself).
+      const ownHost = policy.trustedOrigin !== null && resolvedUrl.origin === policy.trustedOrigin;
+      if (!ownHost && (await resolvesToPrivate(resolvedUrl.hostname))) continue;
+      const payload = await fetchImage(resolvedUrl, origin, policy);
       if (payload) return { chosen: payload, oversizedInline: null };
     }
     return { chosen: null, oversizedInline };
@@ -598,12 +879,21 @@ export async function lookupSiteFavicon(
 
   if (isNegativelyCached(cacheKey)) return { status: 'not-found' };
 
+  // The origin an admin configured is the only host whose private addresses are
+  // legitimate, and the only one whose hops may borrow the host's system proxy.
+  // Every other host in this lookup (a declared CDN icon, a redirect target) is
+  // dialled through the connect-time guard instead.
+  const policy: IconFetchPolicy = {
+    trustedOrigin: options.trustPrivateHost ? new URL(origin).origin : null,
+    proxyUrl,
+  };
+
   // One upstream resolution per key: ten usage-log rows of the same site must
   // not launch ten page fetches (see `inflight`).
   return dedupeInFlight(cacheKey, async () => {
     // 1. What the page itself declares — the first thing a browser reads, and the
     //    only source that can point at a CDN URL, an SVG or an inline icon.
-    const declared = await resolveDeclaredPageIcon(origin, proxyUrl);
+    const declared = await resolveDeclaredPageIcon(origin, policy);
     if (declared.chosen) return acceptFavicon(cacheKey, declared.chosen);
 
     // 2. An inline `data:` icon too large to serve eagerly, but declared by the
@@ -617,14 +907,14 @@ export async function lookupSiteFavicon(
     //    nothing. It is intentionally requested after (not before) the document:
     //    a declared SVG logo beats a 16px legacy .ico, and guessing static paths
     //    first was what made this lookup slow and lossy.
-    const conventional = await fetchImage(`${origin}${FAVICON_CONVENTIONAL_PATH}`, origin, proxyUrl);
+    const conventional = await fetchImage(`${origin}${FAVICON_CONVENTIONAL_PATH}`, origin, policy);
     if (conventional) return acceptFavicon(cacheKey, conventional);
 
     // 4. Compatibility sweep for deployments that never declare an icon and do not
     //    ship the conventional one (self-hosted NewAPI instances typically serve a
     //    logo file at the root instead).
     for (const candidate of FAVICON_COMPAT_CANDIDATES) {
-      const payload = await fetchImage(`${origin}${candidate}`, origin, proxyUrl);
+      const payload = await fetchImage(`${origin}${candidate}`, origin, policy);
       if (payload) return acceptFavicon(cacheKey, { ...payload, source: candidate });
     }
 
@@ -665,7 +955,11 @@ export async function lookupBrandIcon(
     const raced = readCache(cacheKey);
     if (raced) return { status: 'ok' as const, payload: raced, cache: 'HIT' as const };
 
-    const payload = await fetchImage(`${BRAND_ICON_CDN_BASE}/${theme}/${key}.png`);
+    const payload = await fetchImage(
+      `${BRAND_ICON_CDN_BASE}/${theme}/${key}.png`,
+      undefined,
+      BRAND_ICON_POLICY,
+    );
     if (!payload) {
       markMiss(cacheKey);
       return { status: 'not-found' as const };
