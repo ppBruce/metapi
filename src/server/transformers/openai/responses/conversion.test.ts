@@ -543,6 +543,32 @@ describe('sanitizeResponsesBodyForProxy', () => {
 });
 
 describe('convertOpenAiBodyToResponsesBody', () => {
+  it('converts nested Chat image_url objects to Responses image URL strings', () => {
+    const result = convertOpenAiBodyToResponsesBody(
+      {
+        model: 'gpt-6-luna',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this image' },
+            { type: 'image_url', image_url: { url: 'https://example.com/image.png', detail: 'high' } },
+          ],
+        }],
+      },
+      'gpt-6-luna',
+      false,
+    );
+
+    expect(result.input).toEqual([{
+      type: 'message',
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'Describe this image' },
+        { type: 'input_image', image_url: 'https://example.com/image.png', detail: 'high' },
+      ],
+    }]);
+  });
+
   it('maps OpenAI chat file blocks into Responses input_file blocks', () => {
     const result = convertOpenAiBodyToResponsesBody(
       {

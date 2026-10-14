@@ -89,6 +89,7 @@ vi.mock('../../services/proxyRetryPolicy.js', () => ({
   resolveFailoverBackoffMs: () => 0,
   sleepMs: async () => undefined,
   shouldGraceRetryInPlaceOnce: (...args: unknown[]) => graceRetryMock(...args),
+  shouldInPlaceRetryEmptyContentOnce: () => false,
   canRetryInPlaceForRecoveringFailure: (...args: unknown[]) => inPlaceRecoveringRetryMock(...args),
   isRecoveringTransientFailure: (...args: unknown[]) => recoveringFailureMock(...args),
   shouldRetryProxyRequest: () => false,

@@ -22,6 +22,13 @@ export function isNonRetryableProtocolPolicyError(upstreamErrorText?: string | n
   return classifyProxyFailure({ errorText: upstreamErrorText }).class === 'protocol_policy';
 }
 
+export function shouldInPlaceRetryEmptyContentOnce(
+  alreadyRetried: boolean,
+  upstreamErrorText?: string | null,
+): boolean {
+  return !alreadyRetried && isEmptyContentFailureText(upstreamErrorText);
+}
+
 /**
  * Whether failing over to another upstream channel is worthwhile.
  *

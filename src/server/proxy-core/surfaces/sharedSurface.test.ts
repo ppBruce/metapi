@@ -117,6 +117,7 @@ vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldRetryProxyRequest: (...args: unknown[]) => shouldRetryProxyRequestMock(...args),
   shouldAbortSameSiteEndpointFallback: () => false,
   canRetryInPlaceForRecoveringFailure: () => false,
+  shouldInPlaceRetryEmptyContentOnce: () => false,
 }));
 
 vi.mock('../../services/oauth/quota.js', () => ({

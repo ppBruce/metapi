@@ -69,14 +69,14 @@ function toTextBlockType(role: string): 'input_text' | 'output_text' {
   return role === 'assistant' ? 'output_text' : 'input_text';
 }
 
-function normalizeImageUrlValue(value: unknown): string | Record<string, unknown> | null {
+function normalizeImageUrlValue(value: unknown): string | null {
   if (typeof value === 'string' && value.trim().length > 0) return value;
   if (!isRecord(value)) return null;
   const url = asTrimmedString(value.url);
-  if (url) return { ...value, url };
+  if (url) return url;
   const imageUrl = asTrimmedString(value.image_url);
   if (imageUrl) return imageUrl;
-  return Object.keys(value).length > 0 ? value : null;
+  return null;
 }
 
 function normalizeAudioInputValue(value: unknown): Record<string, unknown> | null {
@@ -121,8 +121,11 @@ function normalizeResponsesContentItem(
   if (type === 'input_image' || type === 'image_url') {
     const imageUrl = normalizeImageUrlValue(item.image_url) ?? normalizeImageUrlValue(item.url);
     if (!imageUrl) return null;
+    const detail = asTrimmedString(item.detail)
+      || asTrimmedString(isRecord(item.image_url) ? item.image_url.detail : undefined);
     return {
       ...item,
+      ...(detail ? { detail } : {}),
       type: 'input_image',
       image_url: imageUrl,
     };

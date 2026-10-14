@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mapUpstreamErrorForClient } from '../shared/siteProtocolProfile.js';
 import {
-
   canRetryInPlaceForRecoveringFailure,
   isNonRetryableProtocolPolicyError,
   isRecoveringTransientFailure,
@@ -9,6 +8,7 @@ import {
   shouldAbortSameSiteEndpointFallback,
   shouldGraceRetryInPlace,
   shouldGraceRetryInPlaceOnce,
+  shouldInPlaceRetryEmptyContentOnce,
   shouldRetryProxyRequest,
 } from './proxyRetryPolicy.js';
 
@@ -269,5 +269,20 @@ describe('proxyRetryPolicy', () => {
     expect(shouldGraceRetryInPlaceOnce(false, 0, 0, 403, 'forbidden')).toBe(false);
     // Non-recovering failure → never.
     expect(shouldGraceRetryInPlaceOnce(false, 1000, 8000, 401, 'invalid access token')).toBe(false);
+  });
+
+  it('allows exactly one in-place retry for empty-content (incl. reasoning-only) failures', () => {
+    // 用户口径（2026-10-13）：空内容 / 纯思考截断先在同站同账号原地重试一次，
+    // 不先切站；失败后才进入正常跨渠道 failover。
+    expect(shouldInPlaceRetryEmptyContentOnce(false, 'Upstream returned empty content')).toBe(true);
+    expect(shouldInPlaceRetryEmptyContentOnce(false, 'Upstream returned empty content (reasoning only)')).toBe(true);
+    expect(shouldInPlaceRetryEmptyContentOnce(false, 'upstream returned empty content')).toBe(true);
+    // One per request: a channel that returned empty twice burns the retry.
+    expect(shouldInPlaceRetryEmptyContentOnce(true, 'Upstream returned empty content')).toBe(false);
+    // Other failures never enter this gate (grace/recovering paths handle them).
+    expect(shouldInPlaceRetryEmptyContentOnce(false, 'bad gateway')).toBe(false);
+    expect(shouldInPlaceRetryEmptyContentOnce(false, 'invalid request body')).toBe(false);
+    expect(shouldInPlaceRetryEmptyContentOnce(false, null)).toBe(false);
+    expect(shouldInPlaceRetryEmptyContentOnce(false, undefined)).toBe(false);
   });
 });

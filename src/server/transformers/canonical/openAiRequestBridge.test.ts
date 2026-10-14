@@ -33,6 +33,28 @@ describe('openAiRequestBridge', () => {
     });
   });
 
+  it('parses Chat image_url image objects into canonical image URL parts', () => {
+    const request = canonicalRequestFromOpenAiBody({
+      body: {
+        model: 'gpt-6-luna',
+        stream: false,
+        messages: [{
+          role: 'user',
+          content: [{
+            type: 'image_url',
+            image_url: { url: 'https://example.com/image.png', detail: 'high' },
+          }],
+        }],
+      },
+      surface: 'openai-chat',
+    });
+
+    expect(request.messages[0].parts).toEqual([{
+      type: 'image',
+      url: 'https://example.com/image.png',
+    }]);
+  });
+
   it('builds openai-compatible continuation fields back from canonical envelopes', () => {
     const body = canonicalRequestToOpenAiChatBody({
       operation: 'generate',

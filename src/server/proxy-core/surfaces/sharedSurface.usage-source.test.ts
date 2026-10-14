@@ -36,6 +36,7 @@ vi.mock('../../services/alertRules.js', () => ({
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldRetryProxyRequest: vi.fn(() => false),
+  shouldInPlaceRetryEmptyContentOnce: () => false,
 }));
 
 vi.mock('../../services/proxyLogMessage.js', () => ({

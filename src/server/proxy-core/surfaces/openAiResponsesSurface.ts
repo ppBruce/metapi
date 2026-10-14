@@ -73,7 +73,7 @@ import {
 import { createRequestTraceId } from '../../services/requestTraceId.js';
 import { mapUpstreamErrorForClient } from '../../shared/siteProtocolProfile.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
-import { shouldAbortSameSiteEndpointFallback, resolveFailoverBackoffMs, sleepMs, canRetryInPlaceForRecoveringFailure, isRecoveringTransientFailure, shouldGraceRetryInPlaceOnce } from '../../services/proxyRetryPolicy.js';
+import { shouldAbortSameSiteEndpointFallback, resolveFailoverBackoffMs, sleepMs, canRetryInPlaceForRecoveringFailure, isRecoveringTransientFailure, shouldGraceRetryInPlaceOnce, shouldInPlaceRetryEmptyContentOnce } from '../../services/proxyRetryPolicy.js';
 import {
   acquireSurfaceChannelLease,
   bindSurfaceStickyChannel,
@@ -260,6 +260,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
     // Grace-window in-place retries are bounded to ONE per request (see
     // chatSurface for rationale): a second same-channel retry rarely helps.
     let graceRetriedOnce = false;
+    // 空内容（含 pure-thinking 截断）：同站同账号原地重试一次，失败才切站。
+    let emptyContentRetriedOnce = false;
     const lastRetryFailure = {
       current: null as ReturnType<typeof finalizeRetryAsUpstreamFailure> | null,
     };
@@ -1124,7 +1126,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	              const terminalFailureOutcome = failureOutcome.action === 'retry'
 	                ? (
 	                  canFailoverToNextChannel(reply)
-	                  && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+	                  && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason))
 	                    ? null
 	                    : finalizeRetryAsUpstreamFailure(failure.status, failure.reason)
 	                )
@@ -1140,6 +1142,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 graceRetriedOnce = true;
 	                  inPlaceRetryChannel = selected;
 	                  await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
+	                  continue;
+	                }
+	                // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+	                if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason)) {
+	                  emptyContentRetriedOnce = true;
+	                  inPlaceRetryChannel = selected;
 	                  continue;
 	                }
 	                if (inPlaceRecoveringRetry) {
@@ -1448,7 +1456,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	          const terminalFailureOutcome = failureOutcome.action === 'retry'
 	            ? (
 	              canFailoverToNextChannel(reply)
-	              && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+	              && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason))
 	                ? null
 	                : finalizeRetryAsUpstreamFailure(failure.status, failure.reason)
 	            )
@@ -1464,6 +1472,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 graceRetriedOnce = true;
 	              inPlaceRetryChannel = selected;
 	              await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
+	              continue;
+	            }
+	            // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+	            if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason)) {
+	              emptyContentRetriedOnce = true;
+	              inPlaceRetryChannel = selected;
 	              continue;
 	            }
 	            if (inPlaceRecoveringRetry) {
@@ -1580,7 +1594,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             const terminalFailureOutcome = failureOutcome.action === 'retry'
               ? (
                 canFailoverToNextChannel(reply)
-                && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+                && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null))
                   ? null
                   : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err?.message || 'unknown error')
               )
@@ -1596,6 +1610,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 graceRetriedOnce = true;
                 inPlaceRetryChannel = selected;
                 await sleepMs(resolveFailoverBackoffMs(endpointFailureStatus || 502, err?.message || null, config.proxyFailoverBackoffMs));
+                continue;
+              }
+              // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+              if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null)) {
+                emptyContentRetriedOnce = true;
+                inPlaceRetryChannel = selected;
                 continue;
               }
               if (inPlaceRecoveringRetry) {
@@ -1637,7 +1657,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           const terminalFailureOutcome = failureOutcome.action === 'retry'
             ? (
               canFailoverToNextChannel(reply)
-              && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+              && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null))
                 ? null
                 : finalizeRetryAsExecutionFailure(err?.message || 'network failure')
             )
@@ -1653,6 +1673,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 graceRetriedOnce = true;
               inPlaceRetryChannel = selected;
               await sleepMs(resolveFailoverBackoffMs(502, err?.message || null, config.proxyFailoverBackoffMs));
+              continue;
+            }
+            // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+            if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null)) {
+              emptyContentRetriedOnce = true;
+              inPlaceRetryChannel = selected;
               continue;
             }
             if (inPlaceRecoveringRetry) {
