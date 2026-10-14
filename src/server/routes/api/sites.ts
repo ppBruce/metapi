@@ -5,6 +5,7 @@ import { and, asc, eq, inArray, gte, lt, sql } from 'drizzle-orm';
 import { detectSite } from '../../services/siteDetector.js';
 import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
 import { formatUtcSqlDateTime, getLocalDayRangeUtc } from '../../services/localTimeService.js';
+import { getTodayIncomeValue } from '../../services/todayIncomeRewardService.js';
 import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
 import { scheduleRouteDecisionRefresh } from '../../services/routeDecisionRefreshScheduler.js';
 import { parseSiteParamOverrideInput } from '../../services/siteParamOverride.js';
@@ -558,7 +559,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     }).from(schema.accountTokens).all();
 
     // 获取今日消费和签到奖励（按账号聚合，后面再按站点汇总）
-    const { startUtc, endUtc } = getLocalDayRangeUtc();
+    const { localDay, startUtc, endUtc } = getLocalDayRangeUtc();
     const [todaySpendRows, todayCheckinRows] = await Promise.all([
       db.select({
         accountId: schema.proxyLogs.accountId,
@@ -606,7 +607,13 @@ export async function sitesRoutes(app: FastifyInstance) {
     for (const row of accountRows) {
       totalBalanceBySiteId[row.siteId] = roundMetric((totalBalanceBySiteId[row.siteId] || 0) + Number(row.balance || 0));
       totalBalanceUsedBySiteId[row.siteId] = roundMetric((totalBalanceUsedBySiteId[row.siteId] || 0) + Number(row.balanceUsed || 0));
-      totalTodayRewardBySiteId[row.siteId] = roundMetric((totalTodayRewardBySiteId[row.siteId] || 0) + (rewardByAccount[row.id] || 0));
+      // A MetAPI peer reports today's income via its admin-only overview,
+      // not a local check-in. The balance refresh stores that value in the
+      // account snapshot; use the greater of it and parsed local reward so
+      // the same credited income is never counted twice.
+      const todayIncome = getTodayIncomeValue(row.extraConfig, localDay);
+      const accountReward = Math.max(rewardByAccount[row.id] || 0, todayIncome);
+      totalTodayRewardBySiteId[row.siteId] = roundMetric((totalTodayRewardBySiteId[row.siteId] || 0) + accountReward);
       totalTodaySpendBySiteId[row.siteId] = roundMetric((totalTodaySpendBySiteId[row.siteId] || 0) + (spendByAccount[row.id] || 0));
       subscriptionBySiteId[row.siteId] = aggregateSiteSubscription(subscriptionBySiteId[row.siteId], row.extraConfig);
       accountCountBySiteId[row.siteId] = (accountCountBySiteId[row.siteId] || 0) + 1;
