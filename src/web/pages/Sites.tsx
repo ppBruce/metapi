@@ -371,6 +371,12 @@ export default function Sites() {
     [selectedInitializationPresetId],
   );
   const primarySiteUrlAnalysis = useMemo(() => analyzePrimarySiteUrl(form.url), [form.url]);
+  // API 地址池空框的幽灵提示：主站已填时显示「留空则跟随主站：<主站>」，
+  // 让「不填=跟随主站」的后果直接出现在决策点上（保存语义不变：空行不存，运行时回退）。
+  const apiEndpointGhostPlaceholder = useMemo(() => {
+    const primary = String(form.url ?? '').trim();
+    return primary ? `留空则跟随主站：${primary}` : 'API 请求地址（如 https://api.nih.cc）';
+  }, [form.url]);
   const latestPrimarySiteUrlRef = useRef(form.url);
   const latestProxyUrlRef = useRef(form.proxyUrl);
   const latestPlatformRef = useRef(form.platform);
@@ -1675,7 +1681,7 @@ export default function Sites() {
               >
                 <div style={{ display: 'flex', gap: 8, flexDirection: isMobile ? 'column' : 'row', alignItems: isMobile ? 'stretch' : 'center' }}>
                   <input
-                    placeholder="API 请求地址（如 https://api.nih.cc）"
+                    placeholder={apiEndpointGhostPlaceholder}
                     value={endpoint.url}
                     onChange={(e) => updateApiEndpointRow(index, { url: e.target.value })}
                     style={{ ...formInputStyle, flex: 1, fontFamily: 'var(--font-mono)' }}
