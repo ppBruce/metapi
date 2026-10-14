@@ -233,17 +233,21 @@ function looksLikeZstdFrame(buffer: Buffer): boolean {
     && buffer[3] === 0xfd;
 }
 
-async function decodeRuntimeResponseBuffer(buffer: Buffer, contentEncoding: string | null): Promise<Buffer> {
+async function decodeRuntimeResponseBuffer(
+  buffer: Buffer,
+  contentEncoding: string | null,
+  maxOutputLength?: number,
+): Promise<Buffer> {
   if (!contentEncoding) return buffer;
 
   let decoded = buffer;
   const encodings = getContentEncodings(contentEncoding).reverse();
-
+  const options = maxOutputLength === undefined ? undefined : { maxOutputLength };
   for (const encoding of encodings) {
-    if (encoding === 'zstd') { decoded = await zstdDecompressAsync(decoded); continue; }
-    if (encoding === 'br') { decoded = await brotliDecompressAsync(decoded); continue; }
-    if (encoding === 'gzip' || encoding === 'x-gzip') { decoded = await gunzipAsync(decoded); continue; }
-    if (encoding === 'deflate') { decoded = await inflateAsync(decoded); continue; }
+    if (encoding === 'zstd') { decoded = await zstdDecompressAsync(decoded, options); continue; }
+    if (encoding === 'br') { decoded = await brotliDecompressAsync(decoded, options); continue; }
+    if (encoding === 'gzip' || encoding === 'x-gzip') { decoded = await gunzipAsync(decoded, options); continue; }
+    if (encoding === 'deflate') { decoded = await inflateAsync(decoded, options); continue; }
   }
 
   return decoded;
@@ -286,9 +290,29 @@ function decodeRuntimeResponseStream(
 // meaningful API error payload while keeping diagnostics intact.
 const MAX_RUNTIME_RESPONSE_TEXT_CHARS = 1024 * 1024;
 
-function truncateRuntimeResponseText(text: string): string {
-  if (text.length <= MAX_RUNTIME_RESPONSE_TEXT_CHARS) return text;
-  return `${text.slice(0, MAX_RUNTIME_RESPONSE_TEXT_CHARS)}\n...[truncated ${text.length - MAX_RUNTIME_RESPONSE_TEXT_CHARS} chars]`;
+/**
+ * Successful JSON bodies forwarded to the client (images b64_json, embedding
+ * vectors, non-stream completions, search results) can legitimately exceed
+ * 1 MiB; routes opt into this cap. Still bounded — an upstream cannot grow
+ * the process heap without limit — but large enough that normal payloads
+ * round-trip parseable instead of being corrupted mid-JSON.
+ */
+export const MAX_JSON_UPSTREAM_BODY_TEXT_CHARS = 8 * 1024 * 1024;
+
+function truncateRuntimeResponseText(text: string, maxChars: number = MAX_RUNTIME_RESPONSE_TEXT_CHARS): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`;
+}
+
+function resolveRuntimeBodyMaxChars(options: ReadRuntimeResponseTextOptions): number {
+  const value = options.maxChars;
+  return value !== undefined && Number.isSafeInteger(value) && value > 0
+    ? Math.min(value, MAX_JSON_UPSTREAM_BODY_TEXT_CHARS)
+    : MAX_RUNTIME_RESPONSE_TEXT_CHARS;
+}
+
+function runtimeBodyOverflowError(maxChars: number): Error {
+  return new Error(`upstream response body exceeds ${maxChars} chars`);
 }
 
 export type ReadRuntimeResponseTextOptions = {
@@ -296,6 +320,16 @@ export type ReadRuntimeResponseTextOptions = {
   idleTimeoutMs?: number;
   /** Abort a pending body read when the downstream request is gone. */
   signal?: AbortSignal;
+  /**
+   * Maximum characters kept from the body. Defaults to
+   * MAX_RUNTIME_RESPONSE_TEXT_CHARS (right-sized for error diagnostics);
+   * routes that forward a successful JSON body to the client opt into
+   * MAX_JSON_UPSTREAM_BODY_TEXT_CHARS so a legitimate multi-MiB b64_json
+   * image or dense embedding array is not corrupted mid-parse.
+   */
+  maxChars?: number;
+  /** A forwarded success body must be complete, never truncated to invalid JSON. */
+  rejectOnOverflow?: boolean;
 };
 
 function buildResponseBodyIdleTimeoutMessage(timeoutMs: number): string {
@@ -320,16 +354,17 @@ async function readRuntimeResponseTextWithGuards(
 
   // Guards (idle deadline / abort) must apply to EVERY body, encoded or not:
   // a plain JSON body that stops mid-flight is exactly the hang this guards.
-  // Chunks are collected raw; encoded bodies are decoded whole afterwards —
-  // these are bounded error/fallback payloads (1 MiB truncation), so the
-  // streaming decoder used for SSE relay is unnecessary here.
+  // Bound the buffered raw bytes as well as the decoded text: final-text
+  // truncation alone cannot stop an indefinitely streaming upstream.
   const body = response.body as globalThis.ReadableStream<Uint8Array> | null | undefined;
   const reader = body?.getReader();
   if (!reader) return '';
-
+  const maxChars = resolveRuntimeBodyMaxChars(options);
+  const maxRawBytes = maxChars * 4; // worst-case UTF-8 bytes per code point
   const timeoutMs = Math.max(0, Math.trunc(options.idleTimeoutMs ?? 0));
   const signal = options.signal;
   const chunks: Buffer[] = [];
+  let rawBytes = 0;
   let readerReleased = false;
   let cancelled = false;
 
@@ -393,33 +428,55 @@ async function readRuntimeResponseTextWithGuards(
       });
 
       if (next.done) break;
-      if (next.value?.byteLength) chunks.push(Buffer.from(next.value));
+      if (next.value?.byteLength) {
+        const chunk = Buffer.from(next.value);
+        rawBytes += chunk.length;
+        if (rawBytes > maxRawBytes) {
+          await cancelReader(runtimeBodyOverflowError(maxChars));
+          if (options.rejectOnOverflow) throw runtimeBodyOverflowError(maxChars);
+          return `${truncateRuntimeResponseText(Buffer.concat(chunks).toString('utf8'), maxChars)}\n...[truncated after ${rawBytes} raw bytes]`;
+        }
+        chunks.push(chunk);
+      }
     }
 
     const rawBuffer = Buffer.concat(chunks);
     if (encodings.length === 0) {
-      return truncateRuntimeResponseText(rawBuffer.toString('utf8'));
+      const text = rawBuffer.toString('utf8');
+      if (options.rejectOnOverflow && text.length > maxChars) throw runtimeBodyOverflowError(maxChars);
+      return truncateRuntimeResponseText(text, maxChars);
     }
     try {
-      return truncateRuntimeResponseText(
-        (await decodeRuntimeResponseBuffer(rawBuffer, contentEncoding)).toString('utf8'),
-      );
-    } catch {
-      return looksLikeZstdFrame(rawBuffer) ? '' : truncateRuntimeResponseText(rawBuffer.toString('utf8'));
+      const text = (await decodeRuntimeResponseBuffer(rawBuffer, contentEncoding, maxChars * 4)).toString('utf8');
+      if (options.rejectOnOverflow && text.length > maxChars) throw runtimeBodyOverflowError(maxChars);
+      return truncateRuntimeResponseText(text, maxChars);
+    } catch (error) {
+      if (options.rejectOnOverflow) throw error;
+      return looksLikeZstdFrame(rawBuffer) ? '' : truncateRuntimeResponseText(rawBuffer.toString('utf8'), maxChars);
     }
   } finally {
     releaseReader();
   }
 }
 
-async function readUnguardedRuntimeResponseText(response: RuntimeResponse): Promise<string> {
+async function readUnguardedRuntimeResponseText(
+  response: RuntimeResponse,
+  options: ReadRuntimeResponseTextOptions,
+): Promise<string> {
+  const maxChars = resolveRuntimeBodyMaxChars(options);
   const contentEncoding = typeof response.headers?.get === 'function'
     ? response.headers.get('content-encoding')
     : null;
   const encodings = getContentEncodings(contentEncoding);
   if (encodings.length === 0) {
     return typeof response.text === 'function'
-      ? response.text().then(truncateRuntimeResponseText).catch(() => '')
+      ? response.text().then((text) => {
+        if (options.rejectOnOverflow && text.length > maxChars) throw runtimeBodyOverflowError(maxChars);
+        return truncateRuntimeResponseText(text, maxChars);
+      }).catch((error) => {
+        if (options.rejectOnOverflow) throw error;
+        return '';
+      })
       : '';
   }
 
@@ -427,11 +484,12 @@ async function readUnguardedRuntimeResponseText(response: RuntimeResponse): Prom
   // 避免某些环境下 fetch 实现不解压导致 .text() 返回乱码。
   const rawBuffer = Buffer.from(await response.arrayBuffer());
   try {
-    return truncateRuntimeResponseText(
-      (await decodeRuntimeResponseBuffer(rawBuffer, contentEncoding)).toString('utf8'),
-    );
-  } catch {
-    return looksLikeZstdFrame(rawBuffer) ? '' : truncateRuntimeResponseText(rawBuffer.toString('utf8'));
+    const text = (await decodeRuntimeResponseBuffer(rawBuffer, contentEncoding, maxChars * 4)).toString('utf8');
+    if (options.rejectOnOverflow && text.length > maxChars) throw runtimeBodyOverflowError(maxChars);
+    return truncateRuntimeResponseText(text, maxChars);
+  } catch (error) {
+    if (options.rejectOnOverflow) throw error;
+    return looksLikeZstdFrame(rawBuffer) ? '' : truncateRuntimeResponseText(rawBuffer.toString('utf8'), maxChars);
   }
 }
 
@@ -439,10 +497,10 @@ export async function readRuntimeResponseText(
   response: RuntimeResponse,
   options: ReadRuntimeResponseTextOptions = {},
 ): Promise<string> {
-  if (options.signal || options.idleTimeoutMs !== undefined) {
+  if (options.signal || options.idleTimeoutMs !== undefined || options.maxChars !== undefined) {
     return readRuntimeResponseTextWithGuards(response, options);
   }
-  return readUnguardedRuntimeResponseText(response);
+  return readUnguardedRuntimeResponseText(response, options);
 }
 
 function asNodeReadableStream(

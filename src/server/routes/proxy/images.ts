@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { fetch } from 'undici';
-import { config } from '../../config.js';
+import { config, resolveProxyStreamIdleTimeoutMs } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
@@ -18,6 +18,8 @@ import { detectDownstreamClientContext, type DownstreamClientContext } from '../
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { createRequestTraceId } from '../../services/requestTraceId.js';
 import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy-core/firstByteTimeout.js';
+import { MAX_JSON_UPSTREAM_BODY_TEXT_CHARS, readRuntimeResponseText } from '../../proxy-core/executors/types.js';
+import { wireReplyGoneAbortSignal } from '../../proxy-core/surfaces/sharedSurface.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import {
@@ -61,6 +63,11 @@ export async function imagesProxyRoute(app: FastifyInstance) {
     }
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
+    // Bound upstream body reads: abort on downstream disconnect and idle stalls.
+    const bodyReadGuards = {
+      idleTimeoutMs: resolveProxyStreamIdleTimeoutMs(),
+      signal: wireReplyGoneAbortSignal(reply),
+    };
 
     while (retryCount <= maxRetries) {
       const selected = await selectProxyChannelForAttempt({
@@ -107,7 +114,10 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             },
           );
           const observedFirstByteLatencyMs = getObservedResponseMeta(response)?.firstByteLatencyMs ?? null;
-          const responseText = await response.text();
+          const responseText = await readRuntimeResponseText(response, {
+            ...bodyReadGuards,
+            ...(response.ok ? { maxChars: MAX_JSON_UPSTREAM_BODY_TEXT_CHARS, rejectOnOverflow: true } : {}),
+          });
           if (!response.ok) {
             throw new SiteApiEndpointRequestError(responseText || 'unknown error', {
               status: response.status,
@@ -283,6 +293,11 @@ export async function imagesProxyRoute(app: FastifyInstance) {
     }
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
+    // Bound upstream body reads: abort on downstream disconnect and idle stalls.
+    const bodyReadGuards = {
+      idleTimeoutMs: resolveProxyStreamIdleTimeoutMs(),
+      signal: wireReplyGoneAbortSignal(reply),
+    };
 
     while (retryCount <= maxRetries) {
       const selected = await selectProxyChannelForAttempt({
@@ -344,7 +359,10 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             },
           );
           const observedFirstByteLatencyMs = getObservedResponseMeta(response)?.firstByteLatencyMs ?? null;
-          const responseText = await response.text();
+          const responseText = await readRuntimeResponseText(response, {
+            ...bodyReadGuards,
+            ...(response.ok ? { maxChars: MAX_JSON_UPSTREAM_BODY_TEXT_CHARS, rejectOnOverflow: true } : {}),
+          });
           if (!response.ok) {
             throw new SiteApiEndpointRequestError(responseText || 'unknown error', {
               status: response.status,

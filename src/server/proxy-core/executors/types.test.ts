@@ -1,7 +1,7 @@
 import { gzipSync, zstdCompressSync } from 'node:zlib';
 import { Response } from 'undici';
 import { describe, expect, it } from 'vitest';
-import { enrichTransportFailure, getRuntimeResponseReader, materializeErrorResponse, performFetch, readRuntimeResponseText } from './types.js';
+import { enrichTransportFailure, getRuntimeResponseReader, materializeErrorResponse, MAX_JSON_UPSTREAM_BODY_TEXT_CHARS, performFetch, readRuntimeResponseText } from './types.js';
 
 describe('readRuntimeResponseText', () => {
   it('decompresses zstd responses before reading the body text', async () => {
@@ -54,6 +54,65 @@ describe('readRuntimeResponseText', () => {
     });
 
     await expect(readRuntimeResponseText(response)).resolves.toBe(payload);
+  });
+
+  it('honours a larger explicit maxChars so legitimate big JSON survives intact', async () => {
+    // /v1/images and friends can return a multi-MiB b64_json payload or a
+    // dense embedding vector array; the caller opts in to a bigger cap and
+    // the full body must round-trip parseable.
+    const bigPayload = JSON.stringify({
+      data: [{ b64_json: 'A'.repeat(2 * 1024 * 1024) }],
+    });
+    const response = new Response(bigPayload, {
+      status: 200,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
+
+    const text = await readRuntimeResponseText(response, {
+      maxChars: MAX_JSON_UPSTREAM_BODY_TEXT_CHARS,
+    });
+    expect(text).toBe(bigPayload);
+    expect(JSON.parse(text).data[0].b64_json).toHaveLength(2 * 1024 * 1024);
+  });
+
+  it('rejects an oversized successful JSON body instead of forwarding truncated JSON', async () => {
+    const bigPayload = JSON.stringify({ data: [{ b64_json: 'B'.repeat(2 * 1024 * 1024) }] });
+    const response = new Response(bigPayload, {
+      status: 200,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
+
+    await expect(readRuntimeResponseText(response, { maxChars: 1024, rejectOnOverflow: true }))
+      .rejects.toThrow('exceeds');
+  });
+
+  it('preserves the truncation marker for oversized error bodies with a custom maxChars', async () => {
+    const response = new Response('E'.repeat(2_048), { status: 500 });
+    const text = await readRuntimeResponseText(response, { maxChars: 1_024 });
+    expect(text).toContain('[truncated');
+    expect(text.length).toBeLessThan(2_048);
+  });
+
+  it('cancels an oversized streaming body without waiting for the upstream to close', async () => {
+    let cancelled = false;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(8_192));
+        // Intentionally never close: an unbounded reader will hang.
+      },
+      cancel() { cancelled = true; },
+    }), { status: 500 });
+    const controller = new AbortController();
+    const fallback = setTimeout(() => controller.abort(), 200);
+    try {
+      const text = await readRuntimeResponseText(response, {
+        maxChars: 1_024, signal: controller.signal,
+      });
+      expect(text).toContain('[truncated');
+      expect(cancelled).toBe(true);
+    } finally {
+      clearTimeout(fallback);
+    }
   });
 
   it('cancels a non-stream body that goes idle after its first chunk', async () => {
