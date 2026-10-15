@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import compress from '@fastify/compress';
 import fastifyStatic from '@fastify/static';
 import { isSpaShellFallbackCandidate } from './webSpaFallback.js';
+import { ensureEmptyBodyContentTypeParser } from './emptyBodyContentTypeParser.js';
 import {
   assertProductionSecurity,
   buildFastifyOptions,
@@ -271,6 +272,12 @@ try {
 assertProductionSecurity(config);
 
 const app = Fastify(buildFastifyOptions(config));
+
+// Body-less POSTs pick up an edge-stamped media type on the way in (Cloudflare
+// sends application/octet-stream), which Fastify would reject with 415 before any
+// handler runs. Install this before the routes so tunnel traffic behaves like
+// localhost: see emptyBodyContentTypeParser.ts.
+ensureEmptyBodyContentTypeParser(app);
 
 await app.register(cors, {
   // Explicit allowlist from CORS_ORIGINS when configured; otherwise keep
