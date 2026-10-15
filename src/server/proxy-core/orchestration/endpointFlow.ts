@@ -1,5 +1,10 @@
 import { fetch } from 'undici';
 import { applyRequestOverrideRules } from '../../services/requestOverride.js';
+import {
+  learnUpstreamRequestBodyEncoding,
+  maybeCompressUpstreamRequestBody,
+  resolveRequestOrigin,
+} from '../../services/requestBodyCompression.js';
 import { readRuntimeResponseText, type ReadRuntimeResponseTextOptions } from '../executors/types.js';
 import { fetchWithObservedFirstByte, isObservedFirstByteTimeoutResponse } from '../firstByteTimeout.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
@@ -176,16 +181,28 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
         ? Math.max(1, configuredTimeoutMs - elapsedMs)
         : 0;
       return fetchWithObservedFirstByte(
-        async (signal) => (
-          input.dispatchRequest
-            ? await input.dispatchRequest(requestToDispatch, targetUrlToDispatch, signal)
-            : await fetch(targetUrlToDispatch, await withSiteProxyRequestInit(targetUrlToDispatch, {
-              method: 'POST',
-              headers: requestToDispatch.headers,
-              body: JSON.stringify(requestToDispatch.body),
-              signal,
-            }))
-        ),
+        async (signal) => {
+          if (input.dispatchRequest) {
+            return await input.dispatchRequest(requestToDispatch, targetUrlToDispatch, signal);
+          }
+          // Cascade hops re-upload the whole prompt through a tunnel; when the
+          // upstream is a metapi instance that advertised support, send it
+          // gzipped. Unknown/unpatched origins keep receiving plain JSON.
+          const origin = resolveRequestOrigin(targetUrlToDispatch);
+          const encoded = await maybeCompressUpstreamRequestBody({
+            origin,
+            headers: requestToDispatch.headers,
+            bodyText: JSON.stringify(requestToDispatch.body),
+          });
+          const dispatched = await fetch(targetUrlToDispatch, await withSiteProxyRequestInit(targetUrlToDispatch, {
+            method: 'POST',
+            headers: encoded.headers,
+            body: encoded.body,
+            signal,
+          }));
+          learnUpstreamRequestBodyEncoding(origin, dispatched);
+          return dispatched;
+        },
         {
           firstByteTimeoutMs: remainingTimeoutMs,
           startedAtMs: attemptStartedAtMs,

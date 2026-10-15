@@ -1,3 +1,4 @@
+import { gunzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetch } from 'undici';
 import type { BuiltEndpointRequest } from './endpointFlow.js';
@@ -470,5 +471,112 @@ describe('executeEndpointFlow', () => {
       expect(result.errText).toContain('[upstream:/v1/responses]');
       expect(result.errText).toContain('Upstream returned HTTP 400');
     }
+  });
+});
+
+/**
+ * Cascade hops (metapi -> tunnel -> metapi) re-upload the whole prompt, so the
+ * body travels gzipped once the upstream advertised support. See
+ * services/requestBodyCompression.ts.
+ */
+describe('executeEndpointFlow request body compression', () => {
+  const CAPABILITY_HEADER = 'x-metapi-body-encoding';
+
+  async function freshFlow() {
+    const mod = await import('./endpointFlow.js');
+    return mod.executeEndpointFlow;
+  }
+
+  function bigRequestFor(path: string): BuiltEndpointRequest {
+    return {
+      endpoint: 'responses',
+      path,
+      headers: { 'content-type': 'application/json' },
+      body: { model: 'gpt-5.2', input: 'x'.repeat(20_000) },
+    };
+  }
+
+  function okResponse(extraHeaders: Record<string, string> = {}) {
+    return toUndiciResponse(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', ...extraHeaders },
+      }),
+    );
+  }
+
+  beforeEach(async () => {
+    // The shared fetch mock keeps calls from the tests above; without this the
+    // assertions below read someone else's request.
+    fetchMock.mockReset();
+    const { __resetRequestBodyCompressionForTests } = await import(
+      '../../services/requestBodyCompression.js'
+    );
+    __resetRequestBodyCompressionForTests();
+  });
+
+  afterEach(async () => {
+    const { __resetRequestBodyCompressionForTests } = await import(
+      '../../services/requestBodyCompression.js'
+    );
+    __resetRequestBodyCompressionForTests();
+  });
+
+  it('sends a plain body to an origin that never advertised support', async () => {
+    fetchMock.mockResolvedValueOnce(okResponse());
+    const executeEndpointFlow = await freshFlow();
+
+    await executeEndpointFlow({
+      siteUrl: 'https://plain.example.com',
+      endpointCandidates: ['responses'],
+      buildRequest: () => bigRequestFor('/v1/responses'),
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as { headers: Record<string, string>; body: unknown };
+    expect(init.headers['content-encoding']).toBeUndefined();
+    expect(typeof init.body).toBe('string');
+  });
+
+  it('sends the prompt gzipped once the origin advertised support', async () => {
+    const { learnUpstreamRequestBodyEncoding } = await import(
+      '../../services/requestBodyCompression.js'
+    );
+    learnUpstreamRequestBodyEncoding('https://peer.example.com', {
+      headers: { get: (name: string) => (name.toLowerCase() === CAPABILITY_HEADER ? 'gzip' : null) },
+    });
+    fetchMock.mockResolvedValueOnce(okResponse());
+    const executeEndpointFlow = await freshFlow();
+
+    await executeEndpointFlow({
+      siteUrl: 'https://peer.example.com',
+      endpointCandidates: ['responses'],
+      buildRequest: () => bigRequestFor('/v1/responses'),
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as { headers: Record<string, string>; body: Buffer };
+    expect(init.headers['content-encoding']).toBe('gzip');
+    const decoded = JSON.parse(gunzipSync(init.body).toString());
+    expect(decoded.model).toBe('gpt-5.2');
+    expect(decoded.input).toHaveLength(20_000);
+  });
+
+  it('learns the capability from a response so the next request is compressed', async () => {
+    fetchMock.mockResolvedValueOnce(okResponse({ [CAPABILITY_HEADER]: 'gzip' }));
+    fetchMock.mockResolvedValueOnce(okResponse());
+    const executeEndpointFlow = await freshFlow();
+
+    const input = {
+      siteUrl: 'https://learned.example.com',
+      endpointCandidates: ['responses'] as const,
+      buildRequest: () => bigRequestFor('/v1/responses'),
+    };
+    await executeEndpointFlow(input);
+    const firstInit = fetchMock.mock.calls[0]?.[1] as { headers: Record<string, string> };
+    expect(firstInit.headers['content-encoding']).toBeUndefined();
+
+    await executeEndpointFlow(input);
+    const secondInit = fetchMock.mock.calls[1]?.[1] as { headers: Record<string, string>; body: Buffer };
+    expect(secondInit.headers['content-encoding']).toBe('gzip');
+    expect(Buffer.isBuffer(secondInit.body)).toBe(true);
   });
 });

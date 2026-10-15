@@ -4,6 +4,7 @@ import compress from '@fastify/compress';
 import fastifyStatic from '@fastify/static';
 import { isSpaShellFallbackCandidate } from './webSpaFallback.js';
 import { ensureEmptyBodyContentTypeParser } from './emptyBodyContentTypeParser.js';
+import { registerCompressedRequestBodySupport } from './services/requestBodyCompression.js';
 import {
   assertProductionSecurity,
   buildFastifyOptions,
@@ -278,6 +279,10 @@ const app = Fastify(buildFastifyOptions(config));
 // handler runs. Install this before the routes so tunnel traffic behaves like
 // localhost: see emptyBodyContentTypeParser.ts.
 ensureEmptyBodyContentTypeParser(app);
+
+// Cascade hops may send the prompt gzipped when this instance advertised it
+// (see services/requestBodyCompression.ts). Inert for plain-JSON clients.
+registerCompressedRequestBodySupport(app);
 
 await app.register(cors, {
   // Explicit allowlist from CORS_ORIGINS when configured; otherwise keep
