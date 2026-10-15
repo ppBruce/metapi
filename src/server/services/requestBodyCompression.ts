@@ -90,6 +90,58 @@ export function supportsCompressedRequestBody(origin: string | null | undefined)
 }
 
 /**
+ * Normalize undici's several header shapes (Headers | Map | string[][] | record)
+ * to a plain record. Returns null when the shape is not recognized — callers
+ * must then leave the request alone rather than rebuild its headers.
+ *
+ * Duck-typing, NOT `instanceof Headers`: the npm `undici` package ships its own
+ * `Headers` class, so `new (require('undici').Headers)() instanceof
+ * globalThis.Headers` is false. Snapshotting such an instance with a spread
+ * yields `{}` and silently drops Authorization — which the receiving instance
+ * answers with `401 Missing Authorization`.
+ */
+export function toPlainHeaderRecord(headers: unknown): Record<string, string> | null {
+  if (!headers) return {};
+  const candidate = headers as {
+    forEach?: (cb: (value: unknown, key: unknown) => void) => void;
+    entries?: () => Iterable<[unknown, unknown]>;
+    get?: (key: unknown) => unknown;
+  };
+  if (headers instanceof Map) {
+    const out: Record<string, string> = {};
+    for (const [key, value] of headers) out[String(key)] = String(value);
+    return out;
+  }
+  // Arrays must be checked before the generic `entries()` branch: an array also
+  // has `.entries()`, but it yields [index, value] and would mangle the pairs.
+  if (Array.isArray(headers)) {
+    const out: Record<string, string> = {};
+    for (const entry of headers as [string, string][]) {
+      if (Array.isArray(entry) && entry.length >= 2) out[String(entry[0])] = String(entry[1]);
+    }
+    return out;
+  }
+  if (typeof candidate.forEach === 'function' && typeof candidate.get === 'function') {
+    const out: Record<string, string> = {};
+    candidate.forEach((value, key) => {
+      out[String(key)] = String(value);
+    });
+    return out;
+  }
+  if (typeof candidate.entries === 'function') {
+    const out: Record<string, string> = {};
+    for (const entry of candidate.entries()) {
+      if (Array.isArray(entry) && entry.length >= 2) out[String(entry[0])] = String(entry[1]);
+    }
+    return out;
+  }
+  if (typeof headers === 'object' && Object.getPrototypeOf(headers) === Object.prototype) {
+    return { ...(headers as Record<string, string>) };
+  }
+  return null;
+}
+
+/**
  * Gzip an upstream request body when the origin is known to accept it.
  * Returns the input untouched (same header object, string body) otherwise.
  */

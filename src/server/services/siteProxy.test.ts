@@ -505,4 +505,40 @@ describe('siteProxy', () => {
     expect((result as { dispatcher?: { constructor?: { name?: string } } }).dispatcher?.constructor?.name)
       .toBe('ProxyAgent');
   });
+
+  /**
+   * The chat/responses/messages faces build their fetch init with
+   * `withSiteRecordProxyRequestInit` (via sharedSurface's dispatch hook), not
+   * with the URL-resolving variant — the cascade dispatcher has to be attached
+   * in both, or the hop the agent loop actually uses keeps the 30s window.
+   */
+  it('attaches the cascade dispatcher through the record-based init builder', async () => {
+    const { withSiteRecordProxyRequestInit } = await import('./siteProxy.js');
+    const { getGlobalDispatcher } = await import('undici');
+
+    const site = {
+      url: 'https://cascade-record.example.com',
+      platform: 'metapi',
+      proxyUrl: null,
+      customHeaders: null,
+      protocolProfile: null,
+      customHeadersOverrideRequestHeaders: false,
+    };
+    const fromRecord = withSiteRecordProxyRequestInit(site as never, { method: 'POST' });
+    const again = withSiteRecordProxyRequestInit(site as never, { method: 'POST' });
+
+    expect('dispatcher' in fromRecord).toBe(true);
+    // One shared agent for cascade hops, and not the conservative global one.
+    expect((fromRecord as { dispatcher?: unknown }).dispatcher).toBe(
+      (again as { dispatcher?: unknown }).dispatcher,
+    );
+    expect((fromRecord as { dispatcher?: unknown }).dispatcher).not.toBe(getGlobalDispatcher());
+
+    const plain = withSiteRecordProxyRequestInit({
+      ...site,
+      url: 'https://ordinary-record.example.com',
+      platform: 'new-api',
+    } as never, { method: 'POST' });
+    expect('dispatcher' in plain).toBe(false);
+  });
 });

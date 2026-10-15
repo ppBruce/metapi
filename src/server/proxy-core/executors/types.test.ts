@@ -1,4 +1,4 @@
-import { gzipSync, zstdCompressSync } from 'node:zlib';
+import { gzipSync, gunzipSync, zstdCompressSync } from 'node:zlib';
 import { Response } from 'undici';
 import { describe, expect, it } from 'vitest';
 import { enrichTransportFailure, getRuntimeResponseReader, materializeErrorResponse, MAX_JSON_UPSTREAM_BODY_TEXT_CHARS, performFetch, readRuntimeResponseText } from './types.js';
@@ -335,6 +335,119 @@ describe('performFetch stale-connection retry', () => {
       await expect(readRuntimeResponseText(response)).resolves.toBe('{"ok":true}');
       expect(connections).toBe(2);
     } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * Cascade hops (metapi -> tunnel -> metapi) re-upload the whole prompt. The
+ * compression must live in performFetch, the single fetch point every runtime
+ * executor shares — wiring it only into endpointFlow's default-fetch branch
+ * leaves production chat traffic (which passes a dispatch hook) uncompressed.
+ */
+describe('performFetch cascade request-body compression', () => {
+  it('learns the upstream capability from a response, then gzips the next request', async () => {
+    const { createServer } = await import('node:http');
+    const received: { headers: Record<string, string | string[] | undefined>; raw: Buffer }[] = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk) => chunks.push(chunk as Buffer));
+      req.on('end', () => {
+        received.push({ headers: req.headers, raw: Buffer.concat(chunks) });
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          'x-metapi-body-encoding': 'gzip',
+        });
+        res.end('{"ok":true}');
+      });
+    });
+    await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+    const port = (server.address() as { port: number }).port;
+    const origin = `http://127.0.0.1:${port}`;
+    const body = JSON.stringify({ model: 'm', input: 'x'.repeat(50_000) });
+    const request = {
+      endpoint: 'chat' as const,
+      path: '/v1/chat/completions',
+      headers: {},
+      body: { model: 'm' },
+    };
+    const input = {
+      siteUrl: origin,
+      request,
+      buildInit: () => ({
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      }),
+    };
+
+    const { __resetRequestBodyCompressionForTests } = await import(
+      '../../services/requestBodyCompression.js'
+    );
+    __resetRequestBodyCompressionForTests();
+    try {
+      // Capability unknown yet: the first request travels plain.
+      await performFetch(input, request);
+      expect(received[0].headers['content-encoding']).toBeUndefined();
+      expect(received[0].raw.toString()).toBe(body);
+
+      // The response advertised support: the next request is gzipped.
+      await performFetch(input, request);
+      expect(received[1].headers['content-encoding']).toBe('gzip');
+      expect(gunzipSync(received[1].raw).toString()).toBe(body);
+      expect(received[1].raw.length).toBeLessThan(body.length / 4);
+    } finally {
+      __resetRequestBodyCompressionForTests();
+      server.close();
+    }
+  });
+
+  it('leaves the body alone for an origin that never advertised support', async () => {
+    const { createServer } = await import('node:http');
+    let raw = Buffer.alloc(0);
+    let sentEncoding: string | undefined;
+    const server = createServer((req, res) => {
+      sentEncoding = req.headers['content-encoding'] as string | undefined;
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk) => chunks.push(chunk as Buffer));
+      req.on('end', () => {
+        raw = Buffer.concat(chunks);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"ok":true}');
+      });
+    });
+    await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+    const port = (server.address() as { port: number }).port;
+    const body = JSON.stringify({ model: 'm', input: 'x'.repeat(50_000) });
+    const request = {
+      endpoint: 'chat' as const,
+      path: '/v1/chat/completions',
+      headers: {},
+      body: { model: 'm' },
+    };
+
+    const { __resetRequestBodyCompressionForTests } = await import(
+      '../../services/requestBodyCompression.js'
+    );
+    __resetRequestBodyCompressionForTests();
+    try {
+      await performFetch(
+        {
+          siteUrl: `http://127.0.0.1:${port}`,
+          request,
+          buildInit: () => ({
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body,
+          }),
+        },
+        request,
+      );
+      expect(sentEncoding).toBeUndefined();
+      expect(raw.toString()).toBe(body);
+    } finally {
+      __resetRequestBodyCompressionForTests();
       server.close();
     }
   });

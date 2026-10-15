@@ -9,6 +9,7 @@ import {
   maybeCompressUpstreamRequestBody,
   resolveRequestOrigin,
   supportsCompressedRequestBody,
+  toPlainHeaderRecord,
 } from './requestBodyCompression.js';
 
 const ORIGIN = 'https://peer.example.com';
@@ -108,5 +109,36 @@ describe('upstream request body compression (sender)', () => {
     expect(resolveRequestOrigin('https://peer.example.com/v1/chat/completions')).toBe(ORIGIN);
     expect(resolveRequestOrigin('not a url')).toBeNull();
     expect(resolveRequestOrigin(null)).toBeNull();
+  });
+
+  /**
+   * The npm `undici` package ships its own Headers class: `new
+   * UndiciHeaders(...) instanceof globalThis.Headers` is false. Reading such an
+   * instance with a spread yields `{}`, which silently drops Authorization and
+   * makes the receiving instance answer `401 Missing Authorization`. Duck-typed
+   * reads (and a null result for unknown containers) are what keep the auth.
+   */
+  it('reads headers from any container shape, including undici Headers', async () => {
+    const { Headers: UndiciHeaders } = await import('undici');
+    const authorization = 'Bearer SECRET';
+
+    const fromUndiciHeaders = toPlainHeaderRecord(
+      new UndiciHeaders({ authorization, 'content-type': 'application/json' }),
+    );
+    expect(fromUndiciHeaders).toEqual({ authorization, 'content-type': 'application/json' });
+
+    const fromMap = toPlainHeaderRecord(new Map([['authorization', authorization]]));
+    expect(fromMap).toEqual({ authorization });
+
+    const fromPairs = toPlainHeaderRecord([['authorization', authorization]]);
+    expect(fromPairs).toEqual({ authorization });
+
+    const fromRecord = toPlainHeaderRecord({ authorization });
+    expect(fromRecord).toEqual({ authorization });
+
+    // Unknown container (class instance): callers must skip compression rather
+    // than rebuild a header set they cannot read.
+    class OpaqueHeaders {}
+    expect(toPlainHeaderRecord(new OpaqueHeaders())).toBeNull();
   });
 });

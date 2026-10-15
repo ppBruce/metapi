@@ -145,6 +145,8 @@ export type SiteProxyConfigLike = {
   customHeaders?: unknown;
   customHeadersOverrideRequestHeaders?: boolean | null;
   protocolProfile?: unknown;
+  /** Present on full site rows; drives cascade-peer transport tuning. */
+  platform?: string | null;
 };
 
 let siteProxyCache: {
@@ -746,6 +748,12 @@ export function withSiteRecordProxyRequestInit(
   const siteProxyUrl = resolveProxyUrlForSite(site);
   const proxyUrl = accountNormalized || siteProxyUrl;
   const isAccountOverride = !!accountNormalized && accountNormalized !== siteProxyUrl;
+  if (!proxyUrl && isCascadePeerPlatform(site?.platform)) {
+    // Cascade hop (another metapi instance): keep its TLS session across agent
+    // turns, which the conservative 30s global window hangs up between requests.
+    // This is the init builder the chat/responses/messages faces actually use.
+    return { ...nextOptions, dispatcher: cascadePeerDispatcher };
+  }
   return withExplicitProxyRequestInit(proxyUrl, nextOptions, isAccountOverride);
 }
 

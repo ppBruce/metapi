@@ -9,6 +9,12 @@ import {
   zstdDecompress,
 } from 'node:zlib';
 import { promisify } from 'node:util';
+import {
+  learnUpstreamRequestBodyEncoding,
+  maybeCompressUpstreamRequestBody,
+  resolveRequestOrigin,
+  toPlainHeaderRecord,
+} from '../../services/requestBodyCompression.js';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import {
@@ -177,15 +183,41 @@ export async function performFetch(
   options: { disableTransportRetry?: boolean } = {},
 ): Promise<RuntimeResponse> {
   const init = await input.buildInit(requestUrl, request);
+  // Cascade hops re-upload the whole prompt through a tunnel. When the upstream
+  // advertised `x-metapi-body-encoding: gzip`, send the body gzipped instead.
+  // This is the single fetch point shared by every runtime executor, so wiring
+  // it here covers chat/responses/messages alike (the default-fetch branch of
+  // endpointFlow is only used by flows that do NOT pass a dispatch hook).
+  const origin = resolveRequestOrigin(requestUrl);
+  let dispatchInit: UndiciRequestInit = init;
+  if (typeof init.body === 'string' && init.body.length >= 1024) {
+    // Unrecognized header container -> leave the init untouched. Rebuilding a
+    // header set we cannot read faithfully is how Authorization gets dropped.
+    const headerRecord = toPlainHeaderRecord(init.headers);
+    if (headerRecord) {
+      const encoded = await maybeCompressUpstreamRequestBody({
+        origin,
+        headers: headerRecord,
+        bodyText: init.body,
+      });
+      if (encoded.compressed) {
+        dispatchInit = { ...init, headers: encoded.headers, body: encoded.body };
+      }
+    }
+  }
   const combinedSignal = input.signal && init.signal
     ? AbortSignal.any([input.signal, init.signal as AbortSignal])
     : (input.signal ?? init.signal);
   const dispatch = () => fetch(requestUrl, {
-    ...init,
+    ...dispatchInit,
     signal: combinedSignal,
   });
+  const learnAndReturn = (response: RuntimeResponse) => {
+    learnUpstreamRequestBodyEncoding(origin, response);
+    return response;
+  };
   try {
-    return await dispatch();
+    return learnAndReturn(await dispatch());
   } catch (error) {
     // One transparent retry when a dead keep-alive socket failed the request
     // before anything was received: the body is still intact, our own deadline
@@ -201,7 +233,7 @@ export async function performFetch(
       && combinedSignal?.aborted !== true;
     if (!retryable) throw enrichTransportFailure(error);
     try {
-      return await dispatch();
+      return learnAndReturn(await dispatch());
     } catch (retryError) {
       throw enrichTransportFailure(retryError);
     }
