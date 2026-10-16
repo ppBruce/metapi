@@ -315,11 +315,13 @@ app.addHook('onRequest', async (request, reply) => {
     const brandAssetOk = isTunnelBrandAssetPath(urlPath);
     const dashboardOk = config.tunnelDashboardAccess && isTunnelDashboardPath(urlPath);
     if (!apiOk && !brandAssetOk && !dashboardOk) {
-      reply.code(403).send({
+      // Return the reply: an async hook that sends and then resolves to
+      // undefined lets Fastify run the onSend chain a second time while an
+      // async onSend hook is still pending, which logs ERR_HTTP_HEADERS_SENT.
+      return reply.code(403).send({
         error: 'Tunnel access denied',
         message: '当前隧道仅允许 API 访问。如需公网打开控制页，请在设置中开启「允许通过隧道访问控制台」。',
       });
-      return;
     }
   }
 
@@ -415,16 +417,21 @@ if (existsSync(webDir)) {
   });
   // SPA fallback
   app.setNotFoundHandler(async (request, reply) => {
+    // Every branch must RETURN the reply. An async handler that sends and then
+    // resolves to undefined makes Fastify run the onSend chain twice whenever
+    // the chain is suspended by an async hook (we have three: the two
+    // capability hooks plus the security-header hook), because `reply.sent` is
+    // still false while the chain is pending — the second pass then hits
+    // ERR_HTTP_HEADERS_SENT on the already-written head. Returning the reply
+    // marks the response as handled and keeps the chain single-pass.
     if (request.url.startsWith('/api/') || request.url.startsWith('/v1/')) {
-      reply.code(404).send({ error: 'Not found' });
-      return;
+      return reply.code(404).send({ error: 'Not found' });
     }
     // Missing assets must 404 instead of receiving the SPA shell: a 200
     // text/html body at a .js/.css URL is rejected as a MIME mismatch and
     // hides the real cause (stale cached shell pointing at a deleted chunk).
     if (!isSpaShellFallbackCandidate(request.url)) {
-      reply.code(404).type('text/plain; charset=utf-8').send('Not found');
-      return;
+      return reply.code(404).type('text/plain; charset=utf-8').send('Not found');
     }
     return reply.sendFile('index.html');
   });
