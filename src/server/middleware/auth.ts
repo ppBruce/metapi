@@ -82,10 +82,13 @@ export function secretsEqual(left: string, right: string): boolean {
 }
 
 export async function authMiddleware(request: FastifyRequest, reply: FastifyReply) {
+  // Every rejection branch returns the reply. An async hook that sends and then
+  // resolves to undefined lets Fastify run the onSend chain a second time while
+  // an async onSend hook is still pending (ERR_HTTP_HEADERS_SENT); returning the
+  // reply keeps the handler promise pending until the response has flushed.
   const clientIp = getTrustedClientIp(request);
   if (!isIpAllowed(clientIp, config.adminIpAllowlist)) {
-    reply.code(403).send({ error: 'IP not allowed' });
-    return;
+    return reply.code(403).send({ error: 'IP not allowed' });
   }
 
   const auth = request.headers.authorization;
@@ -106,21 +109,22 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
   // once the budget is gone, so guessing cannot continue indefinitely.
   const verdict = await adminAuthThrottle.recordFailure(clientIp);
   if (verdict.blocked) {
-    reply
+    return reply
       .code(429)
       .header('retry-after', String(verdict.retryAfterSec))
       .send({ error: 'Too many failed authentication attempts' });
-    return;
   }
 
   if (!auth) {
-    reply.code(401).send({ error: 'Missing Authorization header' });
-    return;
+    return reply.code(401).send({ error: 'Missing Authorization header' });
   }
-  reply.code(403).send({ error: 'Invalid token' });
+  return reply.code(403).send({ error: 'Invalid token' });
 }
 
 export async function proxyAuthMiddleware(request: FastifyRequest, reply: FastifyReply) {
+  // Same shape as authMiddleware above: rejections return the reply so the
+  // handler promise resolves only after the response flushed and the onSend
+  // chain (suspended on async hooks) never restarts on the same reply.
   const auth = typeof request.headers.authorization === 'string'
     ? request.headers.authorization
     : '';
@@ -142,8 +146,7 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
     : (apiKeyHeader.trim() || googApiKeyHeader.trim() || queryKey);
 
   if (!token) {
-    reply.code(401).send({ error: 'Missing Authorization, x-api-key, x-goog-api-key, or key query parameter' });
-    return;
+    return reply.code(401).send({ error: 'Missing Authorization, x-api-key, x-goog-api-key, or key query parameter' });
   }
 
   const playground = peekPlaygroundProxyToken(token);
@@ -161,29 +164,26 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
 
   const authResult = await authorizeDownstreamToken(token);
   if (!authResult.ok) {
-    reply.code(authResult.statusCode).send({ error: authResult.error });
-    return;
+    return reply.code(authResult.statusCode).send({ error: authResult.error });
   }
 
   if (authResult.source === 'managed' && authResult.key) {
     const rpm = checkManagedKeyRpmLimit(authResult.key.id, authResult.key.maxRpm);
     if (!rpm.allowed) {
-      reply
+      return reply
         .code(429)
         .header('retry-after', String(rpm.retryAfterSec))
         .send({ error: `API key RPM limit exceeded (${authResult.key.maxRpm}/min)` });
-      return;
     }
     // Concurrent in-flight ceiling (max_inflight). Acquired here so every
     // /v1 proxy path (chat/responses/embeddings/etc.) is covered; released on
     // response finish/close regardless of how the request ends.
     const inflightAllowed = tryAcquireManagedKeyInflight(authResult.key.id, authResult.key.maxInflight);
     if (!inflightAllowed) {
-      reply
+      return reply
         .code(429)
         .header('retry-after', '1')
         .send({ error: `API key concurrent request limit exceeded (${authResult.key.maxInflight})` });
-      return;
     }
     let inflightReleased = false;
     const releaseInflightOnce = () => {
@@ -195,8 +195,7 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
     reply.raw.once('close', releaseInflightOnce);
     const consumed = await consumeManagedKeyRequest(authResult.key.id);
     if (consumed === false) {
-      reply.code(403).send({ error: 'API key has exceeded request quota (lifetime or daily)' });
-      return;
+      return reply.code(403).send({ error: 'API key has exceeded request quota (lifetime or daily)' });
     }
   }
 

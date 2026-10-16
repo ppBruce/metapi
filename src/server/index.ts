@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import compress from '@fastify/compress';
 import fastifyStatic from '@fastify/static';
 import { isSpaShellFallbackCandidate } from './webSpaFallback.js';
+import { createNotFoundHandler } from './notFoundHandler.js';
 import { ensureEmptyBodyContentTypeParser } from './emptyBodyContentTypeParser.js';
 import { registerCompressedRequestBodySupport } from './services/requestBodyCompression.js';
 import {
@@ -415,26 +416,9 @@ if (existsSync(webDir)) {
       }
     },
   });
-  // SPA fallback
-  app.setNotFoundHandler(async (request, reply) => {
-    // Every branch must RETURN the reply. An async handler that sends and then
-    // resolves to undefined makes Fastify run the onSend chain twice whenever
-    // the chain is suspended by an async hook (we have three: the two
-    // capability hooks plus the security-header hook), because `reply.sent` is
-    // still false while the chain is pending — the second pass then hits
-    // ERR_HTTP_HEADERS_SENT on the already-written head. Returning the reply
-    // marks the response as handled and keeps the chain single-pass.
-    if (request.url.startsWith('/api/') || request.url.startsWith('/v1/')) {
-      return reply.code(404).send({ error: 'Not found' });
-    }
-    // Missing assets must 404 instead of receiving the SPA shell: a 200
-    // text/html body at a .js/.css URL is rejected as a MIME mismatch and
-    // hides the real cause (stale cached shell pointing at a deleted chunk).
-    if (!isSpaShellFallbackCandidate(request.url)) {
-      return reply.code(404).type('text/plain; charset=utf-8').send('Not found');
-    }
-    return reply.sendFile('index.html');
-  });
+  // SPA fallback — the three branches (and why each of them returns the reply)
+  // live in ./notFoundHandler.ts, which is covered by notFoundHandler.test.ts.
+  app.setNotFoundHandler(createNotFoundHandler({ isSpaShellFallbackCandidate }));
 }
 
 // Legacy video task rows stored upstream tokens in plaintext. Migrate them
