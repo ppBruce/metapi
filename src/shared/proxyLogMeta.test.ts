@@ -5,7 +5,7 @@ import { parseProxyLogMetadata } from './proxyLogMeta.js';
 describe('proxyLogMeta', () => {
   it('parses all supported proxy log prefixes', () => {
     expect(parseProxyLogMetadata(
-      '[client:codex] [session:turn-1] [trace:req-abc] [downstream:/v1/responses] [upstream:/responses] [usage:self-log] [code:endpoint_all_down] boom',
+      '[client:codex] [session:turn-1] [trace:req-abc] [downstream:/v1/responses] [upstream:/responses] [usage:self-log] [code:endpoint_all_down] [site:Aurora Relay] [status:502] boom',
     )).toEqual({
       clientKind: 'codex',
       sessionId: 'turn-1',
@@ -14,8 +14,34 @@ describe('proxyLogMeta', () => {
       upstreamPath: '/responses',
       usageSource: 'self-log',
       errorCode: 'endpoint_all_down',
+      siteLabel: 'Aurora Relay',
+      upstreamStatus: '502',
       messageText: 'boom',
     });
+  });
+
+  it('keeps the site/status locator tokens in the shared grammar', () => {
+    // The locator tokens sit between the identifying prefixes and the body, so
+    // the leading run is still stripped as one block and neither token leaks
+    // into the displayed message.
+    expect(parseProxyLogMetadata(
+      '[trace:r_1bcda25825e9] [downstream:/v1/embeddings] [site:Aurora Relay] [status:502] unknown error',
+    )).toEqual({
+      clientKind: null,
+      sessionId: null,
+      traceId: 'r_1bcda25825e9',
+      downstreamPath: '/v1/embeddings',
+      upstreamPath: null,
+      usageSource: null,
+      errorCode: null,
+      siteLabel: 'Aurora Relay',
+      upstreamStatus: '502',
+      messageText: 'unknown error',
+    });
+
+    // Status stays a raw string: `status:0` means "no upstream reply" and must
+    // survive parsing instead of collapsing into a falsy number.
+    expect(parseProxyLogMetadata('[status:0] upstream never answered').upstreamStatus).toBe('0');
   });
 
   it('keeps plain message text when no metadata prefixes exist', () => {
@@ -27,6 +53,8 @@ describe('proxyLogMeta', () => {
       upstreamPath: null,
       usageSource: null,
       errorCode: null,
+      siteLabel: null,
+      upstreamStatus: null,
       messageText: 'network timeout',
     });
   });
@@ -40,6 +68,8 @@ describe('proxyLogMeta', () => {
       upstreamPath: null,
       usageSource: null,
       errorCode: null,
+      siteLabel: null,
+      upstreamStatus: null,
       messageText: 'boom',
     });
 
@@ -51,6 +81,8 @@ describe('proxyLogMeta', () => {
       upstreamPath: null,
       usageSource: null,
       errorCode: null,
+      siteLabel: null,
+      upstreamStatus: null,
       messageText: 'boom',
     });
 
@@ -62,6 +94,8 @@ describe('proxyLogMeta', () => {
       upstreamPath: '/x',
       usageSource: null,
       errorCode: null,
+      siteLabel: null,
+      upstreamStatus: null,
       messageText: 'msg',
     });
 
@@ -73,6 +107,8 @@ describe('proxyLogMeta', () => {
       upstreamPath: null,
       usageSource: null,
       errorCode: null,
+      siteLabel: null,
+      upstreamStatus: null,
       messageText: '',
     });
   });

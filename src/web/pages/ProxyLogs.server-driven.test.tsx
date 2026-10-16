@@ -1051,4 +1051,103 @@ describe('ProxyLogs server-driven page', () => {
       root?.unmount();
     }
   });
+
+  it('renders the site/status locator of a failed row as structured fields, not raw token text', async () => {
+    const failedMessage = '[downstream:/v1/embeddings] [site:Aurora Relay] [status:502] unknown error';
+    const base = buildListResponse();
+    apiMock.getProxyLogs.mockResolvedValue(buildListResponse({
+      items: [{ ...base.items[0], status: 'failed', errorMessage: failedMessage }],
+    }));
+    apiMock.getProxyLogDetail.mockResolvedValue({
+      status: 'failed',
+      errorMessage: failedMessage,
+    });
+
+    let root!: WebTestRenderer;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const row = root!.root.find((node) => (
+        node.type === 'tr' && node.props['data-testid'] === 'proxy-log-row-101'
+      ));
+      await act(async () => {
+        row.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const rendered = JSON.stringify(root!.toJSON());
+      expect(rendered).toContain('上游站点');
+      expect(rendered).toContain('Aurora Relay');
+      expect(rendered).toContain('上游状态码');
+      expect(rendered).toContain('502');
+      // The tokens are part of the shared grammar now, so they are lifted out of
+      // the message body and rendered as their own fields instead of showing up
+      // as literal `[site:...]` / `[status:...]` text.
+      expect(rendered).not.toContain('[site:');
+      expect(rendered).not.toContain('[status:');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('shows the locator as mobile fields on a phone-width card', async () => {
+    const previousWidth = window.innerWidth;
+    window.innerWidth = 390;
+
+    const failedMessage = '[downstream:/v1/embeddings] [site:Aurora Relay] [status:502] unknown error';
+    const base = buildListResponse();
+    apiMock.getProxyLogs.mockResolvedValue(buildListResponse({
+      items: [{ ...base.items[0], status: 'failed', errorMessage: failedMessage }],
+    }));
+    // The expanded card renders the detail payload when it arrives, so the
+    // fixture has to carry the same locator-bearing message.
+    apiMock.getProxyLogDetail.mockResolvedValue({
+      status: 'failed',
+      errorMessage: failedMessage,
+    });
+
+    let root!: WebTestRenderer;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const expandButton = root!.root.findAll((node) => (
+        node.type === 'button' && collectText(node) === '详情'
+      ))[0];
+      await act(async () => {
+        expandButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const rendered = JSON.stringify(root!.toJSON());
+      expect(rendered).toContain('上游站点');
+      expect(rendered).toContain('Aurora Relay');
+      expect(rendered).toContain('上游状态码');
+      expect(rendered).toContain('502');
+      expect(rendered).not.toContain('[site:');
+      expect(rendered).not.toContain('[status:');
+    } finally {
+      window.innerWidth = previousWidth;
+      root?.unmount();
+    }
+  });
 });

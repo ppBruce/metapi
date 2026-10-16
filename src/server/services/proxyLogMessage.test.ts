@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   composeProxyLogMessage,
-  isUninformativeProxyLogBody,
+  parseProxyLogMessageMeta,
   proxyLogFailureLocator,
 } from './proxyLogMessage.js';
 
@@ -132,14 +132,19 @@ describe('composeProxyLogMessage failure locator', () => {
     })).toBe('[downstream:/v1/search] [status:503] unknown error');
   });
 
-  it('leaves an informative body byte-identical even when the locator is available', () => {
+  it('also locates a self-explaining body, which never names the site itself (behavior change: B)', () => {
+    // Behavior change (unified B+C): the locator used to be appended only when
+    // the body was uninformative, which left readable-but-anonymous rows — an
+    // upstream `{"error": ...}`, a classifier verdict — impossible to attribute
+    // to a site in the list. Every failed row now carries `[site:]` /
+    // `[status:]`; only the body's own bytes stay untouched.
     const upstreamJson = '{"error":{"message":"insufficient quota","type":"upstream_error"}}';
     expect(composeProxyLogMessage({
       downstreamPath: '/v1/embeddings',
       siteLabel: 'Aurora Relay',
       upstreamStatus: 429,
       errorMessage: upstreamJson,
-    })).toBe(`[downstream:/v1/embeddings] ${upstreamJson}`);
+    })).toBe(`[downstream:/v1/embeddings] [site:Aurora Relay] [status:429] ${upstreamJson}`);
 
     const classified = 'Upstream response matched failure keyword: quota exceeded';
     expect(composeProxyLogMessage({
@@ -148,7 +153,7 @@ describe('composeProxyLogMessage failure locator', () => {
       siteLabel: 'Aurora Relay',
       upstreamStatus: 429,
       errorMessage: classified,
-    })).toBe(`[downstream:/v1/chat/completions] [code:quota_or_credit] ${classified}`);
+    })).toBe(`[downstream:/v1/chat/completions] [code:quota_or_credit] [site:Aurora Relay] [status:429] ${classified}`);
 
     const modelVerdict = 'unsupported model: gpt-5.1-codex';
     expect(composeProxyLogMessage({
@@ -156,7 +161,19 @@ describe('composeProxyLogMessage failure locator', () => {
       siteLabel: 'Aurora Relay',
       upstreamStatus: 400,
       errorMessage: modelVerdict,
-    })).toBe(`[downstream:/v1/responses] ${modelVerdict}`);
+    })).toBe(`[downstream:/v1/responses] [site:Aurora Relay] [status:400] ${modelVerdict}`);
+  });
+
+  it('appends the locator after the prefixes even when the body repeats the tokens', () => {
+    // A retried row can be re-composed from a message that already carries the
+    // tokens: the parser lifts them back out of the body, so the caller's own
+    // site/status wins and no token is duplicated.
+    expect(composeProxyLogMessage({
+      downstreamPath: '/v1/chat/completions',
+      siteLabel: 'Relay Two',
+      upstreamStatus: 503,
+      errorMessage: '[site:Relay One] [status:502] unknown error',
+    })).toBe('[downstream:/v1/chat/completions] [site:Relay Two] [status:503] unknown error');
   });
 
   it('keeps the pre-change output byte-identical when no locator data is passed', () => {
@@ -215,22 +232,31 @@ describe('proxyLogFailureLocator', () => {
       ...proxyLogFailureLocator({ status: 'failed', siteName: 'Aurora Relay', upstreamStatus: 502 }),
     })).toBe('[downstream:/v1/images/generations] [site:Aurora Relay] [status:502] unknown error');
   });
-});
 
-describe('isUninformativeProxyLogBody', () => {
-  it('flags the bodies that give the operator nothing to act on', () => {
-    expect(isUninformativeProxyLogBody('')).toBe(true);
-    expect(isUninformativeProxyLogBody('   ')).toBe(true);
-    expect(isUninformativeProxyLogBody(null)).toBe(true);
-    expect(isUninformativeProxyLogBody('unknown error')).toBe(true);
-    expect(isUninformativeProxyLogBody('Unknown Error')).toBe(true);
-    expect(isUninformativeProxyLogBody('  unknown   error  ')).toBe(true);
-    expect(isUninformativeProxyLogBody('Upstream returned empty content')).toBe(true);
-  });
+  it('emits tokens the shared parser reads back as formal fields (round trip)', () => {
+    const composed = composeProxyLogMessage({
+      traceId: 'r_1bcda25825e9',
+      downstreamPath: '/v1/embeddings',
+      ...proxyLogFailureLocator({ status: 'failed', siteName: 'Aurora Relay', upstreamStatus: 502 }),
+      errorMessage: 'unknown error',
+    }) as string;
 
-  it('does not flag bodies that already name a cause', () => {
-    expect(isUninformativeProxyLogBody('unknown error: upstream channel 42 disabled')).toBe(false);
-    expect(isUninformativeProxyLogBody('{"error":{"message":"unknown error"}}')).toBe(false);
-    expect(isUninformativeProxyLogBody('fetch failed: ECONNREFUSED')).toBe(false);
+    expect(composed).toBe(
+      '[trace:r_1bcda25825e9] [downstream:/v1/embeddings] [site:Aurora Relay] [status:502] unknown error',
+    );
+    // The locator is a first-class token now: it round-trips through the shared
+    // parser into its own fields and out of the displayed message text.
+    expect(parseProxyLogMessageMeta(composed)).toEqual({
+      clientKind: null,
+      sessionId: null,
+      traceId: 'r_1bcda25825e9',
+      downstreamPath: '/v1/embeddings',
+      upstreamPath: null,
+      usageSource: null,
+      errorCode: null,
+      siteLabel: 'Aurora Relay',
+      upstreamStatus: '502',
+      messageText: 'unknown error',
+    });
   });
 });

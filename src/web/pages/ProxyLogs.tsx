@@ -1749,6 +1749,22 @@ export default function ProxyLogs() {
                           ) || '--'
                         }
                       />
+                      {/* Locator tokens `[site:]` / `[status:]`, rendered like
+                          every other token field in this card: they are the only
+                          place a failed row's answering site and upstream status
+                          are visible on a phone. */}
+                      {pathMeta.siteLabel ? (
+                        <MobileField
+                          label="上游站点"
+                          value={pathMeta.siteLabel}
+                        />
+                      ) : null}
+                      {pathMeta.upstreamStatus ? (
+                        <MobileField
+                          label="上游状态码"
+                          value={pathMeta.upstreamStatus}
+                        />
+                      ) : null}
                       {detailState?.loading && (
                         <div style={{ color: 'var(--color-text-muted)' }}>
                           加载详情中...
@@ -2546,6 +2562,77 @@ export default function ProxyLogs() {
                                     </span>
                                   )}
                                 </div>
+
+                                {/* Locator tokens `[site:]` / `[status:]`: same
+                                    chip treatment as the request paths above,
+                                    because they answer the same question — where
+                                    did this attempt actually go — for a failed
+                                    row whose message text does not say. */}
+                                {detail && pathMeta.siteLabel ? (
+                                  <div
+                                    style={{
+                                      display: 'flex',
+                                      gap: 6,
+                                      alignItems: 'center',
+                                    }}
+                                  >
+                                    <span
+                                      style={{
+                                        fontWeight: 600,
+                                        color: 'var(--color-primary)',
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      上游站点
+                                    </span>
+                                    <code
+                                      style={{
+                                        fontFamily: 'var(--font-mono)',
+                                        fontSize: 12,
+                                        background: 'var(--color-bg-card)',
+                                        padding: '1px 8px',
+                                        borderRadius: 6,
+                                        border:
+                                          '1px solid var(--color-border-light)',
+                                      }}
+                                    >
+                                      {pathMeta.siteLabel}
+                                    </code>
+                                  </div>
+                                ) : null}
+
+                                {detail && pathMeta.upstreamStatus ? (
+                                  <div
+                                    style={{
+                                      display: 'flex',
+                                      gap: 6,
+                                      alignItems: 'center',
+                                    }}
+                                  >
+                                    <span
+                                      style={{
+                                        fontWeight: 600,
+                                        color: 'var(--color-primary)',
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      上游状态码
+                                    </span>
+                                    <code
+                                      style={{
+                                        fontFamily: 'var(--font-mono)',
+                                        fontSize: 12,
+                                        background: 'var(--color-bg-card)',
+                                        padding: '1px 8px',
+                                        borderRadius: 6,
+                                        border:
+                                          '1px solid var(--color-border-light)',
+                                      }}
+                                    >
+                                      {pathMeta.upstreamStatus}
+                                    </code>
+                                  </div>
+                                ) : null}
 
                                 {detail &&
                                   pathMeta.errorMessage.trim().length > 0 && (

@@ -7,8 +7,10 @@ export function parseProxyLogMetadata(rawMessage) {
   const upstreamMatch = text.match(/\[upstream:([^\]]+)\]/i);
   const usageMatch = text.match(/\[usage:([^\]]+)\]/i);
   const codeMatch = text.match(/\[code:([^\]]+)\]/i);
+  const siteMatch = text.match(/\[site:([^\]]+)\]/i);
+  const statusMatch = text.match(/\[status:([^\]]+)\]/i);
   const messageText = text.replace(
-    /^\s*(?:\[(?:client|session|trace|downstream|upstream|usage|code):[^\]]+\]\s*)+/i,
+    /^\s*(?:\[(?:client|session|trace|downstream|upstream|usage|code|site|status):[^\]]+\]\s*)+/i,
     '',
   ).trim();
 
@@ -20,6 +22,8 @@ export function parseProxyLogMetadata(rawMessage) {
     upstreamPath: upstreamMatch?.[1]?.trim() || null,
     usageSource: usageMatch?.[1]?.trim() || null,
     errorCode: codeMatch?.[1]?.trim() || null,
+    siteLabel: siteMatch?.[1]?.trim() || null,
+    upstreamStatus: statusMatch?.[1]?.trim() || null,
     messageText,
   };
 }
