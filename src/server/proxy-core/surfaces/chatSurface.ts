@@ -380,7 +380,7 @@ export async function handleChatSurfaceRequest(
       };
       await finalizeDebugFailure(502, guardPayload, null);
       sendReplyIfWritable(reply, 502, guardPayload);
-      return;
+      return reply;
     }
     if (retryCount > maxRetries && !recoveryPass) {
       if (allFailuresRecovering && config.proxyFailoverBackoffMs > 0) {
@@ -785,7 +785,7 @@ export async function handleChatSurfaceRequest(
           type: 'server_error',
         },
       });
-      return;
+      return reply;
     }
     const channelLease = leaseResult.lease;
 
@@ -961,7 +961,7 @@ export async function handleChatSurfaceRequest(
                 finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(502, failureReason),
                 upstreamPath: successfulUpstreamPath,
               }) === 'retried') continue;
-              return;
+              return reply;
             }
             await recordStreamSuccess(latency);
             await finalizeDebugSuccess(
@@ -1077,7 +1077,7 @@ export async function handleChatSurfaceRequest(
               successfulUpstreamPath,
             );
             sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-            return;
+            return reply;
           }
 
           const streamResult = streamSession.consumeUpstreamFinalPayload(fallbackData, fallbackText, streamResponse);
@@ -1117,7 +1117,7 @@ export async function handleChatSurfaceRequest(
               finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(502, failureReason),
               upstreamPath: successfulUpstreamPath,
             }) === 'retried') continue;
-            return;
+            return reply;
           }
           await recordStreamSuccess(latency);
           await finalizeDebugSuccess(
@@ -1199,7 +1199,7 @@ export async function handleChatSurfaceRequest(
               finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(502, failureReason),
               upstreamPath: successfulUpstreamPath,
             }) === 'retried') continue;
-            return;
+            return reply;
           }
 
           // Once SSE has been hijacked and streamed downstream, we can no longer
@@ -1326,7 +1326,7 @@ export async function handleChatSurfaceRequest(
           successfulUpstreamPath,
         );
         sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-        return;
+        return reply;
       }
       const normalizedFinal = isGeminiNativeRuntimePath(successfulUpstreamPath)
         ? buildOpenAiFinalFromGeminiNativePayload(upstreamData, modelName, rawText)
@@ -1414,7 +1414,7 @@ export async function handleChatSurfaceRequest(
         }
         await finalizeDebugFailure(endpointFailureStatus || 400, payload, null);
         sendReplyIfWritable(reply, endpointFailureStatus || 400, payload);
-        return;
+        return reply;
       }
       if (isSiteApiEndpointFailure) {
         const failureOutcome = await failureToolkit.handleUpstreamFailure({
@@ -1480,7 +1480,7 @@ export async function handleChatSurfaceRequest(
           null,
         );
         sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-        return;
+        return reply;
       }
       const failureOutcome = await failureToolkit.handleExecutionError({
         selected,
@@ -1537,7 +1537,7 @@ export async function handleChatSurfaceRequest(
         null,
       );
       sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-      return;
+      return reply;
       } finally {
         channelLease.release();
       }

@@ -1525,7 +1525,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         }
         await finalizeDebugFailure(lastStatus, parseSurfaceProxyDebugTextPayload(lastText), upstreamPath || null);
         sendReplyIfWritable(reply, lastStatus, lastText);
-        return;
+        return reply;
       }
     }
   };

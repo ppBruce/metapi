@@ -305,7 +305,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         };
         await finalizeDebugFailure(502, guardPayload, null);
         sendReplyIfWritable(reply, 502, guardPayload);
-        return;
+        return reply;
       }
       if (retryCount > maxRetries && !recoveryPass) {
         if (allFailuresRecovering && config.proxyFailoverBackoffMs > 0) {
@@ -913,7 +913,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             type: 'server_error',
           },
         });
-        return;
+        return reply;
       }
       const channelLease = leaseResult.lease;
 
@@ -1170,7 +1170,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	                successfulUpstreamPath,
 	              );
 	              sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-	              return;
+	              return reply;
             }
 
             startSseResponse();
@@ -1500,7 +1500,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	            successfulUpstreamPath,
 	          );
 	          sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-	          return;
+	          return reply;
         }
         const normalized = openAiResponsesTransformer.transformFinalResponse(
           upstreamData,
@@ -1641,7 +1641,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               null,
             );
             sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-            return;
+            return reply;
           }
 	        const failureOutcome = await failureToolkit.handleExecutionError({
 	          selected,
@@ -1700,7 +1700,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	            null,
           );
 		        sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-		        return;
+		        return reply;
 	      } finally {
 	        channelLease.release();
 	      }
