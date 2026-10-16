@@ -1,11 +1,114 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { describe, expect, it, beforeAll, beforeEach, afterAll } from 'vitest';
+import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 
+// --------------------------------------------------------------- writeHead probe
+// `http.ServerResponse.prototype.writeHead` is the point where a second onSend
+// pass becomes visible: it calls writeHead again on a response whose head is
+// already out. Counting calls per response is the direct, framework-independent
+// observation of "the chain ran twice".
+interface WriteHeadRecord {
+  response: http.ServerResponse;
+  statusCode: number;
+  headersAlreadySent: boolean;
+}
+
+type WriteHeadProbe = (
+  this: http.ServerResponse,
+  statusCode: number,
+  ...rest: unknown[]
+) => http.ServerResponse;
+
+const writeHeadRecords: WriteHeadRecord[] = [];
+const originalWriteHead = http.ServerResponse.prototype.writeHead;
+
+function probeWriteHead(
+  this: http.ServerResponse,
+  statusCode: number,
+  ...rest: unknown[]
+): http.ServerResponse {
+  writeHeadRecords.push({ response: this, statusCode, headersAlreadySent: this.headersSent });
+  return Reflect.apply(originalWriteHead, this, [statusCode, ...rest]) as http.ServerResponse;
+}
+
+const HEADER_ERROR_MARKERS = ['ERR_HTTP_HEADERS_SENT', 'FST_ERR_REP_ALREADY_SENT'] as const;
+
+function errorMarkersIn(logs: readonly string[]): string[] {
+  const text = logs.join('\n');
+  return HEADER_ERROR_MARKERS.filter((marker) => text.includes(marker));
+}
+
+/**
+ * App shaped like production: two promise-returning onSend hooks hold the
+ * response chain open across a macrotask while the handler promise settles —
+ * the precondition of the "already sent, then resolved undefined" defect. A
+ * one-microtask chain usually loses that race in a test and would let the buggy
+ * shape pass.
+ */
+function buildHookedApp(): { app: FastifyInstance; logs: string[] } {
+  const logs: string[] = [];
+  const app = Fastify({
+    logger: {
+      level: 'trace',
+      stream: { write: (line: string) => logs.push(line) },
+    },
+  });
+  const holdChainOpen = async <T>(payload: T): Promise<T> => {
+    await new Promise((resolve) => setImmediate(resolve));
+    return payload;
+  };
+  app.addHook('onSend', async (_request, reply, payload) => {
+    reply.header('x-test-onsend-1', '1');
+    return holdChainOpen(payload);
+  });
+  app.addHook('onSend', async (_request, reply, payload) => {
+    reply.header('x-test-onsend-2', '1');
+    return holdChainOpen(payload);
+  });
+  return { app, logs };
+}
+
+interface InjectedOutcome {
+  status: number;
+  body: string;
+  writeHeads: WriteHeadRecord[];
+}
+
+async function injectAndDrain(
+  app: FastifyInstance,
+  url: string,
+  headers: Record<string, string>,
+): Promise<InjectedOutcome> {
+  const writeHeadStart = writeHeadRecords.length;
+  const response = await app.inject({ method: 'GET', url, headers });
+  // A stray second onSend pass reports its failure right after the response
+  // reaches the client; let the loop drain before snapshotting.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  return {
+    status: response.statusCode,
+    body: response.body,
+    writeHeads: writeHeadRecords.slice(writeHeadStart),
+  };
+}
+
 type DbModule = typeof import('../../db/index.js');
+
+beforeAll(() => {
+  (http.ServerResponse.prototype as unknown as { writeHead: WriteHeadProbe }).writeHead = probeWriteHead;
+});
+
+afterAll(() => {
+  (http.ServerResponse.prototype as unknown as { writeHead: WriteHeadProbe }).writeHead =
+    originalWriteHead as unknown as WriteHeadProbe;
+});
+
+beforeEach(() => {
+  writeHeadRecords.length = 0;
+});
 
 describe('stats proxy logs routes', () => {
   let app: FastifyInstance;
@@ -1022,5 +1125,64 @@ describe('stats proxy logs routes', () => {
     );
     expect(standalone?.status).toBe('success');
     expect(standalone?.retryCount).toBe(0);
+  });
+
+  it('writes the 406 head once and logs no header errors on the SSE stream route', async () => {
+    // /api/stats/proxy-logs/stream answers 406 unless the client asks for
+    // text/event-stream. The app carries the two promise-returning onSend hooks
+    // that keep the response chain parked while the handler promise settles —
+    // the shape that turned the pre-fix `send(...); return;` into a second
+    // onSend pass (ERR_HTTP_HEADERS_SENT + FST_ERR_REP_ALREADY_SENT).
+    const { app: streamApp, logs } = buildHookedApp();
+    const { statsRoutes } = await import('./stats.js');
+    await streamApp.register(statsRoutes);
+
+    try {
+      const outcome = await injectAndDrain(streamApp, '/api/stats/proxy-logs/stream', {
+        accept: 'application/json',
+      });
+
+      // The client keeps getting the real 406.
+      expect(outcome.status).toBe(406);
+      expect(JSON.parse(outcome.body) as { message: string }).toEqual({
+        message: 'This endpoint requires text/event-stream',
+      });
+
+      // ...but the response must have been written exactly once.
+      expect(outcome.writeHeads).toHaveLength(1);
+      expect(outcome.writeHeads[0]).toMatchObject({ statusCode: 406, headersAlreadySent: false });
+      expect(errorMarkersIn(logs)).toEqual([]);
+    } finally {
+      await streamApp.close();
+    }
+  });
+
+  it('the pre-fix send-then-resolve-undefined handler shape does trip both markers (detector has teeth)', async () => {
+    // Same app shape, but the handler keeps the pre-fix form: `send(...)`
+    // followed by resolving to undefined. If this stops producing the two
+    // markers, the detector above has lost its power and the regression test
+    // must not be trusted until this counter-example is fixed.
+    const { app: preFixApp, logs } = buildHookedApp();
+    preFixApp.get('/pre-fix-406', async (_request, reply) => {
+      reply.code(406).send({ message: 'This endpoint requires text/event-stream' });
+      return;
+    });
+
+    try {
+      const outcome = await injectAndDrain(preFixApp, '/pre-fix-406', {
+        accept: 'application/json',
+      });
+
+      // The client still saw the correct 406 — the noise is server-side only.
+      expect(outcome.status).toBe(406);
+      expect(errorMarkersIn(logs)).toEqual([
+        'ERR_HTTP_HEADERS_SENT',
+        'FST_ERR_REP_ALREADY_SENT',
+      ]);
+      expect(outcome.writeHeads.length).toBeGreaterThanOrEqual(2);
+      expect(outcome.writeHeads.some((call) => call.headersAlreadySent)).toBe(true);
+    } finally {
+      await preFixApp.close();
+    }
   });
 });

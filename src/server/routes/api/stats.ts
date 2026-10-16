@@ -1040,8 +1040,10 @@ export async function statsRoutes(app: FastifyInstance) {
     const raw = reply.raw;
     const acceptHeader = String(request.headers.accept || '');
     if (!acceptHeader.includes('text/event-stream') && acceptHeader !== '*/*') {
-      reply.code(406).send({ message: 'This endpoint requires text/event-stream' });
-      return;
+      // Return the reply instead of falling through with undefined: the handler
+      // promise then stays pending until the 406 has flushed, so the onSend
+      // chain (suspended on the async capability/security hooks) never restarts.
+      return reply.code(406).send({ message: 'This endpoint requires text/event-stream' });
     }
 
     reply.hijack();
