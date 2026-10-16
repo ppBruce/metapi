@@ -19,7 +19,7 @@ import {
   type ProxyFailureDisposition,
 } from '../../services/siteFailureClassification.js';
 import { mapUpstreamErrorForClient } from '../../shared/siteProtocolProfile.js';
-import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
+import { composeProxyLogMessage, proxyLogFailureLocator } from '../../services/proxyLogMessage.js';
 import { resolveProxyLogBilling } from '../../services/proxyBilling.js';
 import type { DownstreamClientContext } from '../downstreamClientContext.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
@@ -227,6 +227,8 @@ export async function writeSurfaceProxyLog(input: {
   selected: {
     channel: { routeId: number | null; id: number | null; tokenId?: number | null };
     account: { id: number | null };
+    /** Site identity for the [site:] failure locator (name only; no DB read). */
+    site?: { id?: number | null; name?: string | null } | null;
     actualModel?: string | null;
   };
   modelRequested: string;
@@ -267,6 +269,11 @@ export async function writeSurfaceProxyLog(input: {
       upstreamPath: input.upstreamPath || null,
       usageSource: input.usageSource || null,
       errorCode: inferredErrorCode,
+      ...proxyLogFailureLocator({
+        status: input.status,
+        siteName: input.selected.site?.name ?? null,
+        upstreamStatus: input.httpStatus,
+      }),
       errorMessage: input.errorMessage,
     });
     await insertProxyLog({

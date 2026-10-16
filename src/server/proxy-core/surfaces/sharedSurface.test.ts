@@ -82,9 +82,15 @@ vi.mock('../../services/routeRefreshWorkflow.js', () => ({
   },
 }));
 
-vi.mock('../../services/proxyLogMessage.js', () => ({
-  composeProxyLogMessage: (...args: unknown[]) => composeProxyLogMessageMock(...args),
-}));
+vi.mock('../../services/proxyLogMessage.js', async (importOriginal) => {
+  // keep composeProxyLogMessage mocked (call arguments are asserted below) but
+  // expose the real pure locator so the failure path behaves like production
+  const actual = await importOriginal<typeof import('../../services/proxyLogMessage.js')>();
+  return {
+    composeProxyLogMessage: (...args: unknown[]) => composeProxyLogMessageMock(...args),
+    proxyLogFailureLocator: actual.proxyLogFailureLocator,
+  };
+});
 
 vi.mock('../../services/localTimeService.js', () => ({
   formatUtcSqlDateTime: (...args: unknown[]) => formatUtcSqlDateTimeMock(...args),
@@ -578,6 +584,10 @@ describe('selectSurfaceChannelForAttempt', () => {
       upstreamPath: '/v1/responses',
       usageSource: 'self-log',
       errorCode: 'upstream_5xx',
+      // Locator: this fixture's selected channel has no site object, so only the
+      // upstream status is known. The composer renders [status:] on the row.
+      siteLabel: null,
+      upstreamStatus: 502,
       errorMessage: 'upstream failed',
     });
     expect(insertProxyLogMock).toHaveBeenCalledWith({

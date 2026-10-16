@@ -15,7 +15,7 @@ import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from '../../se
 import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import { getDownstreamRoutingPolicy } from '../../services/downstreamPolicyRequest.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
-import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
+import { composeProxyLogMessage, proxyLogFailureLocator } from '../../services/proxyLogMessage.js';
 import { createRequestTraceId } from '../../services/requestTraceId.js';
 import {
   buildUpstreamEndpointRequest,
@@ -276,6 +276,11 @@ async function logProxy(
       traceHint: clientContext?.traceHint || null,
       traceId,
       downstreamPath,
+      ...proxyLogFailureLocator({
+        status,
+        siteName: selected.site?.name ?? null,
+        upstreamStatus: httpStatus,
+      }),
       upstreamPath,
       errorMessage,
     });

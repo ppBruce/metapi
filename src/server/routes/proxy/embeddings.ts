@@ -10,7 +10,7 @@ import { parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
-import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
+import { composeProxyLogMessage, proxyLogFailureLocator } from '../../services/proxyLogMessage.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { resolveProxyLogBilling } from './proxyBilling.js';
 import { getProxyAuthContext } from '../../middleware/auth.js';
@@ -273,6 +273,11 @@ async function logProxy(
       traceHint: clientContext?.traceHint || null,
       traceId: requestTraceId || null,
       downstreamPath,
+      ...proxyLogFailureLocator({
+        status,
+        siteName: selected.site?.name ?? null,
+        upstreamStatus: httpStatus,
+      }),
       usageSource,
       errorMessage,
     });

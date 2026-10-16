@@ -39,9 +39,15 @@ vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldInPlaceRetryEmptyContentOnce: () => false,
 }));
 
-vi.mock('../../services/proxyLogMessage.js', () => ({
-  composeProxyLogMessage: (...args: unknown[]) => composeProxyLogMessageMock(...args),
-}));
+vi.mock('../../services/proxyLogMessage.js', async (importOriginal) => {
+  // keep composeProxyLogMessage mocked (call arguments are asserted below) but
+  // expose the real pure locator so the failure path behaves like production
+  const actual = await importOriginal<typeof import('../../services/proxyLogMessage.js')>();
+  return {
+    composeProxyLogMessage: (...args: unknown[]) => composeProxyLogMessageMock(...args),
+    proxyLogFailureLocator: actual.proxyLogFailureLocator,
+  };
+});
 
 vi.mock('../../services/proxyBilling.js', () => ({
   resolveProxyLogBilling: vi.fn(),
