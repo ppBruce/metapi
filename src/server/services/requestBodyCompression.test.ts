@@ -1,13 +1,17 @@
-import { gunzipSync } from 'node:zlib';
+import { gunzipSync, zstdDecompressSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   REQUEST_BODY_COMPRESSION_MIN_BYTES,
   REQUEST_BODY_ENCODING_CAPABILITY_HEADER,
+  REQUEST_BODY_GZIP_ENCODING,
+  REQUEST_BODY_ZSTD_ENCODING,
   __getRequestBodyCompressionStatsForTests,
   __resetRequestBodyCompressionForTests,
+  advertisedRequestBodyEncodings,
   learnUpstreamRequestBodyEncoding,
   maybeCompressUpstreamRequestBody,
   resolveRequestOrigin,
+  resolveUpstreamRequestBodyEncoding,
   supportsCompressedRequestBody,
   toPlainHeaderRecord,
 } from './requestBodyCompression.js';
@@ -59,6 +63,56 @@ describe('upstream request body compression (sender)', () => {
     // The caller's header object stays untouched.
     expect(headers['content-encoding']).toBeUndefined();
     expect(headers['content-length']).toBe(String(Buffer.byteLength(bigBody)));
+  });
+
+  it('prefers zstd when the origin advertises both encodings', async () => {
+    learnUpstreamRequestBodyEncoding(ORIGIN, advertisement('zstd, gzip'));
+    expect(resolveUpstreamRequestBodyEncoding(ORIGIN)).toBe(REQUEST_BODY_ZSTD_ENCODING);
+
+    const result = await maybeCompressUpstreamRequestBody({
+      origin: ORIGIN,
+      headers: { 'content-type': 'application/json' },
+      bodyText: bigBody,
+    });
+
+    expect(result.compressed).toBe(true);
+    expect(result.headers['content-encoding']).toBe(REQUEST_BODY_ZSTD_ENCODING);
+    expect(zstdDecompressSync(result.body as Buffer).toString()).toBe(bigBody);
+  });
+
+  it('sends zstd to a peer that advertises zstd only', async () => {
+    learnUpstreamRequestBodyEncoding(ORIGIN, advertisement('zstd'));
+    const result = await maybeCompressUpstreamRequestBody({
+      origin: ORIGIN,
+      headers: {},
+      bodyText: bigBody,
+    });
+    expect(result.compressed).toBe(true);
+    expect(result.headers['content-encoding']).toBe(REQUEST_BODY_ZSTD_ENCODING);
+  });
+
+  it('downgrades to gzip when a peer stops advertising zstd', async () => {
+    learnUpstreamRequestBodyEncoding(ORIGIN, advertisement('zstd, gzip'));
+    expect(resolveUpstreamRequestBodyEncoding(ORIGIN)).toBe(REQUEST_BODY_ZSTD_ENCODING);
+
+    // Rollback on the peer: it now advertises gzip only.
+    learnUpstreamRequestBodyEncoding(ORIGIN, advertisement('gzip'));
+    expect(resolveUpstreamRequestBodyEncoding(ORIGIN)).toBe(REQUEST_BODY_GZIP_ENCODING);
+
+    const result = await maybeCompressUpstreamRequestBody({
+      origin: ORIGIN,
+      headers: {},
+      bodyText: bigBody,
+    });
+    expect(result.headers['content-encoding']).toBe(REQUEST_BODY_GZIP_ENCODING);
+    expect(gunzipSync(result.body as Buffer).toString()).toBe(bigBody);
+  });
+
+  it('advertises (and therefore uses) zstd only where the codec exists', () => {
+    const { zstdAvailable } = __getRequestBodyCompressionStatsForTests();
+    expect(advertisedRequestBodyEncodings()).toEqual(
+      zstdAvailable ? [REQUEST_BODY_ZSTD_ENCODING, REQUEST_BODY_GZIP_ENCODING] : [REQUEST_BODY_GZIP_ENCODING],
+    );
   });
 
   it('does not compress bodies below the size threshold', async () => {
