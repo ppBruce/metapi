@@ -1,11 +1,11 @@
 import {
   constants as zlibConstants,
-  createGunzip,
-  createZstdDecompress,
+  gunzip as gunzipCallback,
   gzip as gzipCallback,
   zstdCompress as zstdCompressCallback,
+  zstdDecompress as zstdDecompressCallback,
 } from 'node:zlib';
-import { Transform, type TransformCallback } from 'node:stream';
+import { Readable, type Readable as ReadableStream } from 'node:stream';
 import { promisify } from 'node:util';
 import type { FastifyInstance } from 'fastify';
 
@@ -57,11 +57,21 @@ export const REQUEST_BODY_COMPRESSION_MIN_BYTES = 4096;
 /** Zip-bomb guard: hard cap on the decompressed size of an inbound body. */
 export const MAX_DECOMPRESSED_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
 
+/**
+ * Memory guard for the receiving side: the largest compressed body we buffer
+ * before decoding. Decompression happens in the `preParsing` hook, so the input
+ * must be materialized first; this cap keeps an unauthenticated peer from making
+ * us buffer unbounded data. Legitimate cascade bodies are a few MB at most.
+ */
+export const MAX_COMPRESSED_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
+
 /** Bounded registry of origins that advertised support (LRU by recency). */
 const CAPABILITY_CACHE_MAX_ENTRIES = 512;
 
 const gzipAsync = promisify(gzipCallback);
 const zstdCompressAsync = promisify(zstdCompressCallback);
+const gunzipAsync = promisify(gunzipCallback);
+const zstdDecompressAsync = promisify(zstdDecompressCallback);
 
 /**
  * gzip always exists in `node:zlib`; zstd landed in Node 22.15 / 23.8 and this
@@ -69,7 +79,7 @@ const zstdCompressAsync = promisify(zstdCompressCallback);
  * rather than crashing if it is ever loaded on an older runtime.
  */
 const ZSTD_CODEC_AVAILABLE =
-  typeof zstdCompressCallback === 'function' && typeof createZstdDecompress === 'function';
+  typeof zstdCompressCallback === 'function' && typeof zstdDecompressCallback === 'function';
 
 /** Encodings this process can advertise for inbound request bodies. */
 export function advertisedRequestBodyEncodings(): RequestBodyEncoding[] {
@@ -82,6 +92,7 @@ export function advertisedRequestBodyEncodings(): RequestBodyEncoding[] {
 const supportedOrigins = new Map<string, RequestBodyEncoding>();
 
 let maxDecompressedRequestBodyBytes = MAX_DECOMPRESSED_REQUEST_BODY_BYTES;
+let maxCompressedRequestBodyBytes = MAX_COMPRESSED_REQUEST_BODY_BYTES;
 
 export type UpstreamRequestBody = {
   headers: Record<string, string>;
@@ -248,26 +259,6 @@ function toStatusError(message: string, statusCode: number, code: string): Error
   return error;
 }
 
-function createDecompressedBodyLimitTransform(): Transform {
-  let total = 0;
-  return new Transform({
-    transform(chunk: Buffer, _encoding: string, callback: TransformCallback) {
-      total += chunk.length;
-      if (total > maxDecompressedRequestBodyBytes) {
-        callback(
-          toStatusError(
-            'Compressed request body exceeds the decompression limit',
-            413,
-            'FST_ERR_CTP_BODY_TOO_LARGE',
-          ),
-        );
-        return;
-      }
-      callback(null, chunk);
-    },
-  });
-}
-
 /** Decode a `Content-Encoding` request header into a supported encoding. */
 export function parseRequestBodyEncoding(value: unknown): RequestBodyEncoding | null {
   if (typeof value !== 'string' || value.length === 0) return null;
@@ -291,6 +282,71 @@ export function parseRequestBodyEncoding(value: unknown): RequestBodyEncoding | 
 }
 
 /**
+ * Read a request payload into memory, refusing to buffer more than the cap.
+ * `for await` also surfaces client aborts and stream failures here, so they stay
+ * inside the hook instead of escaping as an unhandled 'error' event.
+ */
+async function readRequestBodyBuffer(
+  payload: ReadableStream,
+  limitBytes: number,
+): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of payload) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    total += buffer.length;
+    if (total > limitBytes) {
+      payload.destroy();
+      throw toStatusError(
+        'Compressed request body exceeds the accepted size',
+        413,
+        'FST_ERR_CTP_BODY_TOO_LARGE',
+      );
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Decode a buffered compressed body, capping the decompressed size. Failures are
+ * reported as hook rejections, which Fastify answers with 400/413.
+ *
+ * This replaced a streaming implementation that piped a decoder into the parser
+ * and destroyed the returned stream on failure. That version crashed the process
+ * with an unhandled 'error' whenever the decode failed before the parser had
+ * attached its listeners — reachable unauthenticated through the tunnel with a
+ * malformed `Content-Encoding: gzip` body, i.e. a remote DoS.
+ */
+async function decodeRequestBodyBuffer(
+  encoding: RequestBodyEncoding,
+  compressed: Buffer,
+): Promise<Buffer> {
+  const options = { maxOutputLength: maxDecompressedRequestBodyBytes };
+  try {
+    return encoding === REQUEST_BODY_ZSTD_ENCODING
+      ? await zstdDecompressAsync(compressed, options)
+      : await gunzipAsync(compressed, options);
+  } catch (error) {
+    const code = (error as { code?: string } | null)?.code;
+    if (code === 'ERR_BUFFER_TOO_LARGE') {
+      throw toStatusError(
+        'Compressed request body exceeds the decompression limit',
+        413,
+        'FST_ERR_CTP_BODY_TOO_LARGE',
+      );
+    }
+    throw toStatusError(
+      `Failed to decompress ${encoding} request body: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      400,
+      'FST_ERR_CTP_INVALID_MEDIA_TYPE',
+    );
+  }
+}
+
+/**
  * Receiver side: decode `Content-Encoding: zstd|gzip` request bodies and
  * advertise the capability. Inert for every request that does not declare the
  * header, so existing clients see byte-identical behaviour.
@@ -300,6 +356,11 @@ export function registerCompressedRequestBodySupport(app: FastifyInstance): void
   if (target.__metapiRequestBodyCompressionRegistered) return;
 
   app.addHook('onSend', async (_request, reply, payload) => {
+    // Fastify runs onSend hooks LIFO, so a plugin registered later (e.g.
+    // @fastify/compress) can already have committed the response. Setting a
+    // header then throws ERR_HTTP_HEADERS_SENT, which only produces log noise:
+    // skip it instead of failing the response.
+    if (reply.raw?.headersSent) return payload;
     reply.header(
       REQUEST_BODY_ENCODING_CAPABILITY_HEADER,
       advertisedRequestBodyEncodings().join(', '),
@@ -309,28 +370,19 @@ export function registerCompressedRequestBodySupport(app: FastifyInstance): void
 
   app.addHook('preParsing', async (request, _reply, payload) => {
     const encoding = parseRequestBodyEncoding(request.headers['content-encoding']);
-    if (!encoding) return payload;
+    if (!encoding || !payload) return payload;
 
-    // The decoded stream is what the content type parsers must see, and its
-    // length differs from the compressed one.
+    // The decoded body is what the content type parsers must see, and its length
+    // differs from the compressed one.
     delete request.headers['content-encoding'];
     delete request.headers['content-length'];
 
-    const decoder =
-      encoding === REQUEST_BODY_ZSTD_ENCODING ? createZstdDecompress() : createGunzip();
-    const limited = createDecompressedBodyLimitTransform();
-    decoder.on('error', (error: unknown) => {
-      limited.destroy(
-        toStatusError(
-          `Failed to decompress ${encoding} request body: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          400,
-          'FST_ERR_CTP_INVALID_MEDIA_TYPE',
-        ),
-      );
-    });
-    return payload.pipe(decoder).pipe(limited);
+    const compressed = await readRequestBodyBuffer(
+      payload as ReadableStream,
+      maxCompressedRequestBodyBytes,
+    );
+    const decoded = await decodeRequestBodyBuffer(encoding, compressed);
+    return Readable.from([decoded]);
   });
 
   target.__metapiRequestBodyCompressionRegistered = true;
@@ -340,10 +392,15 @@ export function registerCompressedRequestBodySupport(app: FastifyInstance): void
 export function __resetRequestBodyCompressionForTests(): void {
   supportedOrigins.clear();
   maxDecompressedRequestBodyBytes = MAX_DECOMPRESSED_REQUEST_BODY_BYTES;
+  maxCompressedRequestBodyBytes = MAX_COMPRESSED_REQUEST_BODY_BYTES;
 }
 
 export function __setMaxDecompressedRequestBodyBytesForTests(bytes: number): void {
   maxDecompressedRequestBodyBytes = bytes;
+}
+
+export function __setMaxCompressedRequestBodyBytesForTests(bytes: number): void {
+  maxCompressedRequestBodyBytes = bytes;
 }
 
 export function __getRequestBodyCompressionStatsForTests(): {
