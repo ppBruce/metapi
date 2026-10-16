@@ -36,8 +36,15 @@ export const REQUEST_BODY_UPLOAD_PART_COUNT_HEADER = 'x-metapi-body-upload-part-
 export const REQUEST_BODY_UPLOAD_SHA256_HEADER = 'x-metapi-body-upload-sha256';
 export const REQUEST_BODY_UPLOAD_ENCODING_HEADER = 'x-metapi-body-upload-encoding';
 
-/** Below this part size the extra round trips cost more than they save. */
-export const REQUEST_BODY_UPLOAD_MIN_BYTES = 65536;
+/**
+ * Minimum compressed body size that is worth splitting. Measured on the real
+ * cascade link (Cloudflare tunnel, ~1 MiB/s-class uplink): at ~195 KB a
+ * four-part upload lost to the single request (2.3-3.0 s vs ~1.8 s), while every
+ * size measured from ~459 KB up won (1.25x at 459 KB, 1.45x at 703 KB, 1.85x at
+ * 1.07 MB). 384 KB keeps splitting on the winning side of that crossover and off
+ * the losing side, including the ~250-350 KB range that has not been measured.
+ */
+export const REQUEST_BODY_UPLOAD_MIN_BYTES = 384 * 1024;
 
 /** Four parallel streams already reach the tunnel's aggregate rate. */
 export const REQUEST_BODY_UPLOAD_MAX_PARTS = 4;

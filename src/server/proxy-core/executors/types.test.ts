@@ -494,10 +494,13 @@ describe('performFetch striped request-body upload', () => {
     return { server, origin: `http://127.0.0.1:${port}`, uploadRequests, realRequests };
   };
 
-  // Bandwidth on the tunnel is the point, so the body must stay big even after
-  // gzip: random hex compresses to roughly half, far above the 64 KiB stripe
-  // threshold.
-  const buildBody = () => JSON.stringify({ model: 'm', input: randomBytes(150_000).toString('hex') });
+  // Bandwidth on the tunnel is the point, so the body must stay above the stripe
+  // threshold after gzip: random hex compresses to roughly half, so 500 KB of
+  // entropy lands near 500 KB compressed — comfortably over MIN_BYTES.
+  const buildBody = () => JSON.stringify({ model: 'm', input: randomBytes(500_000).toString('hex') });
+  // Below the threshold the body must stay on the single-request path: measured
+  // on the real link, striping a ~195 KB body lost to one request.
+  const buildSmallBody = () => JSON.stringify({ model: 'm', input: randomBytes(200_000).toString('hex') });
 
   it('stripes the compressed body when the origin advertised chunked upload', async () => {
     const { server, origin, uploadRequests, realRequests } = await buildServer();
@@ -553,6 +556,50 @@ describe('performFetch striped request-body upload', () => {
       expect(finalRequest.headers['content-encoding']).toBeUndefined();
       expect(finalRequest.headers['content-type']).toBe('application/json');
       expect(finalRequest.raw.length).toBe(0);
+    } finally {
+      __resetRequestBodyCompressionForTests();
+      __resetChunkedBodyUploadForTests();
+      server.close();
+    }
+  });
+
+  it('keeps a body below the stripe threshold on the single-request path', async () => {
+    const { server, origin, uploadRequests, realRequests } = await buildServer();
+    const body = buildSmallBody();
+    const request = {
+      endpoint: 'chat' as const,
+      path: '/v1/chat/completions',
+      headers: {},
+      body: { model: 'm' },
+    };
+    const input = {
+      siteUrl: origin,
+      request,
+      buildInit: () => ({
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      }),
+    };
+
+    const { __resetRequestBodyCompressionForTests } = await import(
+      '../../services/requestBodyCompression.js'
+    );
+    __resetRequestBodyCompressionForTests();
+    __resetChunkedBodyUploadForTests();
+    try {
+      await performFetch(input, request);
+      // Capabilities are known now, but the body is under MIN_BYTES.
+      const uploadsBefore = uploadRequests.length;
+      await performFetch(input, request);
+
+      expect(uploadRequests.length).toBe(uploadsBefore);
+      const lastRequest = realRequests[realRequests.length - 1];
+      expect(lastRequest.headers['x-metapi-body-upload-id']).toBeUndefined();
+      // The ordinary compressed single request instead.
+      expect(lastRequest.headers['content-encoding']).toBe('gzip');
+      expect(lastRequest.raw.length).toBeGreaterThan(0);
+      expect(gunzipSync(lastRequest.raw).toString()).toBe(body);
     } finally {
       __resetRequestBodyCompressionForTests();
       __resetChunkedBodyUploadForTests();
