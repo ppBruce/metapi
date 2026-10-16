@@ -19,7 +19,7 @@ export async function tunnelRoutes(app: FastifyInstance) {
 
   app.post('/api/tunnel/enable', async (request, reply) => {
     // Allow enable only from local/console; tunnel clients should not reconfigure tunnel lifecycle.
-    if (rejectTunnelAdminAction(request, reply, '创建/启用隧道')) return;
+    if (rejectTunnelAdminAction(request, reply, '创建/启用隧道')) return reply;
     try {
       const status = await startCloudflareTunnel();
       return {
@@ -38,7 +38,7 @@ export async function tunnelRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/tunnel/disable', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '关闭隧道')) return;
+    if (rejectTunnelAdminAction(request, reply, '关闭隧道')) return reply;
     await stopCloudflareTunnel({ persistDisabled: true });
     return {
       success: true,
@@ -48,7 +48,7 @@ export async function tunnelRoutes(app: FastifyInstance) {
   });
 
   app.put<{ Body: { dashboardAccess?: boolean } }>('/api/tunnel/dashboard-access', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '修改隧道控制台访问权限')) return;
+    if (rejectTunnelAdminAction(request, reply, '修改隧道控制台访问权限')) return reply;
     const body = request.body || {};
     if (typeof body.dashboardAccess !== 'boolean') {
       return reply.code(400).send({ success: false, message: 'dashboardAccess 必须为 boolean' });

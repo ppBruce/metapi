@@ -21,7 +21,7 @@ export async function authRoutes(app: FastifyInstance) {
     '/api/settings/auth/change',
     { preHandler: [limitAdminTokenChange] },
     async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '修改管理员登录令牌')) return;
+    if (rejectTunnelAdminAction(request, reply, '修改管理员登录令牌')) return reply;
 
     const parsedBody = parseAuthChangePayload(request.body);
     if (!parsedBody.success) {

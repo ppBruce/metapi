@@ -34,16 +34,16 @@ describe('tunnelAccessPolicy', () => {
     expect(isTunnelAdminRequest(fakeRequest({ host: '192.168.1.20:4000' }))).toBe(false);
   });
 
-  it('sends 403 for tunnel requests and reports that it handled the response', () => {
+  it('sends 403 for tunnel requests and returns the reply for the handler to resolve', () => {
     const { reply, sent } = fakeReply();
-    expect(rejectTunnelAdminAction(fakeRequest({ 'cf-ray': 'x' }), reply, '恢复出厂设置')).toBe(true);
+    expect(rejectTunnelAdminAction(fakeRequest({ 'cf-ray': 'x' }), reply, '恢复出厂设置')).toBe(reply);
     expect(sent.code).toBe(403);
     expect(String(sent.body.message)).toContain('通过公网隧道时不允许恢复出厂设置');
   });
 
   it('passes local requests through untouched', () => {
     const { reply, sent } = fakeReply();
-    expect(rejectTunnelAdminAction(fakeRequest({ host: '127.0.0.1:4000' }), reply, '恢复出厂设置')).toBe(false);
+    expect(rejectTunnelAdminAction(fakeRequest({ host: '127.0.0.1:4000' }), reply, '恢复出厂设置')).toBeUndefined();
     expect(sent.code).toBeUndefined();
   });
 });

@@ -1807,7 +1807,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.put<{ Body: unknown }>('/api/settings/database/runtime', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '切换运行时数据库')) return;
+    if (rejectTunnelAdminAction(request, reply, '切换运行时数据库')) return reply;
     try {
       const parsedBody = parseDatabaseMigrationPayload(request.body);
       if (!parsedBody.success) {
@@ -1874,7 +1874,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Body: unknown }>('/api/settings/database/migrate', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '迁移数据库')) return;
+    if (rejectTunnelAdminAction(request, reply, '迁移数据库')) return reply;
     try {
       const parsedBody = parseDatabaseMigrationPayload(request.body);
       if (!parsedBody.success) {
@@ -1914,7 +1914,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Body: unknown }>('/api/settings/backup/import', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '导入备份数据')) return;
+    if (rejectTunnelAdminAction(request, reply, '导入备份数据')) return reply;
     const parsedBody = parseBackupImportPayload(request.body);
     if (!parsedBody.success) {
       return reply.code(400).send({ success: false, message: '导入数据格式错误：需要 JSON 对象' });
@@ -2002,7 +2002,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/settings/backup/webdav/import', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '从 WebDAV 导入备份')) return;
+    if (rejectTunnelAdminAction(request, reply, '从 WebDAV 导入备份')) return reply;
     try {
       const result = await importBackupFromWebdav();
       for (const item of result.appliedSettings) {
@@ -2180,7 +2180,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/settings/maintenance/factory-reset', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '恢复出厂设置')) return;
+    if (rejectTunnelAdminAction(request, reply, '恢复出厂设置')) return reply;
     const body = (request.body || {}) as { confirm?: unknown };
     if (body.confirm !== true) {
       return reply.code(400).send({
