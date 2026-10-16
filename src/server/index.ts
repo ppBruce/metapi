@@ -6,6 +6,10 @@ import { isSpaShellFallbackCandidate } from './webSpaFallback.js';
 import { ensureEmptyBodyContentTypeParser } from './emptyBodyContentTypeParser.js';
 import { registerCompressedRequestBodySupport } from './services/requestBodyCompression.js';
 import {
+  REQUEST_BODY_UPLOAD_ROUTE_PREFIX,
+  registerChunkedBodyUploadRoutes,
+} from './services/requestBodyChunkedUpload.js';
+import {
   assertProductionSecurity,
   buildFastifyOptions,
   config,
@@ -284,6 +288,10 @@ ensureEmptyBodyContentTypeParser(app);
 // (see services/requestBodyCompression.ts). Inert for plain-JSON clients.
 registerCompressedRequestBodySupport(app);
 
+// Cascade hops may also split that compressed prompt into parallel parts when
+// this instance advertised it (see services/requestBodyChunkedUpload.ts).
+registerChunkedBodyUploadRoutes(app);
+
 await app.register(cors, {
   // Explicit allowlist from CORS_ORIGINS when configured; otherwise keep
   // the permissive default (reflect request Origin) for existing setups.
@@ -315,7 +323,16 @@ app.addHook('onRequest', async (request, reply) => {
     }
   }
 
-  if (request.url.startsWith('/api/') && !isPublicApiRoute(request.url)) {
+  // The striped body-upload route authenticates itself (admin token, or the
+  // downstream key the request it belongs to carries) and is deliberately
+  // exempt from this admin-only gate: parts arrive with the caller's real
+  // credential, so gating them on the admin token would reject every part and
+  // silently fall back to the single-request upload.
+  if (
+    request.url.startsWith('/api/')
+    && !isPublicApiRoute(request.url)
+    && !request.url.startsWith(REQUEST_BODY_UPLOAD_ROUTE_PREFIX)
+  ) {
     await authMiddleware(request, reply);
   }
 });

@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { gzipSync, zstdCompressSync } from 'node:zlib';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -11,6 +11,11 @@ import {
   parseRequestBodyEncoding,
   registerCompressedRequestBodySupport,
 } from './requestBodyCompression.js';
+import {
+  REQUEST_BODY_UPLOAD_ID_HEADER,
+  __resetChunkedBodyUploadForTests,
+  storeUploadedBodyPart,
+} from './requestBodyChunkedUpload.js';
 
 /**
  * Receiver side of the cascade-hop body compression: a cascaded instance sends
@@ -33,10 +38,14 @@ describe('compressed request body support (receiver)', () => {
     return app;
   };
 
-  beforeEach(() => __resetRequestBodyCompressionForTests());
+  beforeEach(() => {
+    __resetRequestBodyCompressionForTests();
+    __resetChunkedBodyUploadForTests();
+  });
 
   afterEach(async () => {
     __resetRequestBodyCompressionForTests();
+    __resetChunkedBodyUploadForTests();
     await Promise.all(apps.splice(0).map((app) => app.close()));
   });
 
@@ -97,6 +106,81 @@ describe('compressed request body support (receiver)', () => {
     expect(compressed.statusCode).toBe(200);
     expect(compressed.json()).toEqual(plain.json());
     expect(compressed.json().body).toEqual(body);
+  });
+
+  it('reassembles a striped upload into the same body as the plain request', async () => {
+    const app = await build();
+    const body = { model: 'm', messages: [{ role: 'user', content: '分片上传'.repeat(500) }] };
+    const compressed = gzipSync(Buffer.from(JSON.stringify(body)));
+    const sha256 = createHash('sha256').update(compressed).digest('hex');
+    const half = Math.ceil(compressed.length / 2);
+    const uploadId = 'receiver-striped-body';
+    expect(storeUploadedBodyPart({
+      uploadId,
+      index: 0,
+      partCount: 2,
+      sha256,
+      encoding: 'gzip',
+      bytes: compressed.subarray(0, half),
+    })).toEqual({ ok: true });
+    expect(storeUploadedBodyPart({
+      uploadId,
+      index: 1,
+      partCount: 2,
+      sha256,
+      encoding: 'gzip',
+      bytes: compressed.subarray(half),
+    })).toEqual({ ok: true });
+
+    const plain = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(body),
+    });
+    // The consuming request carries only the id (empty body): the payload
+    // travelled in the parallel parts stored above.
+    const striped = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: { 'content-type': 'application/json', [REQUEST_BODY_UPLOAD_ID_HEADER]: uploadId },
+      payload: '',
+    });
+
+    expect(striped.statusCode).toBe(200);
+    expect(striped.json()).toEqual(plain.json());
+    expect(striped.json().body).toEqual(body);
+  });
+
+  it('answers 400 for an unknown or incomplete striped upload id', async () => {
+    const app = await build();
+    const unknown = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: { 'content-type': 'application/json', [REQUEST_BODY_UPLOAD_ID_HEADER]: 'never-seen' },
+      payload: '',
+    });
+    expect(unknown.statusCode).toBe(400);
+
+    // A single stored part of two is an incomplete body: same 400, never a
+    // half-decoded payload handed to the parser.
+    const compressed = gzipSync(Buffer.from(JSON.stringify({ model: 'm' })));
+    const sha256 = createHash('sha256').update(compressed).digest('hex');
+    storeUploadedBodyPart({
+      uploadId: 'only-one-part',
+      index: 0,
+      partCount: 2,
+      sha256,
+      encoding: 'gzip',
+      bytes: compressed.subarray(0, Math.ceil(compressed.length / 2)),
+    });
+    const incomplete = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: { 'content-type': 'application/json', [REQUEST_BODY_UPLOAD_ID_HEADER]: 'only-one-part' },
+      payload: '',
+    });
+    expect(incomplete.statusCode).toBe(400);
   });
 
   it('rejects a compressed body that decompresses past the limit', async () => {

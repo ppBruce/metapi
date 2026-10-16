@@ -14,7 +14,14 @@ import {
   maybeCompressUpstreamRequestBody,
   resolveRequestOrigin,
   toPlainHeaderRecord,
+  type RequestBodyEncoding,
 } from '../../services/requestBodyCompression.js';
+import {
+  REQUEST_BODY_UPLOAD_ID_HEADER,
+  learnUpstreamBodyUploadCapability,
+  shouldStripeRequestBody,
+  uploadRequestBodyInParts,
+} from '../../services/requestBodyChunkedUpload.js';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import {
@@ -189,6 +196,9 @@ export async function performFetch(
   // it here covers chat/responses/messages alike (the default-fetch branch of
   // endpointFlow is only used by flows that do NOT pass a dispatch hook).
   const origin = resolveRequestOrigin(requestUrl);
+  const combinedSignal = input.signal && init.signal
+    ? AbortSignal.any([input.signal, init.signal as AbortSignal])
+    : (input.signal ?? init.signal);
   let dispatchInit: UndiciRequestInit = init;
   if (typeof init.body === 'string' && init.body.length >= 1024) {
     // Unrecognized header container -> leave the init untouched. Rebuilding a
@@ -202,18 +212,48 @@ export async function performFetch(
       });
       if (encoded.compressed) {
         dispatchInit = { ...init, headers: encoded.headers, body: encoded.body };
+        // A big enough body towards an origin that advertised striped uploads is
+        // uploaded as parallel parts first; the request itself then carries only
+        // the upload id. `uploadRequestBodyInParts` returns null on any failure
+        // (bad status, transport error, abort) and never throws, so a failed
+        // upload silently leaves the single compressed request above in place.
+        const compressedBody = Buffer.isBuffer(encoded.body)
+          ? encoded.body
+          : Buffer.from(init.body);
+        const contentEncoding = encoded.headers['content-encoding'];
+        if (
+          typeof contentEncoding === 'string'
+          && contentEncoding.length > 0
+          && shouldStripeRequestBody({ origin, byteLength: compressedBody.length })
+        ) {
+          const upload = await uploadRequestBodyInParts({
+            url: requestUrl,
+            headers: headerRecord,
+            compressedBody,
+            encoding: contentEncoding as RequestBodyEncoding,
+            signal: combinedSignal ?? undefined,
+          });
+          if (upload) {
+            const stripedHeaders: Record<string, string> = { ...encoded.headers };
+            // The body now travels beside the request: drop the encoding that
+            // described it and carry the upload id instead. The receiver
+            // reassembles and decodes the body before its parser runs.
+            delete stripedHeaders['content-encoding'];
+            stripedHeaders[REQUEST_BODY_UPLOAD_ID_HEADER] = upload.uploadId;
+            stripedHeaders['content-type'] = 'application/json';
+            dispatchInit = { ...init, headers: stripedHeaders, body: '' };
+          }
+        }
       }
     }
   }
-  const combinedSignal = input.signal && init.signal
-    ? AbortSignal.any([input.signal, init.signal as AbortSignal])
-    : (input.signal ?? init.signal);
   const dispatch = () => fetch(requestUrl, {
     ...dispatchInit,
     signal: combinedSignal,
   });
   const learnAndReturn = (response: RuntimeResponse) => {
     learnUpstreamRequestBodyEncoding(origin, response);
+    learnUpstreamBodyUploadCapability(origin, response);
     return response;
   };
   try {

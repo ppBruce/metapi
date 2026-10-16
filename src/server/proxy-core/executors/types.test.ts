@@ -1,7 +1,9 @@
+import { randomBytes } from 'node:crypto';
 import { gzipSync, gunzipSync, zstdCompressSync } from 'node:zlib';
 import { Response } from 'undici';
 import { describe, expect, it } from 'vitest';
 import { enrichTransportFailure, getRuntimeResponseReader, materializeErrorResponse, MAX_JSON_UPSTREAM_BODY_TEXT_CHARS, performFetch, readRuntimeResponseText } from './types.js';
+import { __resetChunkedBodyUploadForTests } from '../../services/requestBodyChunkedUpload.js';
 
 describe('readRuntimeResponseText', () => {
   it('decompresses zstd responses before reading the body text', async () => {
@@ -448,6 +450,156 @@ describe('performFetch cascade request-body compression', () => {
       expect(raw.toString()).toBe(body);
     } finally {
       __resetRequestBodyCompressionForTests();
+      server.close();
+    }
+  });
+});
+
+/**
+ * The striped (parallel-part) upload preludes the request that consumes the
+ * body. It must kick in exactly when the origin advertised it AND the compressed
+ * body is big enough, and it must vanish — leaving the ordinary compressed
+ * single request — the moment any part fails.
+ */
+describe('performFetch striped request-body upload', () => {
+  const buildServer = async (options: { failParts?: boolean } = {}) => {
+    const { createServer } = await import('node:http');
+    const uploadRequests: { url: string; raw: Buffer }[] = [];
+    const realRequests: { headers: Record<string, string | string[] | undefined>; raw: Buffer }[] = [];
+    const server = createServer((req, res) => {
+      const url = req.url || '';
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk) => chunks.push(chunk as Buffer));
+      req.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        // The upload endpoints live under their own prefix, so one server can
+        // play both the part receiver and the upstream without ambiguity.
+        if (url.startsWith('/api/v1/peer/body-upload/')) {
+          uploadRequests.push({ url, raw });
+          res.writeHead(options.failParts ? 500 : 200, { 'content-type': 'application/json' });
+          res.end('{}');
+          return;
+        }
+        realRequests.push({ headers: req.headers, raw });
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          'x-metapi-body-encoding': 'gzip',
+          'x-metapi-body-upload': 'chunked',
+        });
+        res.end('{"ok":true}');
+      });
+    });
+    await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+    const port = (server.address() as { port: number }).port;
+    return { server, origin: `http://127.0.0.1:${port}`, uploadRequests, realRequests };
+  };
+
+  // Bandwidth on the tunnel is the point, so the body must stay big even after
+  // gzip: random hex compresses to roughly half, far above the 64 KiB stripe
+  // threshold.
+  const buildBody = () => JSON.stringify({ model: 'm', input: randomBytes(150_000).toString('hex') });
+
+  it('stripes the compressed body when the origin advertised chunked upload', async () => {
+    const { server, origin, uploadRequests, realRequests } = await buildServer();
+    const body = buildBody();
+    const request = {
+      endpoint: 'chat' as const,
+      path: '/v1/chat/completions',
+      headers: {},
+      body: { model: 'm' },
+    };
+    const input = {
+      siteUrl: origin,
+      request,
+      buildInit: () => ({
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      }),
+    };
+
+    const { __resetRequestBodyCompressionForTests } = await import(
+      '../../services/requestBodyCompression.js'
+    );
+    __resetRequestBodyCompressionForTests();
+    __resetChunkedBodyUploadForTests();
+    try {
+      // Nothing learned yet: the first request travels plain and the response
+      // teaches us both capabilities.
+      await performFetch(input, request);
+      expect(realRequests).toHaveLength(1);
+      expect(realRequests[0].headers['content-encoding']).toBeUndefined();
+      expect(realRequests[0].raw.toString()).toBe(body);
+      expect(uploadRequests).toHaveLength(0);
+
+      // Both capabilities known: the body is gzipped, uploaded as parallel
+      // parts, and the request itself carries only the upload id.
+      await performFetch(input, request);
+      expect(uploadRequests.length).toBeGreaterThanOrEqual(2);
+      const byIndex = new Map<number, Buffer>();
+      for (const part of uploadRequests) {
+        expect(part.url.startsWith('/api/v1/peer/body-upload/')).toBe(true);
+        byIndex.set(Number(part.url.split('/').pop()), part.raw);
+      }
+      for (let index = 0; index < byIndex.size; index += 1) expect(byIndex.has(index)).toBe(true);
+      const assembled = Buffer.concat(
+        [...byIndex.entries()].sort((a, b) => a[0] - b[0]).map(([, chunk]) => chunk),
+      );
+      expect(gunzipSync(assembled).toString()).toBe(body);
+
+      expect(realRequests).toHaveLength(2);
+      const finalRequest = realRequests[1];
+      expect(finalRequest.headers['x-metapi-body-upload-id']).toBeDefined();
+      expect(finalRequest.headers['content-encoding']).toBeUndefined();
+      expect(finalRequest.headers['content-type']).toBe('application/json');
+      expect(finalRequest.raw.length).toBe(0);
+    } finally {
+      __resetRequestBodyCompressionForTests();
+      __resetChunkedBodyUploadForTests();
+      server.close();
+    }
+  });
+
+  it('falls back to the single compressed request when a part upload fails', async () => {
+    const { server, origin, uploadRequests, realRequests } = await buildServer({ failParts: true });
+    const body = buildBody();
+    const request = {
+      endpoint: 'chat' as const,
+      path: '/v1/chat/completions',
+      headers: {},
+      body: { model: 'm' },
+    };
+    const input = {
+      siteUrl: origin,
+      request,
+      buildInit: () => ({
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      }),
+    };
+
+    const { __resetRequestBodyCompressionForTests } = await import(
+      '../../services/requestBodyCompression.js'
+    );
+    __resetRequestBodyCompressionForTests();
+    __resetChunkedBodyUploadForTests();
+    try {
+      await performFetch(input, request);
+      expect(realRequests[0].raw.toString()).toBe(body);
+
+      // Parts answer 500: the upload must return null and the hop must still
+      // send the ordinary gzipped single request.
+      await performFetch(input, request);
+      expect(uploadRequests.length).toBeGreaterThan(0);
+      expect(realRequests).toHaveLength(2);
+      const finalRequest = realRequests[1];
+      expect(finalRequest.headers['x-metapi-body-upload-id']).toBeUndefined();
+      expect(finalRequest.headers['content-encoding']).toBe('gzip');
+      expect(gunzipSync(finalRequest.raw).toString()).toBe(body);
+    } finally {
+      __resetRequestBodyCompressionForTests();
+      __resetChunkedBodyUploadForTests();
       server.close();
     }
   });

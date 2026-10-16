@@ -8,6 +8,10 @@ import {
 import { Readable, type Readable as ReadableStream } from 'node:stream';
 import { promisify } from 'node:util';
 import type { FastifyInstance } from 'fastify';
+import {
+  REQUEST_BODY_UPLOAD_ID_HEADER,
+  assembleUploadedBody,
+} from './requestBodyChunkedUpload.js';
 
 /**
  * Compressed request bodies for cascaded metapi instances.
@@ -318,7 +322,7 @@ async function readRequestBodyBuffer(
  * attached its listeners — reachable unauthenticated through the tunnel with a
  * malformed `Content-Encoding: gzip` body, i.e. a remote DoS.
  */
-async function decodeRequestBodyBuffer(
+export async function decodeRequestBodyBuffer(
   encoding: RequestBodyEncoding,
   compressed: Buffer,
 ): Promise<Buffer> {
@@ -369,6 +373,33 @@ export function registerCompressedRequestBodySupport(app: FastifyInstance): void
   });
 
   app.addHook('preParsing', async (request, _reply, payload) => {
+    // Striped upload: the sender moved the (already compressed) body out of the
+    // request itself and uploaded it as parallel parts, leaving only the id
+    // behind. Reassemble it here and decode it exactly like the single-request
+    // path below. This branch deliberately ignores content-encoding: under the
+    // part path that header is absent (the encoding travels beside the parts),
+    // so the only signal is the upload id.
+    const rawUploadId = request.headers[REQUEST_BODY_UPLOAD_ID_HEADER];
+    const uploadId = Array.isArray(rawUploadId) ? rawUploadId[0] : rawUploadId;
+    if (typeof uploadId === 'string' && uploadId.length > 0) {
+      const assembled = assembleUploadedBody(uploadId);
+      // Unknown, expired, incomplete or digest-mismatched: the placeholder
+      // request carries no usable body, so refuse it like any other bad payload.
+      if (!assembled) {
+        throw toStatusError(
+          'Uploaded request body is missing or incomplete',
+          400,
+          'FST_ERR_CTP_INVALID_MEDIA_TYPE',
+        );
+      }
+      // The placeholder headers describe an empty body with no encoding, so they
+      // must not reach the parser as-is.
+      delete request.headers[REQUEST_BODY_UPLOAD_ID_HEADER];
+      delete request.headers['content-length'];
+      const decoded = await decodeRequestBodyBuffer(assembled.encoding, assembled.compressed);
+      return Readable.from([decoded]);
+    }
+
     const encoding = parseRequestBodyEncoding(request.headers['content-encoding']);
     if (!encoding || !payload) return payload;
 
