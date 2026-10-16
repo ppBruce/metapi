@@ -437,7 +437,10 @@ function extractUploadToken(request: { headers: Record<string, unknown> }): stri
  * into a 403 on the request it was supposed to accelerate. Validation without
  * accounting is what a transport fragment needs.
  */
-async function authorizeUploadPart(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+async function authorizeUploadPart(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<FastifyReply | void> {
   const token = extractUploadToken(request) || '';
   if (token && secretsEqual(token, config.authToken)) return;
 
@@ -448,7 +451,7 @@ async function authorizeUploadPart(request: FastifyRequest, reply: FastifyReply)
 
   // Same bare 401 as the other peer endpoints, for the same reason: one shape
   // and no marker to probe for, whether the credential was absent or wrong.
-  reply.code(401).send({ error: 'Invalid token' });
+  return reply.code(401).send({ error: 'Invalid token' });
 }
 
 function readUploadHeader(request: { headers: Record<string, unknown> }, name: string): string | null {
@@ -467,7 +470,10 @@ function parseCanonicalInteger(value: unknown): number | null {
   return String(parsed) === value ? parsed : null;
 }
 
-async function handleUploadBodyPart(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+async function handleUploadBodyPart(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<FastifyReply | void> {
   // Authentication happens in this plugin's onRequest hook (see
   // authorizeUploadPart): the admin token or the request's own downstream key.
   const params = (request.params ?? {}) as { uploadId?: unknown; index?: unknown };
@@ -476,21 +482,18 @@ async function handleUploadBodyPart(request: FastifyRequest, reply: FastifyReply
   // The URL is authoritative; a header that names a different upload means the
   // sender mixed two uploads up, so refuse instead of guessing.
   if (!uploadId || (headerUploadId !== null && headerUploadId !== uploadId)) {
-    reply.code(400).send({ error: 'Invalid upload id' });
-    return;
+    return reply.code(400).send({ error: 'Invalid upload id' });
   }
 
   const index = parseCanonicalInteger(params.index);
   const headerIndex = parseCanonicalInteger(readUploadHeader(request, REQUEST_BODY_UPLOAD_PART_INDEX_HEADER));
   if (index === null || headerIndex === null || headerIndex !== index) {
-    reply.code(400).send({ error: 'Invalid part index' });
-    return;
+    return reply.code(400).send({ error: 'Invalid part index' });
   }
 
   const partCount = parseCanonicalInteger(readUploadHeader(request, REQUEST_BODY_UPLOAD_PART_COUNT_HEADER));
   if (partCount === null) {
-    reply.code(400).send({ error: 'Invalid part count' });
-    return;
+    return reply.code(400).send({ error: 'Invalid part count' });
   }
 
   const result = storeUploadedBodyPart({
@@ -502,10 +505,9 @@ async function handleUploadBodyPart(request: FastifyRequest, reply: FastifyReply
     bytes: Buffer.isBuffer(request.body) ? request.body : Buffer.alloc(0),
   });
   if (!result.ok) {
-    reply.code(result.statusCode).send({ error: result.reason });
-    return;
+    return reply.code(result.statusCode).send({ error: result.reason });
   }
-  reply.send({ ok: true });
+  return reply.send({ ok: true });
 }
 
 /**
