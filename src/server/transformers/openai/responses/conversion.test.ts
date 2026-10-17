@@ -543,6 +543,32 @@ describe('sanitizeResponsesBodyForProxy', () => {
 });
 
 describe('convertOpenAiBodyToResponsesBody', () => {
+  it('converts nested Chat image_url objects to Responses image URL strings', () => {
+    const result = convertOpenAiBodyToResponsesBody(
+      {
+        model: 'gpt-6-luna',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this image' },
+            { type: 'image_url', image_url: { url: 'https://example.com/image.png', detail: 'high' } },
+          ],
+        }],
+      },
+      'gpt-6-luna',
+      false,
+    );
+
+    expect(result.input).toEqual([{
+      type: 'message',
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'Describe this image' },
+        { type: 'input_image', image_url: 'https://example.com/image.png', detail: 'high' },
+      ],
+    }]);
+  });
+
   it('maps OpenAI chat file blocks into Responses input_file blocks', () => {
     const result = convertOpenAiBodyToResponsesBody(
       {
@@ -1470,6 +1496,42 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     );
 
     expect(roundTripped.input).toEqual(source.input);
+  });
+
+  it('merges additional_tools tools into the request tool set, deduping by name', () => {
+    const result = convertResponsesBodyToOpenAiBody(
+      {
+        model: 'gpt-5',
+        tools: [
+          { type: 'function', name: 'lookup', parameters: { type: 'object' } },
+        ],
+        input: [
+          {
+            type: 'additional_tools',
+            id: 'at_1',
+            role: 'developer',
+            tools: [
+              { type: 'custom', name: 'exec' },
+              // same name as the top-level tool -> must be deduped, not duplicated
+              { type: 'function', name: 'lookup', parameters: { type: 'object' } },
+            ],
+          },
+          { type: 'message', role: 'user', content: 'hello' },
+        ],
+      },
+      'gpt-5',
+      false,
+    ) as Record<string, any>;
+
+    // additional_tools must not leak into messages
+    expect(result.messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ]);
+    // both tools present exactly once; flat form normalized to nested function form
+    expect(result.tools).toEqual([
+      { type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } },
+      { type: 'custom', name: 'exec' },
+    ]);
   });
 
   it('preserves remaining request fields needed for OpenAI-compatible downstream fallback', () => {

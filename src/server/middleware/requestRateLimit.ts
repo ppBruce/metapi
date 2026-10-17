@@ -69,11 +69,15 @@ export function createRateLimitGuard(options: RateLimitOptions) {
     } catch (error) {
       const retryState = error instanceof RateLimiterRes ? error : null;
       const retryAfterSec = Math.max(1, Math.ceil((retryState?.msBeforeNext ?? options.windowMs) / 1000));
-      reply
+      // Return the reply, not a bare `return;`: this is registered as a
+      // preHandler hook, and resolving to undefined after the send would let
+      // Fastify run the onSend chain twice while it is still suspended on an
+      // async onSend hook. The reply thenable resolves once the 429 has
+      // flushed, so the chain completes with `reply.sent === true`.
+      return reply
         .code(429)
         .header('retry-after', String(retryAfterSec))
         .send({ success: false, message });
-      return;
     }
   };
 }

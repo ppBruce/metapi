@@ -1,12 +1,15 @@
-import { Suspense, lazy, useEffect, useState, useCallback } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { copyText } from '../clipboard.js';
+import StatSparkline from '../components/StatSparkline.js';
 import { useTunnelClientView } from './helpers/useTunnelClientView.js';
 import { formatCompactTokenMetric } from '../numberFormat.js';
-import { availabilityColor } from '../components/charts/chartShared.js';
+import { availabilityColor, availabilityRgb, availabilityColorDataUri } from '../components/charts/chartShared.js';
+import { PillTabBg } from '../components/PillTabBg.js';
 import { ErrorBoundary } from '../components/ErrorBoundary.js';
+import ChartLoadingState from '../components/charts/ChartLoadingState.js';
 
 const ModelAnalysisPanel = lazy(
   () => import('../components/ModelAnalysisPanel.js'),
@@ -66,18 +69,7 @@ function safeNumber(value: unknown): number {
 function ChartFallback({ height = 280 }: { height?: number }) {
   return (
     <div className="card" style={{ minHeight: height, padding: 16 }}>
-      <div
-        className="skeleton"
-        style={{ width: 160, height: 18, marginBottom: 12 }}
-      />
-      <div
-        className="skeleton"
-        style={{
-          width: '100%',
-          height: Math.max(120, height - 46),
-          borderRadius: 'var(--radius-md)',
-        }}
-      />
+      <ChartLoadingState height={height} />
     </div>
   );
 }
@@ -129,9 +121,9 @@ function AvailabilityLegend() {
   return (
     <div className="site-observability-legend">
       <span className="site-observability-legend-text">低</span>
-      <span className="site-observability-legend-chip" style={{ background: availabilityColor(0) }} />
-      <span className="site-observability-legend-chip" style={{ background: availabilityColor(50) }} />
-      <span className="site-observability-legend-chip" style={{ background: availabilityColor(100) }} />
+      <span className="site-observability-legend-chip" style={{ backgroundImage: availabilityColorDataUri(availabilityRgb(0)), backgroundSize: '100% 100%' }} />
+      <span className="site-observability-legend-chip" style={{ backgroundImage: availabilityColorDataUri(availabilityRgb(50)), backgroundSize: '100% 100%' }} />
+      <span className="site-observability-legend-chip" style={{ backgroundImage: availabilityColorDataUri(availabilityRgb(100)), backgroundSize: '100% 100%' }} />
       <span className="site-observability-legend-text">高</span>
     </div>
   );
@@ -294,6 +286,22 @@ export default function Dashboard({
   // toggles visibility so a chart never re-mounts, re-fetches or flashes.
   const [siteTrendMounted, setSiteTrendMounted] = useState(false);
   const toast = useToast();
+  // Keep hooks unconditional: Dashboard has loading/error early returns below.
+  // Derive availability rankings here so hook order is stable in every state.
+  const rawSiteAvailability: SiteAvailabilitySummary[] = Array.isArray(insightsData?.siteAvailability)
+    ? insightsData.siteAvailability
+    : [];
+  const rawModelAvailability: ModelAvailabilitySummary[] = Array.isArray(insightsData?.modelAvailability)
+    ? insightsData.modelAvailability
+    : [];
+  const activeSites = useMemo(() => rawSiteAvailability
+    .filter((site) => site.totalRequests > 0)
+    .sort((a, b) => (b.totalRequests || 0) - (a.totalRequests || 0)), [rawSiteAvailability]);
+  const siteAvailability = activeSites;
+  const activeModels = useMemo(() => rawModelAvailability
+    .filter((model) => model.totalRequests > 0)
+    .sort((a, b) => (b.totalRequests || 0) - (a.totalRequests || 0)), [rawModelAvailability]);
+  const modelAvailability = activeModels;
   const normalizedAdminName = (adminName || '').trim() || '\u7ba1\u7406\u5458';
 
   const load = useCallback(
@@ -616,6 +624,11 @@ export default function Dashboard({
   const totalAccounts = safeNumber(data?.totalAccounts);
   const todaySuccess = safeNumber(data?.todayCheckin?.success);
   const todayTotal = safeNumber(data?.todayCheckin?.total);
+
+  // 7-day series for the stat-row sparklines (oldest first, already ordered
+  // by the server).
+  const dailySpendSeries = (data?.dailyTrend || []).map((d: any) => safeNumber(d?.spend));
+  const dailyCallsSeries = (data?.dailyTrend || []).map((d: any) => safeNumber(d?.calls));
   const todayCalls = safeNumber(insightsData?.modelAnalysis?.totals?.calls);
   const todayModelTokens = safeNumber(insightsData?.modelAnalysis?.totals?.tokens);
   const requestsPerMinute = safeNumber(data?.performance?.requestsPerMinute);
@@ -629,25 +642,7 @@ export default function Dashboard({
   const p95LatencyMs = typeof data?.performance?.p95LatencyMs === 'number'
     ? data.performance.p95LatencyMs
     : null;
-  const rawSiteAvailability: SiteAvailabilitySummary[] = Array.isArray(
-    insightsData?.siteAvailability,
-  )
-    ? insightsData.siteAvailability
-    : [];
-  const activeSites = rawSiteAvailability
-    .filter((s) => s.totalRequests > 0)
-    .sort((a, b) => (b.totalRequests || 0) - (a.totalRequests || 0));
-  const siteAvailability = activeSites;
 
-  const rawModelAvailability: ModelAvailabilitySummary[] = Array.isArray(
-    insightsData?.modelAvailability,
-  )
-    ? insightsData.modelAvailability
-    : [];
-  const activeModels = rawModelAvailability
-    .filter((m) => m.totalRequests > 0)
-    .sort((a, b) => (b.totalRequests || 0) - (a.totalRequests || 0));
-  const modelAvailability = activeModels;
 
   const getLatencyColor = (ms: number) =>
     ms <= 500
@@ -704,8 +699,12 @@ export default function Dashboard({
               viewBox="0 0 24 24"
               stroke="currentColor"
               style={{
-                scale: '-1 1',
-                animation: refreshing ? 'spin 1s linear infinite reverse' : 'none',
+                // Mirror + spin must live on ONE transform channel: combining
+                // the independent `scale` property with a `transform` rotate
+                // animation shifts the rotation origin on desktop browsers
+                // (icon wobbles instead of spinning in place).
+                transform: 'scaleX(-1)',
+                animation: refreshing ? 'spin-mirrored 1s linear infinite' : 'none',
               }}
             >
               <path
@@ -816,6 +815,7 @@ export default function Dashboard({
               <div className="stat-label">今日消耗</div>
               <div className="stat-value animate-count-up">${todaySpend.toFixed(2)}</div>
             </div>
+            <StatSparkline values={dailySpendSeries} color="var(--color-warning)" />
           </div>
           <div className="stat-card-row">
             <div className="stat-icon stat-icon-cyan">
@@ -827,6 +827,7 @@ export default function Dashboard({
               <div className="stat-label">今日调用</div>
               <div className="stat-value animate-count-up">{Math.round(todayCalls).toLocaleString()}</div>
             </div>
+            <StatSparkline values={dailyCallsSeries} color="var(--color-primary)" />
           </div>
           <div className="stat-card-row">
             <div className="stat-icon stat-icon-pink">
@@ -1024,7 +1025,21 @@ export default function Dashboard({
             ) : <span className="dashboard-endpoint-copy-placeholder" aria-hidden />}
           </div>
           {tunnel?.tunnelUrl && tunnel?.publicUrl && tunnel.tunnelUrl !== tunnel.publicUrl ? (
-            <div className="dashboard-endpoint-secondary-url">直连：{tunnel.tunnelUrl}</div>
+            <div className="dashboard-endpoint-row">
+              <span className="dashboard-endpoint-label">直连</span>
+              <code className="dashboard-endpoint-value">{tunnel.tunnelUrl}</code>
+              <button
+                type="button"
+                className="btn btn-ghost dashboard-endpoint-copy"
+                onClick={() => {
+                  copyText(tunnel.tunnelUrl as string)
+                    .then(() => { toast.success('已复制直连地址'); })
+                    .catch(() => { toast.error('复制失败'); });
+                }}
+              >
+                复制
+              </button>
+            </div>
           ) : null}
         </div>
       </div>
@@ -1067,6 +1082,7 @@ export default function Dashboard({
                 className={`pill-tab ${observabilityTab === 'sites' ? 'active' : ''}`}
                 onClick={() => setObservabilityTab('sites')}
               >
+                {observabilityTab === 'sites' && <PillTabBg />}
                 站点
               </button>
               <button
@@ -1074,6 +1090,7 @@ export default function Dashboard({
                 className={`pill-tab ${observabilityTab === 'models' ? 'active' : ''}`}
                 onClick={() => setObservabilityTab('models')}
               >
+                {observabilityTab === 'models' && <PillTabBg />}
                 模型
               </button>
             </div>
@@ -1110,6 +1127,7 @@ export default function Dashboard({
                   className={`pill-tab ${siteChartTab === 'distribution' ? 'active' : ''}`}
                   onClick={() => setSiteChartTab('distribution')}
                 >
+                  {siteChartTab === 'distribution' && <PillTabBg />}
                   站点分布
                 </button>
                 <button
@@ -1120,6 +1138,7 @@ export default function Dashboard({
                     setSiteChartTab('trend');
                   }}
                 >
+                  {siteChartTab === 'trend' && <PillTabBg />}
                   站点趋势
                 </button>
               </div>
@@ -1285,7 +1304,8 @@ export default function Dashboard({
                         to={buildAvailabilityBucketLogsRoute(site.siteId, bucket)}
                         className="site-availability-cell site-availability-cell-link site-availability-cell-pill"
                         style={{
-                          background: availabilityColor(bucket.availabilityPercent),
+                          backgroundImage: availabilityColorDataUri(availabilityRgb(bucket.availabilityPercent ?? 0)),
+                          backgroundSize: '100% 100%',
                         }}
                         data-tooltip={[
                           `时间：${formatAvailabilityBucketLabel(bucket)}`,
@@ -1471,7 +1491,8 @@ export default function Dashboard({
                         to={buildModelAvailabilityBucketLogsRoute(modelRow.model, bucket)}
                         className="site-availability-cell site-availability-cell-link site-availability-cell-pill"
                         style={{
-                          background: availabilityColor(bucket.availabilityPercent),
+                          backgroundImage: availabilityColorDataUri(availabilityRgb(bucket.availabilityPercent ?? 0)),
+                          backgroundSize: '100% 100%',
                         }}
                         data-tooltip={[
                           `时间：${formatAvailabilityBucketLabel(bucket)}`,

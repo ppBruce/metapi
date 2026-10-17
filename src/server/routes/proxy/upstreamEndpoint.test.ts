@@ -1565,7 +1565,7 @@ describe('buildUpstreamEndpointRequest', () => {
         role: 'user',
         content: [
           { type: 'input_text', text: 'describe this' },
-          { type: 'input_image', image_url: { url: 'https://example.com/cat.png' } },
+          { type: 'input_image', image_url: 'https://example.com/cat.png' },
         ],
       },
     ]);
@@ -2385,7 +2385,7 @@ describe('buildUpstreamEndpointRequest', () => {
         role: 'user',
         content: [
           { type: 'input_text', text: 'describe the upload' },
-          { type: 'input_image', image_url: { url: 'https://example.com/cat.png' } },
+          { type: 'input_image', image_url: 'https://example.com/cat.png' },
         ],
       },
     ]);

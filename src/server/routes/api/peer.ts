@@ -15,6 +15,13 @@ import { getOrCreateCascadeDownstreamKey } from '../../services/cascadeCredentia
  * 401 that carries no MetAPI-specific marker, so the endpoint is
  * indistinguishable from any other admin API and cannot be probed without
  * holding the admin credential.
+ *
+ * Every branch RETURNS the reply. An async handler that sends and then resolves
+ * to undefined makes Fastify run the onSend chain a second time while an async
+ * onSend hook is still pending (we have three: the two capability headers plus
+ * the security headers), because `reply.sent` stays false until the body is
+ * written — the second pass then hits ERR_HTTP_HEADERS_SENT on the written head.
+ * Returning the reply keeps the handler promise pending until the flush.
  */
 
 const PEER_PROTOCOL_VERSION = 1;
@@ -33,13 +40,12 @@ export async function peerRoutes(app: FastifyInstance) {
     const token = extractBearerToken(request) || '';
     // Constant-time compare; a wrong/missing token is a featureless 401.
     if (!token || !secretsEqual(token, config.authToken)) {
-      reply.code(401).send({ error: 'Invalid token' });
-      return;
+      return reply.code(401).send({ error: 'Invalid token' });
     }
 
     const summary = await getDashboardSummarySnapshot();
     const payload = summary.payload;
-    reply.send({
+    return reply.send({
       protocolVersion: PEER_PROTOCOL_VERSION,
       site: {
         totalBalance: roundMicro(payload.totalBalance),
@@ -63,15 +69,14 @@ export async function peerRoutes(app: FastifyInstance) {
   app.post('/api/v1/peer/cascade-key', async (request, reply) => {
     const token = extractBearerToken(request) || '';
     if (!token || !secretsEqual(token, config.authToken)) {
-      reply.code(401).send({ error: 'Invalid token' });
-      return;
+      return reply.code(401).send({ error: 'Invalid token' });
     }
     try {
       const key = await getOrCreateCascadeDownstreamKey();
-      reply.send({ key, name: 'cascade' });
+      return reply.send({ key, name: 'cascade' });
     } catch (error) {
       request.log.error({ err: error }, 'cascade key issuance failed');
-      reply.code(500).send({ error: 'failed to issue cascade key' });
+      return reply.code(500).send({ error: 'failed to issue cascade key' });
     }
   });
 }

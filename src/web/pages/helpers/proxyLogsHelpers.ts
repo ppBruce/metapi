@@ -9,6 +9,9 @@ import type {
 export type ProxyLogRenderItem = ProxyLogListItem & {
   billingDetails?: ProxyLogBillingDetails;
   username?: string | null;
+  tokenId?: number | null;
+  tokenName?: string | null;
+  tokenGroup?: string | null;
   siteName?: string | null;
   siteUrl?: string | null;
   errorMessage?: string | null;

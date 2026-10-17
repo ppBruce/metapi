@@ -3,6 +3,13 @@ import cors from '@fastify/cors';
 import compress from '@fastify/compress';
 import fastifyStatic from '@fastify/static';
 import { isSpaShellFallbackCandidate } from './webSpaFallback.js';
+import { createNotFoundHandler } from './notFoundHandler.js';
+import { ensureEmptyBodyContentTypeParser } from './emptyBodyContentTypeParser.js';
+import { registerCompressedRequestBodySupport } from './services/requestBodyCompression.js';
+import {
+  REQUEST_BODY_UPLOAD_ROUTE_PREFIX,
+  registerChunkedBodyUploadRoutes,
+} from './services/requestBodyChunkedUpload.js';
 import {
   assertProductionSecurity,
   buildFastifyOptions,
@@ -32,6 +39,7 @@ import { proxyRoutes } from './routes/proxy/router.js';
 import { startScheduler, stopScheduler } from './services/checkinScheduler.js';
 import * as routeRefreshWorkflow from './services/routeRefreshWorkflow.js';
 import { startProxyFileRetentionService, stopProxyFileRetentionService } from './services/proxyFileRetentionService.js';
+import { encryptLegacyProxyVideoTaskTokens } from './services/proxyVideoTaskStore.js';
 import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
@@ -271,6 +279,20 @@ assertProductionSecurity(config);
 
 const app = Fastify(buildFastifyOptions(config));
 
+// Body-less POSTs pick up an edge-stamped media type on the way in (Cloudflare
+// sends application/octet-stream), which Fastify would reject with 415 before any
+// handler runs. Install this before the routes so tunnel traffic behaves like
+// localhost: see emptyBodyContentTypeParser.ts.
+ensureEmptyBodyContentTypeParser(app);
+
+// Cascade hops may send the prompt gzipped when this instance advertised it
+// (see services/requestBodyCompression.ts). Inert for plain-JSON clients.
+registerCompressedRequestBodySupport(app);
+
+// Cascade hops may also split that compressed prompt into parallel parts when
+// this instance advertised it (see services/requestBodyChunkedUpload.ts).
+registerChunkedBodyUploadRoutes(app);
+
 await app.register(cors, {
   // Explicit allowlist from CORS_ORIGINS when configured; otherwise keep
   // the permissive default (reflect request Origin) for existing setups.
@@ -294,15 +316,26 @@ app.addHook('onRequest', async (request, reply) => {
     const brandAssetOk = isTunnelBrandAssetPath(urlPath);
     const dashboardOk = config.tunnelDashboardAccess && isTunnelDashboardPath(urlPath);
     if (!apiOk && !brandAssetOk && !dashboardOk) {
-      reply.code(403).send({
+      // Return the reply: an async hook that sends and then resolves to
+      // undefined lets Fastify run the onSend chain a second time while an
+      // async onSend hook is still pending, which logs ERR_HTTP_HEADERS_SENT.
+      return reply.code(403).send({
         error: 'Tunnel access denied',
         message: '当前隧道仅允许 API 访问。如需公网打开控制页，请在设置中开启「允许通过隧道访问控制台」。',
       });
-      return;
     }
   }
 
-  if (request.url.startsWith('/api/') && !isPublicApiRoute(request.url)) {
+  // The striped body-upload route authenticates itself (admin token, or the
+  // downstream key the request it belongs to carries) and is deliberately
+  // exempt from this admin-only gate: parts arrive with the caller's real
+  // credential, so gating them on the admin token would reject every part and
+  // silently fall back to the single-request upload.
+  if (
+    request.url.startsWith('/api/')
+    && !isPublicApiRoute(request.url)
+    && !request.url.startsWith(REQUEST_BODY_UPLOAD_ROUTE_PREFIX)
+  ) {
     await authMiddleware(request, reply);
   }
 });
@@ -383,21 +416,17 @@ if (existsSync(webDir)) {
       }
     },
   });
-  // SPA fallback
-  app.setNotFoundHandler(async (request, reply) => {
-    if (request.url.startsWith('/api/') || request.url.startsWith('/v1/')) {
-      reply.code(404).send({ error: 'Not found' });
-      return;
-    }
-    // Missing assets must 404 instead of receiving the SPA shell: a 200
-    // text/html body at a .js/.css URL is rejected as a MIME mismatch and
-    // hides the real cause (stale cached shell pointing at a deleted chunk).
-    if (!isSpaShellFallbackCandidate(request.url)) {
-      reply.code(404).type('text/plain; charset=utf-8').send('Not found');
-      return;
-    }
-    return reply.sendFile('index.html');
-  });
+  // SPA fallback — the three branches (and why each of them returns the reply)
+  // live in ./notFoundHandler.ts, which is covered by notFoundHandler.test.ts.
+  app.setNotFoundHandler(createNotFoundHandler({ isSpaShellFallbackCandidate }));
+}
+
+// Legacy video task rows stored upstream tokens in plaintext. Migrate them
+// before accepting requests; after a restored old backup the data-shape pass
+// runs again without relying on a permanent marker.
+const migratedVideoTaskTokens = await encryptLegacyProxyVideoTaskTokens();
+if (migratedVideoTaskTokens > 0) {
+  console.info(`[proxy-video-tasks] encrypted ${migratedVideoTaskTokens} legacy task credentials`);
 }
 
 // Start scheduler

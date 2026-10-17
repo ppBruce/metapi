@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { fetch } from 'undici';
-import { config } from '../../config.js';
+import { config, resolveProxyStreamIdleTimeoutMs } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
@@ -8,11 +8,13 @@ import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
-import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
+import { composeProxyLogMessage, proxyLogFailureLocator } from '../../services/proxyLogMessage.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { getProxyAuthContext } from '../../middleware/auth.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../proxy-core/downstreamClientContext.js';
+import { MAX_JSON_UPSTREAM_BODY_TEXT_CHARS, readRuntimeResponseText } from '../../proxy-core/executors/types.js';
+import { wireReplyGoneAbortSignal } from '../../proxy-core/surfaces/sharedSurface.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { createRequestTraceId } from '../../services/requestTraceId.js';
 import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy-core/firstByteTimeout.js';
@@ -89,6 +91,11 @@ export async function searchProxyRoute(app: FastifyInstance) {
     }
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
+    // Bound upstream body reads: abort on downstream disconnect and idle stalls.
+    const bodyReadGuards = {
+      idleTimeoutMs: resolveProxyStreamIdleTimeoutMs(),
+      signal: wireReplyGoneAbortSignal(reply),
+    };
 
     while (retryCount <= maxRetries) {
       const selected = await selectProxyChannelForAttempt({
@@ -139,7 +146,10 @@ export async function searchProxyRoute(app: FastifyInstance) {
             },
           );
           const observedFirstByteLatencyMs = getObservedResponseMeta(response)?.firstByteLatencyMs ?? null;
-          const responseText = await response.text();
+          const responseText = await readRuntimeResponseText(response, {
+            ...bodyReadGuards,
+            ...(response.ok ? { maxChars: MAX_JSON_UPSTREAM_BODY_TEXT_CHARS, rejectOnOverflow: true } : {}),
+          });
           if (!response.ok) {
             throw new SiteApiEndpointRequestError(responseText || 'unknown error', {
               status: response.status,
@@ -254,6 +264,7 @@ async function logProxy(
       channelId: selected.channel.id,
       accountId: selected.account.id,
       downstreamApiKeyId,
+      tokenId: selected.channel.tokenId ?? null,
       modelRequested,
       modelActual: selected.actualModel || modelRequested,
       status,
@@ -273,6 +284,11 @@ async function logProxy(
         traceHint: clientContext?.traceHint || null,
         traceId: requestTraceId || null,
         downstreamPath,
+        ...proxyLogFailureLocator({
+          status,
+          siteName: selected.site?.name ?? null,
+          upstreamStatus: httpStatus,
+        }),
         errorMessage,
       }),
       requestTraceId: requestTraceId || null,

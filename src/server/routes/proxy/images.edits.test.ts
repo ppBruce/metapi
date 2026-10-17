@@ -55,6 +55,7 @@ vi.mock('../../services/proxyRetryPolicy.js', () => ({
   resolveFailoverBackoffMs: () => 0,
   sleepMs: async () => undefined,
   shouldGraceRetryInPlaceOnce: () => false,
+  shouldInPlaceRetryEmptyContentOnce: () => false,
   canRetryInPlaceForRecoveringFailure: () => false,
   isRecoveringTransientFailure: () => false,
   shouldRetryProxyRequest: () => false,
@@ -175,6 +176,25 @@ describe('/v1/images/edits route', () => {
     expect(response.statusCode).toBe(200);
     const [targetUrl] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(targetUrl).toBe('https://upstream.example.com/v1/images/edits');
+  });
+
+  it('preserves a valid multi-MiB b64_json success payload', async () => {
+    const b64 = 'A'.repeat(2 * 1024 * 1024);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ created: 1, data: [{ b64_json: b64 }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/images/generations',
+      headers: { authorization: 'Bearer sk-demo' },
+      payload: { model: 'gpt-image-1', prompt: 'draw a cat' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data[0].b64_json).toBe(b64);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('retries the next channel when image generation JSON is malformed', async () => {

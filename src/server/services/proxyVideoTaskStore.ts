@@ -1,5 +1,6 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
+import { decryptAccountPassword, encryptAccountPassword } from './accountCredentialService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 
 export type SaveProxyVideoTaskInput = {
@@ -49,7 +50,7 @@ export async function saveProxyVideoTask(input: SaveProxyVideoTaskInput): Promis
     publicId,
     upstreamVideoId: input.upstreamVideoId,
     siteUrl: input.siteUrl,
-    tokenValue: input.tokenValue,
+    tokenValue: encryptAccountPassword(input.tokenValue),
     requestedModel: input.requestedModel,
     actualModel: input.actualModel,
     channelId: input.channelId,
@@ -77,7 +78,7 @@ export async function getProxyVideoTaskByPublicId(publicId: string): Promise<Pro
     publicId: row.publicId,
     upstreamVideoId: row.upstreamVideoId,
     siteUrl: row.siteUrl,
-    tokenValue: row.tokenValue,
+    tokenValue: readProxyVideoTaskToken(row.tokenValue),
     requestedModel: row.requestedModel,
     actualModel: row.actualModel,
     channelId: row.channelId,
@@ -137,6 +138,62 @@ function parseJsonColumn(value: unknown): unknown | null {
   } catch {
     return value;
   }
+}
+
+// Data-shape migration, not a one-time setting marker: restoring an older
+// backup may reintroduce plaintext rows. Run on every startup, rewriting only
+// rows that are still plaintext, without changing task IDs or timestamps.
+export async function encryptLegacyProxyVideoTaskTokens(): Promise<number> {
+  const rows = await db.select({
+    id: schema.proxyVideoTasks.id,
+    tokenValue: schema.proxyVideoTasks.tokenValue,
+  }).from(schema.proxyVideoTasks).all();
+  let migrated = 0;
+  for (const row of rows) {
+    if (/^v\d+:/.test(row.tokenValue)) continue;
+    const encrypted = encryptAccountPassword(row.tokenValue);
+    const result = await db.update(schema.proxyVideoTasks)
+      .set({ tokenValue: encrypted })
+      .where(and(
+        eq(schema.proxyVideoTasks.id, row.id),
+        eq(schema.proxyVideoTasks.tokenValue, row.tokenValue),
+      ))
+      .run();
+    migrated += Number(result?.changes || 0);
+  }
+  return migrated;
+}
+
+function readProxyVideoTaskToken(value: string): string {
+  // Legacy rows store plaintext. Any versioned envelope is treated as
+  // ciphertext, even when malformed or from a newer version, so an unreadable
+  // value cannot be forwarded to the upstream as an Authorization header.
+  if (!/^v\d+:/.test(value)) return value;
+  const plaintext = decryptAccountPassword(value);
+  if (plaintext === null) throw new Error('Proxy video task token decryption failed');
+  return plaintext;
+}
+
+/**
+ * Retention purge: task rows hold an upstream credential (token_value) and
+ * previously only ever left the table via an explicit
+ * DELETE /v1/videos/:id or a factory reset — i.e. they grew without bound.
+ * Drop rows whose last activity predates the cutoff (unlike the file store we
+ * key on updated_at, since polling refreshes it; created_at covers rows that
+ * never got one). Wired into the proxy-file retention interval.
+ */
+export async function purgeExpiredProxyVideoTasks(cutoffUtc: string): Promise<number> {
+  const normalizedCutoff = cutoffUtc.trim();
+  if (!normalizedCutoff) return 0;
+
+  const result = await db.delete(schema.proxyVideoTasks)
+    .where(or(
+      lt(schema.proxyVideoTasks.updatedAt, normalizedCutoff),
+      and(isNull(schema.proxyVideoTasks.updatedAt), lt(schema.proxyVideoTasks.createdAt, normalizedCutoff)),
+    ))
+    .run();
+
+  return Number(result?.changes || 0);
 }
 
 export const __proxyVideoTaskStoreTestUtils = {

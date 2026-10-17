@@ -1,0 +1,279 @@
+/* ===== Route Filter Bar (Collapsible, horizontal chips) ===== */
+.route-filter-bar {
+  margin-bottom: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-card);
+  box-shadow: 0 4px 12px rgba(28,25,23, 0.04);
+  overflow: hidden;
+}
+
+.route-filter-bar-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  text-align: left;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.18s ease;
+}
+
+.route-filter-bar-summary:hover {
+  background: color-mix(in srgb, var(--color-bg) 74%, white 26%);
+}
+
+.route-filter-bar-expanded {
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--color-border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.route-filter-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.route-filter-row-label {
+  min-width: 46px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  padding-top: 6px;
+  flex-shrink: 0;
+  letter-spacing: 0.02em;
+}
+
+.route-filter-row-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Filter chip (pill button) */
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
+  background: color-mix(in srgb, var(--color-bg-card) 90%, white 10%);
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease, box-shadow 0.18s ease, transform 0.18s ease;
+  line-height: 1.3;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.filter-chip:hover {
+  background: color-mix(in srgb, var(--color-bg) 78%, white 22%);
+  border-color: color-mix(in srgb, var(--color-text-muted) 22%, var(--color-border));
+  color: var(--color-text-primary);
+  box-shadow: 0 8px 16px rgba(28,25,23, 0.05);
+  transform: translateY(-1px);
+}
+
+.filter-chip.active {
+  background: color-mix(in srgb, var(--color-info) 10%, var(--color-bg-card));
+  border-color: color-mix(in srgb, var(--color-info) 36%, var(--color-border));
+  color: var(--color-info);
+  font-weight: 500;
+  box-shadow: 0 10px 18px rgba(13,148,136, 0.08);
+}
+
+.route-filter-bar-summary-label {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--color-text-primary);
+}
+
+.route-filter-bar-summary-content {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-filter-bar-summary-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-bg-card) 88%, white 12%);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.route-filter-bar-summary-count.has-active {
+  background: color-mix(in srgb, var(--color-info) 12%, white);
+  color: var(--color-info);
+}
+
+.filter-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.filter-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.filter-chip-count {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.filter-chip.active .filter-chip-count {
+  color: var(--color-info);
+}
+
+/* ===== Route Card Grid (multi-column) ===== */
+.route-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 10px;
+  align-items: start;
+}
+
+/* Collapsed route card */
+.route-card-collapsed {
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border-color: var(--color-border);
+  background: var(--color-bg-card);
+  box-shadow: 0 4px 12px rgba(28,25,23, 0.05);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.route-card-collapsed.is-active {
+  border-color: var(--color-info);
+  box-shadow: 0 0 0 1px rgba(13,148,136, 0.25);
+}
+
+.route-card-collapsed:hover {
+  border-color: color-mix(in srgb, var(--color-info) 28%, var(--color-border));
+  box-shadow:
+    0 12px 22px rgba(28,25,23, 0.05),
+    0 0 0 1px color-mix(in srgb, var(--color-info) 10%, transparent);
+  transform: translateY(-1px);
+}
+
+/* Expanded route card spans full width */
+.route-card-expanded {
+  grid-column: 1 / -1;
+  border-radius: var(--radius-md);
+  border-color: var(--color-border);
+  background: var(--color-bg-card);
+  box-shadow: 0 8px 18px rgba(28,25,23, 0.06);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+.route-card-expanded-compact {
+  background: var(--color-bg-card);
+}
+
+.route-card-detail-panel {
+  grid-column: 1 / -1;
+  margin-top: -1px;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  /* Avoid scale/clip-path/will-change compositing: it blurs text on fractional DPR. */
+  transform: none;
+  filter: none;
+  opacity: 1;
+}
+
+.route-detail-panel-presence {
+  overflow: visible;
+}
+
+.route-detail-panel-presence.is-closing {
+  pointer-events: none;
+}
+
+.route-detail-panel-presence.is-open .route-card-detail-panel {
+  animation: none;
+}
+
+.route-detail-panel-presence.is-closing .route-card-detail-panel {
+  animation: none;
+}
+
+@keyframes route-detail-panel-in {
+  from, to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes route-detail-panel-out {
+  from, to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+[data-theme="dark"] .route-batch-bar {
+  background: color-mix(in srgb, var(--color-bg-card) 92%, #0b1220 8%);
+  box-shadow: none;
+}
+
+[data-theme="dark"] .route-filter-bar {
+  background: var(--color-bg-card);
+  box-shadow: 0 8px 18px rgba(28,25,23, 0.28);
+}
+
+[data-theme="dark"] .filter-chip {
+  background: color-mix(in srgb, var(--color-bg-card) 82%, #17191a 18%);
+  box-shadow: none;
+}
+
+[data-theme="dark"] .filter-chip:hover,
+[data-theme="dark"] .filter-chip.active {
+  box-shadow: none;
+}
+
+[data-theme="dark"] .route-card-collapsed {
+  background: var(--color-bg-card);
+  box-shadow: 0 8px 18px rgba(28,25,23, 0.28);
+}
+
+[data-theme="dark"] .route-card-expanded {
+  background: var(--color-bg-card);
+  box-shadow: 0 10px 22px rgba(28,25,23, 0.28);
+}
+
+@media (max-width: 768px) {
+  .route-batch-bar {
+    border-radius: var(--radius-md);
+    padding: 9px 10px;
+  }
+
+  .route-card-grid {
+    grid-template-columns: 1fr;
+  }
+}

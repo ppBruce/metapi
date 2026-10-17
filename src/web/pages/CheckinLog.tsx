@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
 import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
 import { useToast } from '../components/Toast.js';
+import { PillTabBg } from '../components/PillTabBg.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import {
   formatCheckinLogTime,
@@ -71,6 +72,7 @@ export default function CheckinLog() {
   const [triggering, setTriggering] = useState(false);
   const [filter, setFilter] = useState<LogFilter>('all');
   const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
+  const [expandedMessageId, setExpandedMessageId] = useState<number | null>(null);
   const [showFilters, setShowFilters] = useState(false);
   const isMobile = useIsMobile();
   const toast = useToast();
@@ -128,11 +130,15 @@ export default function CheckinLog() {
   // 兼容旧命名：后面渲染统一用 filtered
   const filtered = statusFilteredLogs;
 
-  const countBy = useMemo(
-    () => (target: Exclude<LogFilter, 'all'>) =>
-      timeFilteredLogs.filter((log) => getStatus(log) === target).length,
-    [timeFilteredLogs],
-  );
+  // One pass over timeFilteredLogs for all three tab counts — the old countBy
+  // re-walked the whole list once per status (3 full filters per render).
+  const statusCounts = useMemo(() => {
+    const counts: Record<Exclude<LogFilter, 'all'>, number> = { success: 0, failed: 0, skipped: 0 };
+    for (const log of timeFilteredLogs) {
+      counts[getStatus(log)] += 1;
+    }
+    return counts;
+  }, [timeFilteredLogs]);
 
   const hasActiveTimeRange = Boolean(fromInput || toInput);
 
@@ -237,15 +243,16 @@ export default function CheckinLog() {
     <div className="pill-tabs">
       {[
         { key: 'all' as const, label: '全部', count: timeFilteredLogs.length },
-        { key: 'success' as const, label: '成功', count: countBy('success') },
-        { key: 'failed' as const, label: '失败', count: countBy('failed') },
-        { key: 'skipped' as const, label: '跳过', count: countBy('skipped') },
+        { key: 'success' as const, label: '成功', count: statusCounts.success },
+        { key: 'failed' as const, label: '失败', count: statusCounts.failed },
+        { key: 'skipped' as const, label: '跳过', count: statusCounts.skipped },
       ].map((tab) => (
         <button
           key={tab.key}
           className={`pill-tab ${filter === tab.key ? 'active' : ''}`}
           onClick={() => setFilter(tab.key)}
         >
+          {filter === tab.key && <PillTabBg />}
           {tab.label}{' '}
           <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.7 }}>
             {tab.count}
@@ -461,7 +468,7 @@ export default function CheckinLog() {
                 const reason = getFailureReason(log);
                 return (
                   <tr key={log.checkin_logs?.id || log.id}>
-                    <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                    <td style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                       {formatCheckinLogTime(
                         log.checkin_logs?.createdAt || log.createdAt,
                       )}
@@ -513,12 +520,26 @@ export default function CheckinLog() {
                       )}
                     </td>
                     <td style={{ maxWidth: 360 }}>
+                      {/* Ellipsis has no escape hatch on desktop — clicking the
+                          cell toggles full wrap for that row (message text can
+                          be a full upstream error page excerpt). */}
                       <span
+                        role="button"
+                        tabIndex={0}
+                        title={log.checkin_logs?.message || log.message}
+                        onClick={() => setExpandedMessageId((current) => (current === log.id ? null : log.id))}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            setExpandedMessageId((current) => (current === log.id ? null : log.id));
+                          }
+                        }}
                         style={{
                           display: 'block',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
+                          whiteSpace: expandedMessageId === log.id ? 'normal' : 'nowrap',
+                          cursor: 'pointer',
                         }}
                       >
                         {log.checkin_logs?.message || log.message}

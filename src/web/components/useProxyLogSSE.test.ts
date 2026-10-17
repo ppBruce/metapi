@@ -169,6 +169,39 @@ describe('useProxyLogSSE', () => {
     root?.unmount();
   });
 
+  it('falls back to polling when the handshake keeps failing', async () => {
+    // Reproduces the quick-tunnel failure: the edge stamps a media type on the
+    // body-less POST, Fastify answers 415, and SSE can never connect. Retrying
+    // forever leaves the page with no refresh at all, so polling must take over.
+    fetchAuthenticatedResponse.mockResolvedValue({ ok: false, status: 415, body: null });
+    const onEvent = vi.fn();
+    let root: ReturnType<typeof create> | undefined;
+
+    await act(async () => {
+      root = create(createElement(Harness, { onEvent }));
+      await Promise.resolve();
+    });
+    expect(fetchAuthenticatedResponse).toHaveBeenCalledTimes(1);
+
+    // Second attempt after the first reconnect delay.
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchAuthenticatedResponse).toHaveBeenCalledTimes(2);
+
+    // Give up on SSE: no third attempt, polling instead.
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+    });
+    expect(fetchAuthenticatedResponse).toHaveBeenCalledTimes(2);
+    expect(onEvent).toHaveBeenCalledTimes(3);
+
+    root?.unmount();
+  });
+
   it('does not fall back when heartbeat arrives within watchdog window', async () => {
     const stream = createStream();
     fetchAuthenticatedResponse.mockResolvedValue({ ok: true, status: 200, body: stream.body });

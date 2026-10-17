@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { VChart } from '@visactor/react-vchart';
 import { api } from '../../api.js';
-import { useThemeLabelColor } from '../useThemeLabelColor.js';
+import { useThemeLabelColor, useThemeVar } from '../useThemeLabelColor.js';
 import { useIsMobile } from '../useIsMobile.js';
 import {
   CHART_CATEGORY_PALETTE,
@@ -10,6 +10,7 @@ import {
   SITE_CHART_HEADER_MIN_HEIGHT,
 } from './chartShared.js';
 import { SegmentedToggle } from './SegmentedToggle.js';
+import ChartLoadingState from './ChartLoadingState.js';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -63,6 +64,7 @@ export default function SiteTrendChart({ active = true }: SiteTrendChartProps) {
     }
   });
   const labelColor = useThemeLabelColor();
+  const axisColor = useThemeVar('--color-border-light', '#e5e7eb');
   const isMobile = useIsMobile();
   // Shared header height so both chart views keep the plot areas aligned.
   const headerStyleWithMinHeight: React.CSSProperties = isMobile
@@ -175,7 +177,7 @@ export default function SiteTrendChart({ active = true }: SiteTrendChartProps) {
         <div style={headerStyleWithMinHeight}>
           <div className="skeleton" style={{ width: 200, height: 32, borderRadius: 'var(--radius-sm)' }} />
         </div>
-        <div className="skeleton" style={{ width: '100%', height: 300, borderRadius: 'var(--radius-sm)' }} />
+        <ChartLoadingState height={300} />
       </div>
     );
   }
@@ -265,8 +267,8 @@ export default function SiteTrendChart({ active = true }: SiteTrendChartProps) {
           style: { fontSize: 11, fill: labelColor },
           formatMethod: (value: string | number) => formatTrendBucketLabel(String(value)),
         },
-        domainLine: { style: { stroke: 'var(--color-border-light)' } },
-        tick: { style: { stroke: 'var(--color-border-light)' } },
+        domainLine: { style: { stroke: axisColor } },
+        tick: { style: { stroke: axisColor } },
       },
       {
         orient: 'left',
@@ -278,7 +280,7 @@ export default function SiteTrendChart({ active = true }: SiteTrendChartProps) {
           },
           style: { fontSize: 11, fill: labelColor },
         },
-        grid: { style: { stroke: 'var(--color-border-light)', lineDash: [4, 4] } },
+        grid: { style: { stroke: axisColor, lineDash: [4, 4] } },
         domainLine: { visible: false },
       },
     ],
@@ -500,7 +502,7 @@ const focusChipStyle: React.CSSProperties = {
   padding: '4px 10px',
   borderRadius: 999,
   border: '1px solid var(--color-border)',
-  background: 'var(--color-bg)',
+  background: 'var(--color-bg-inset)',
   fontSize: 12,
   color: 'var(--color-text-secondary)',
 };

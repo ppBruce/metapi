@@ -888,6 +888,33 @@ function toOpenAiMessageContent(content: unknown): string | Array<string | Recor
   return blocks;
 }
 
+function responsesToolName(item: unknown): string {
+  if (!isRecord(item)) return '';
+  const type = asTrimmedString(item.type).toLowerCase();
+  if (type === 'function' && isRecord(item.function)) {
+    return asTrimmedString(item.function.name);
+  }
+  return asTrimmedString(item.name);
+}
+
+// Merge an inline additional_tools set into the top-level tool list, appending
+// only tools whose name is not already present. Unnamed entries are kept as-is
+// (they cannot collide by name).
+function mergeResponsesToolSets(baseTools: unknown, extraTools: unknown[]): unknown {
+  if (!Array.isArray(extraTools) || extraTools.length === 0) return baseTools;
+  const base = Array.isArray(baseTools) ? baseTools.slice() : [];
+  const seen = new Set(base.map(responsesToolName).filter(Boolean));
+  for (const tool of extraTools) {
+    const name = responsesToolName(tool);
+    if (name) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+    }
+    base.push(tool);
+  }
+  return base;
+}
+
 function convertResponsesToolsToOpenAi(rawTools: unknown): unknown {
   if (!Array.isArray(rawTools)) return rawTools;
 
@@ -967,6 +994,9 @@ export function convertResponsesBodyToOpenAiBody(
   let functionCallIndex = 0;
   let pendingToolCalls: OpenAiToolCall[] = [];
   const emittedToolCallIds = new Set<string>();
+  // Tools declared inline via {type:'additional_tools'} input items. These are
+  // merged into the request's tool set after conversion rather than dropped.
+  const additionalTools: unknown[] = [];
 
   const flushPendingToolCalls = () => {
     if (pendingToolCalls.length <= 0) return;
@@ -1004,6 +1034,9 @@ export function convertResponsesBodyToOpenAiBody(
 
     const itemType = asTrimmedString(item.type).toLowerCase();
     if (itemType === 'additional_tools') {
+      // Declares an extra tool set for the model (not a message). Collect the
+      // tools; they are merged into the request's tool list after conversion.
+      if (Array.isArray(item.tools)) additionalTools.push(...item.tools);
       return;
     }
 
@@ -1111,7 +1144,9 @@ export function convertResponsesBodyToOpenAiBody(
   if (normalizedBody.modalities !== undefined) payload.modalities = cloneJsonValue(normalizedBody.modalities);
   if (normalizedBody.audio !== undefined) payload.audio = cloneJsonValue(normalizedBody.audio);
   if (normalizedBody.parallel_tool_calls !== undefined) payload.parallel_tool_calls = normalizedBody.parallel_tool_calls;
-  if (normalizedBody.tools !== undefined) payload.tools = convertResponsesToolsToOpenAi(normalizedBody.tools);
+  if (normalizedBody.tools !== undefined || additionalTools.length > 0) {
+    payload.tools = convertResponsesToolsToOpenAi(mergeResponsesToolSets(normalizedBody.tools, additionalTools));
+  }
   if (normalizedBody.tool_choice !== undefined) payload.tool_choice = convertResponsesToolChoiceToOpenAi(normalizedBody.tool_choice);
   if (Array.isArray(payload.tools) && payload.tools.length === 0) {
     delete payload.tool_choice;

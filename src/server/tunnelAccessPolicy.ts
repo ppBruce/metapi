@@ -18,18 +18,23 @@ export function isTunnelAdminRequest(request: FastifyRequest): boolean {
 
 /**
  * Reject a tunnel-originated request that must be performed locally.
- * Returns true when the response has already been sent.
+ * Returns the reply when the response has been sent — always `return` this
+ * call's value from the (async) handler. Resolving the handler promise to
+ * `undefined` after a synchronous send restarts the onSend chain under
+ * Fastify 5 (two async onSend hooks in production) and ends in
+ * ERR_HTTP_HEADERS_SENT + FST_ERR_REP_ALREADY_SENT log noise; the reply
+ * object short-circuits wrap-thenable instead. The value is truthy either
+ * way, so `if (rejectTunnelAdminAction(...)) return reply;` keeps working.
  */
 export function rejectTunnelAdminAction(
   request: FastifyRequest,
   reply: FastifyReply,
   action: string,
-): boolean {
-  if (!isTunnelAdminRequest(request)) return false;
-  reply.code(403).send({
+): FastifyReply | undefined {
+  if (!isTunnelAdminRequest(request)) return undefined;
+  return reply.code(403).send({
     success: false,
     error: 'Tunnel admin-only action denied',
     message: `通过公网隧道时不允许${action}。请在本机/内网控制台操作。`,
   });
-  return true;
 }

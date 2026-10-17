@@ -1,0 +1,142 @@
+/* Dashboard endpoint card */
+.dashboard-endpoint-card {
+  min-width: 0;
+}
+
+.dashboard-endpoint-rows {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.dashboard-endpoint-row {
+  display: contents;
+}
+
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(1) > :nth-child(1) { grid-column: 1; grid-row: 1; }
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(1) > :nth-child(2) { grid-column: 2; grid-row: 1; }
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(1) > :nth-child(3) { grid-column: 3; grid-row: 1; }
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(1) { grid-column: 1; grid-row: 2; }
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(2) { grid-column: 2; grid-row: 2; }
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(3) { grid-column: 3; grid-row: 2; }
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(4) { grid-column: 4; grid-row: 2; }
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(3) > :nth-child(1) { grid-column: 1; grid-row: 3; }
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(3) > :nth-child(2) { grid-column: 2; grid-row: 3; }
+.dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(3) > :nth-child(3) { grid-column: 3; grid-row: 3; }
+
+.dashboard-endpoint-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-inset);
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.dashboard-endpoint-label.is-active {
+  border-color: color-mix(in srgb, var(--color-primary) 35%, var(--color-border));
+  background: color-mix(in srgb, var(--color-primary) 10%, var(--color-bg));
+  color: var(--color-primary);
+}
+
+.dashboard-endpoint-value {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 12px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-inset);
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-endpoint-status {
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-weight: 400;
+}
+
+.dashboard-endpoint-status.is-error {
+  color: var(--color-danger);
+}
+
+.dashboard-endpoint-copy,
+.dashboard-endpoint-action {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+.dashboard-endpoint-copy-placeholder,
+.dashboard-endpoint-action-placeholder {
+  display: block;
+  width: 64px;
+  height: 40px;
+}
+
+.dashboard-endpoint-action-placeholder {
+  width: 56px;
+}
+
+@media (max-width: 900px) {
+  /* Mobile/narrow: each address becomes a stacked block — label + action on
+     the first line, the full-width URL underneath (wraps instead of
+     clipping). 900px so iPad-portrait widths (769–900) are covered too,
+     where the two-column layout clips long tunnel URLs. */
+  .dashboard-endpoint-rows {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
+  .dashboard-endpoint-label {
+    justify-self: start;
+  }
+
+  /* 本地 */
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(1) > :nth-child(1) { grid-column: 1; grid-row: 1; }
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(1) > :nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(1) > :nth-child(3) { grid-column: 2; grid-row: 1; justify-self: end; }
+
+  /* 隧道 */
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(1) { grid-column: 1; grid-row: 3; }
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(2) { grid-column: 1 / -1; grid-row: 4; }
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(3) { grid-column: 2; grid-row: 3; justify-self: end; }
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(4) { grid-column: 2; grid-row: 3; justify-self: end; }
+
+  /* 直连 */
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(3) > :nth-child(1) { grid-column: 1; grid-row: 5; }
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(3) > :nth-child(2) { grid-column: 1 / -1; grid-row: 6; }
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(3) > :nth-child(3) { grid-column: 2; grid-row: 5; justify-self: end; }
+
+  /* Extra breathing room between address blocks (the label/action lines of
+     the 2nd and 3rd block sit 12px lower than a plain grid gap would put
+     them, so blocks read as "8px inside / 20px between"). */
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(1),
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(2) > :nth-child(3),
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(3) > :nth-child(1),
+  .dashboard-endpoint-rows > .dashboard-endpoint-row:nth-child(3) > :nth-child(3) {
+    margin-top: 12px;
+  }
+
+  .dashboard-endpoint-value {
+    white-space: normal;
+    word-break: break-all;
+    height: auto;
+    padding: 10px 12px;
+  }
+}

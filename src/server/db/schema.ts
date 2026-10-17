@@ -301,6 +301,14 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   clientConfidence: text('client_confidence'),
   errorMessage: text('error_message'),
   requestTraceId: text('request_trace_id'),
+  // Snapshot of the upstream token the channel held at write time.
+  // Channel rows are re-derived by patternRouteChannelSyncService, so a
+  // channel_id lookup would report the token a channel holds NOW, not the
+  // token this request actually consumed. Persisting the id at write time
+  // keeps historical rows (and their billings) attributable. Null on rows
+  // written before the column existed, and for key-addressable sites whose
+  // traffic is already identified by the account row.
+  tokenId: integer('token_id'),
   retryCount: integer('retry_count').default(0),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
 }, (table) => ({
@@ -312,6 +320,7 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   clientAppCreatedIdx: index('proxy_logs_client_app_id_created_at_idx').on(table.clientAppId, table.createdAt),
   clientFamilyCreatedIdx: index('proxy_logs_client_family_created_at_idx').on(table.clientFamily, table.createdAt),
   requestTraceCreatedIdx: index('proxy_logs_request_trace_id_created_at_idx').on(table.requestTraceId, table.createdAt),
+  tokenCreatedIdx: index('proxy_logs_token_id_created_at_idx').on(table.tokenId, table.createdAt),
 }));
 
 export const proxyDebugTraces = sqliteTable('proxy_debug_traces', {

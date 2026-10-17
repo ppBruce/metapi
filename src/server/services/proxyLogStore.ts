@@ -9,6 +9,7 @@ import {
   hasProxyLogDownstreamApiKeyIdColumn,
   hasProxyLogStreamTimingColumns,
   hasProxyLogRequestTraceIdColumn,
+  hasProxyLogTokenIdColumn,
 } from '../db/index.js';
 import { canonicalizeModelName } from '../shared/modelCanonicalization.js';
 import { emitProxyLogCreated } from './proxyLogEventBus.js';
@@ -40,6 +41,7 @@ export type ProxyLogInsertInput = {
   clientConfidence?: string | null;
   errorMessage?: string | null;
   requestTraceId?: string | null;
+  tokenId?: number | null;
   retryCount?: number | null;
   createdAt?: string | null;
 };
@@ -88,12 +90,19 @@ function buildProxyLogRequestTraceSelectFields() {
   };
 }
 
+function buildProxyLogTokenSelectFields() {
+  return {
+    tokenId: schema.proxyLogs.tokenId,
+  };
+}
+
 function buildProxyLogSelectFields(options?: {
   includeBillingDetails?: boolean;
   includeCacheTokens?: boolean;
   includeClientFields?: boolean;
   includeStreamTimingFields?: boolean;
   includeRequestTraceId?: boolean;
+  includeTokenId?: boolean;
 }) {
   return {
     ...buildProxyLogCoreSelectFields(),
@@ -106,6 +115,7 @@ function buildProxyLogSelectFields(options?: {
     ...(options?.includeClientFields ? buildProxyLogClientSelectFields() : {}),
     ...(options?.includeBillingDetails ? { billingDetails: schema.proxyLogs.billingDetails } : {}),
     ...(options?.includeRequestTraceId ? buildProxyLogRequestTraceSelectFields() : {}),
+    ...(options?.includeTokenId ? buildProxyLogTokenSelectFields() : {}),
   };
 }
 
@@ -121,6 +131,7 @@ export type ResolvedProxyLogSelectFields = {
   includeClientFields: boolean;
   includeStreamTimingFields: boolean;
   includeRequestTraceId: boolean;
+  includeTokenId: boolean;
   fields: ProxyLogSelectFields;
 };
 
@@ -130,6 +141,7 @@ export async function resolveProxyLogSelectFields(options?: {
   includeClientFields?: boolean;
   includeStreamTimingFields?: boolean;
   includeRequestTraceId?: boolean;
+  includeTokenId?: boolean;
 }) {
   const includeBillingDetails = options?.includeBillingDetails === true
     && await hasProxyLogBillingDetailsColumn();
@@ -141,6 +153,8 @@ export async function resolveProxyLogSelectFields(options?: {
     && await hasProxyLogStreamTimingColumns();
   const includeRequestTraceId = options?.includeRequestTraceId !== false
     && await hasProxyLogRequestTraceIdColumn();
+  const includeTokenId = options?.includeTokenId !== false
+    && await hasProxyLogTokenIdColumn();
 
   return {
     includeBillingDetails,
@@ -148,12 +162,14 @@ export async function resolveProxyLogSelectFields(options?: {
     includeClientFields,
     includeStreamTimingFields,
     includeRequestTraceId,
+    includeTokenId,
     fields: buildProxyLogSelectFields({
       includeBillingDetails,
       includeCacheTokens,
       includeClientFields,
       includeStreamTimingFields,
       includeRequestTraceId,
+      includeTokenId,
     }),
   };
 }
@@ -181,12 +197,14 @@ export async function withProxyLogSelectFields<T>(
           includeClientFields: selection.includeClientFields,
           includeStreamTimingFields: selection.includeStreamTimingFields,
           includeRequestTraceId: selection.includeRequestTraceId,
+          includeTokenId: selection.includeTokenId,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: false,
             includeCacheTokens: selection.includeCacheTokens,
             includeClientFields: selection.includeClientFields,
             includeStreamTimingFields: selection.includeStreamTimingFields,
             includeRequestTraceId: selection.includeRequestTraceId,
+            includeTokenId: selection.includeTokenId,
           }),
         };
         continue;
@@ -199,12 +217,14 @@ export async function withProxyLogSelectFields<T>(
           includeClientFields: selection.includeClientFields,
           includeStreamTimingFields: selection.includeStreamTimingFields,
           includeRequestTraceId: selection.includeRequestTraceId,
+          includeTokenId: selection.includeTokenId,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: selection.includeBillingDetails,
             includeCacheTokens: false,
             includeClientFields: selection.includeClientFields,
             includeStreamTimingFields: selection.includeStreamTimingFields,
             includeRequestTraceId: selection.includeRequestTraceId,
+            includeTokenId: selection.includeTokenId,
           }),
         };
         continue;
@@ -217,12 +237,14 @@ export async function withProxyLogSelectFields<T>(
           includeClientFields: false,
           includeStreamTimingFields: selection.includeStreamTimingFields,
           includeRequestTraceId: selection.includeRequestTraceId,
+          includeTokenId: selection.includeTokenId,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: selection.includeBillingDetails,
             includeCacheTokens: selection.includeCacheTokens,
             includeClientFields: false,
             includeStreamTimingFields: selection.includeStreamTimingFields,
             includeRequestTraceId: selection.includeRequestTraceId,
+            includeTokenId: selection.includeTokenId,
           }),
         };
         continue;
@@ -235,12 +257,14 @@ export async function withProxyLogSelectFields<T>(
           includeClientFields: selection.includeClientFields,
           includeStreamTimingFields: false,
           includeRequestTraceId: selection.includeRequestTraceId,
+          includeTokenId: selection.includeTokenId,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: selection.includeBillingDetails,
             includeCacheTokens: selection.includeCacheTokens,
             includeClientFields: selection.includeClientFields,
             includeStreamTimingFields: false,
             includeRequestTraceId: selection.includeRequestTraceId,
+            includeTokenId: selection.includeTokenId,
           }),
         };
         continue;
@@ -253,12 +277,34 @@ export async function withProxyLogSelectFields<T>(
           includeClientFields: selection.includeClientFields,
           includeStreamTimingFields: selection.includeStreamTimingFields,
           includeRequestTraceId: false,
+          includeTokenId: selection.includeTokenId,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: selection.includeBillingDetails,
             includeCacheTokens: selection.includeCacheTokens,
             includeClientFields: selection.includeClientFields,
             includeStreamTimingFields: selection.includeStreamTimingFields,
             includeRequestTraceId: false,
+            includeTokenId: selection.includeTokenId,
+          }),
+        };
+        continue;
+      }
+
+      if (selection.includeTokenId && isMissingProxyLogTokenIdColumnError(error)) {
+        selection = {
+          includeBillingDetails: selection.includeBillingDetails,
+          includeCacheTokens: selection.includeCacheTokens,
+          includeClientFields: selection.includeClientFields,
+          includeStreamTimingFields: selection.includeStreamTimingFields,
+          includeRequestTraceId: selection.includeRequestTraceId,
+          includeTokenId: false,
+          fields: buildProxyLogSelectFields({
+            includeBillingDetails: selection.includeBillingDetails,
+            includeCacheTokens: selection.includeCacheTokens,
+            includeClientFields: selection.includeClientFields,
+            includeStreamTimingFields: selection.includeStreamTimingFields,
+            includeRequestTraceId: selection.includeRequestTraceId,
+            includeTokenId: false,
           }),
         };
         continue;
@@ -386,6 +432,17 @@ export function isMissingProxyLogRequestTraceIdColumnError(error: unknown): bool
     );
 }
 
+export function isMissingProxyLogTokenIdColumnError(error: unknown): boolean {
+  const lowered = normalizeProxyLogStoreErrorMessage(error);
+  return lowered.includes('token_id')
+    && (
+      lowered.includes('does not exist')
+      || lowered.includes('unknown column')
+      || lowered.includes('no such column')
+      || lowered.includes('has no column named')
+    );
+}
+
 
 async function updateModelConnectivityFromProxyLog(input: ProxyLogInsertInput): Promise<void> {
   const accountId = Number(input.accountId);
@@ -501,6 +558,8 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
     && await hasProxyLogStreamTimingColumns();
   const includeRequestTraceId = Boolean(input.requestTraceId && String(input.requestTraceId).trim())
     && await hasProxyLogRequestTraceIdColumn();
+  const includeTokenId = input.tokenId != null && input.tokenId > 0
+    && await hasProxyLogTokenIdColumn();
 
   let allowBillingDetails = includeBillingDetails;
   let allowCacheTokens = includeCacheTokens;
@@ -509,6 +568,7 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
   let allowClientFields = includeClientFields;
   let allowStreamTimingFields = includeStreamTimingFields;
   let allowRequestTraceId = includeRequestTraceId;
+  let allowTokenId = includeTokenId;
 
   while (true) {
     const values = {
@@ -516,6 +576,7 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
       ...(allowRequestTraceId
         ? { requestTraceId: input.requestTraceId ?? null }
         : {}),
+      ...(allowTokenId ? { tokenId: input.tokenId } : {}),
       ...(allowStreamTimingFields
         ? {
           isStream: input.isStream ?? null,
@@ -585,6 +646,11 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
 
       if (allowRequestTraceId && isMissingProxyLogRequestTraceIdColumnError(error)) {
         allowRequestTraceId = false;
+        continue;
+      }
+
+      if (allowTokenId && isMissingProxyLogTokenIdColumnError(error)) {
+        allowTokenId = false;
         continue;
       }
 

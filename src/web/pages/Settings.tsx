@@ -59,6 +59,10 @@ type RuntimeSettings = {
   checkinCron: string;
   checkinScheduleMode: 'cron' | 'interval';
   checkinIntervalHours: number;
+  turnstileSolverEnabled: boolean;
+  turnstileSolverBaseUrl: string;
+  turnstileSolverApiKeyMasked: string;
+  turnstileSolverTimeoutSeconds: number;
   balanceRefreshCron: string;
   logCleanupCron: string;
   logCleanupUsageLogsEnabled: boolean;
@@ -134,6 +138,11 @@ export default function Settings() {
     checkinCron: '0 8 * * *',
     checkinScheduleMode: 'cron',
     checkinIntervalHours: 6,
+    // Turnstile 过盾求解器：默认关闭，与历史版本行为一致
+    turnstileSolverEnabled: false,
+    turnstileSolverBaseUrl: '',
+    turnstileSolverApiKeyMasked: '',
+    turnstileSolverTimeoutSeconds: 60,
     balanceRefreshCron: '0 * * * *',
     logCleanupCron: '0 6 * * *',
     logCleanupUsageLogsEnabled: false,
@@ -169,6 +178,9 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [testingCheckin, setTestingCheckin] = useState(false);
+  // Turnstile 求解器 API Key：显示服务端掩码，只有用户输入的新值才提交；
+  // 留空提交 = 保留已存 key（自建求解器通常根本不需要 key）。
+  const [turnstileSolverApiKeyDraft, setTurnstileSolverApiKeyDraft] = useState('');
   const [savingProxyTransport, setSavingProxyTransport] = useState(false);
   const [savingProxyFailureRules, setSavingProxyFailureRules] = useState(false);
   const [payloadVisualRules, setPayloadVisualRules] = useState<VisualPayloadRule[]>([]);
@@ -181,7 +193,6 @@ export default function Settings() {
   const [savingSecurity, setSavingSecurity] = useState(false);
   const [adminIpAllowlistText, setAdminIpAllowlistText] = useState('');
   const [clearingCache, setClearingCache] = useState(false);
-  const [clearingUsage, setClearingUsage] = useState(false);
   const [migrationDialect, setMigrationDialect] = useState<DbDialect>('postgres');
   const [migrationConnectionString, setMigrationConnectionString] = useState('');
   const [connectionMode, setConnectionMode] = useState<'shorthand' | 'advanced'>('shorthand');
@@ -260,7 +271,7 @@ export default function Settings() {
     borderRadius: 'var(--radius-sm)',
     fontSize: 13,
     outline: 'none',
-    background: 'var(--color-bg)',
+    background: 'var(--color-bg-inset)',
     color: 'var(--color-text-primary)',
   };
   const settingsModernCardStyle: React.CSSProperties = {
@@ -421,6 +432,12 @@ export default function Settings() {
         checkinIntervalHours: Number(runtimeInfo.checkinIntervalHours) >= 1
           ? Math.min(24, Math.trunc(Number(runtimeInfo.checkinIntervalHours)))
           : 6,
+        turnstileSolverEnabled: !!runtimeInfo.turnstileSolverEnabled,
+        turnstileSolverBaseUrl: String(runtimeInfo.turnstileSolverBaseUrl || ''),
+        turnstileSolverApiKeyMasked: String(runtimeInfo.turnstileSolverApiKeyMasked || ''),
+        turnstileSolverTimeoutSeconds: Number(runtimeInfo.turnstileSolverTimeoutSeconds) >= 15
+          ? Math.min(180, Math.trunc(Number(runtimeInfo.turnstileSolverTimeoutSeconds)))
+          : 60,
         balanceRefreshCron: runtimeInfo.balanceRefreshCron || '0 * * * *',
         logCleanupCron: runtimeInfo.logCleanupCron || '0 6 * * *',
         logCleanupUsageLogsEnabled: !!runtimeInfo.logCleanupUsageLogsEnabled,
@@ -544,6 +561,11 @@ export default function Settings() {
         checkinCron: runtime.checkinCron,
         checkinScheduleMode: runtime.checkinScheduleMode,
         checkinIntervalHours: runtime.checkinIntervalHours,
+        turnstileSolverEnabled: runtime.turnstileSolverEnabled,
+        turnstileSolverBaseUrl: runtime.turnstileSolverBaseUrl,
+        // 只有用户输入了新 key 才提交；留空 = 保留服务端已存的 key。
+        ...(turnstileSolverApiKeyDraft.trim() ? { turnstileSolverApiKey: turnstileSolverApiKeyDraft.trim() } : {}),
+        turnstileSolverTimeoutSeconds: runtime.turnstileSolverTimeoutSeconds,
         balanceRefreshCron: runtime.balanceRefreshCron,
         logCleanupCron: runtime.logCleanupCron,
         logCleanupUsageLogsEnabled: runtime.logCleanupUsageLogsEnabled,
@@ -551,6 +573,7 @@ export default function Settings() {
         logCleanupRetentionDays: runtime.logCleanupRetentionDays,
       });
       toast.success('定时任务设置已保存');
+      setTurnstileSolverApiKeyDraft('');
     } catch (err) {
       const errMessage = err instanceof Error ? err.message : String(err);
       toast.error(errMessage || '保存失败');
@@ -836,20 +859,6 @@ export default function Settings() {
     }
   };
 
-  const handleClearUsage = async () => {
-    if (!window.confirm('确认清理占用统计与使用日志？')) return;
-    setClearingUsage(true);
-    try {
-      const res = await api.clearUsageData();
-      toast.success(`占用统计已清理（日志 ${res.deletedProxyLogs || 0} 条）`);
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      toast.error(errMessage || '清理占用失败');
-    } finally {
-      setClearingUsage(false);
-    }
-  };
-
   const closeFactoryResetModal = () => {
     if (factoryResetting) return;
     setFactoryResetOpen(false);
@@ -991,9 +1000,43 @@ export default function Settings() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 480px), 1fr))', gap: 16 }}>
+        <div className="card animate-slide-up stagger-2" style={{ padding: 20, order: 1, height: '100%' }}>
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>重置操作</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 12 }}>
+            重新拉取站点模型列表并重建路由通道，不影响账号、令牌数据。
+          </div>
+          <button onClick={handleClearCache} disabled={clearingCache} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', whiteSpace: 'nowrap' }}>
+            {clearingCache ? <><span className="spinner spinner-sm" /> 清理中...</> : '清除缓存并重建路由'}
+          </button>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, margin: '14px 0 12px' }}>
+            清空全部数据库内容并切回默认 SQLite；管理员 Token 保留，完成后自动刷新。
+          </div>
+          <button
+            onClick={() => setFactoryResetOpen(true)}
+            disabled={isTunnelClientView}
+            title={isTunnelClientView ? '公网隧道访问时不可用，请在本机/内网控制台操作' : undefined}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              fontSize: 13,
+              fontWeight: 500,
+              padding: '6px 12px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--color-danger)',
+              color: 'var(--color-danger)',
+              background: 'transparent',
+              whiteSpace: 'nowrap',
+              cursor: isTunnelClientView ? 'not-allowed' : 'pointer',
+            }}
+          >
+            重新初始化系统
+          </button>
+        </div>
+
         <div className="card animate-slide-up stagger-2" style={{ padding: 20, order: 1 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>管理员登录令牌</div>
-          <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 12 }}>
+          <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg-inset)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 12 }}>
             {maskedToken || '****'}
           </code>
           <button onClick={() => setShowChangeKey(true)} className="btn btn-primary" disabled={isTunnelClientView} title={isTunnelClientView ? '公网隧道访问时不可修改' : undefined}>修改登录令牌</button>
@@ -1020,7 +1063,7 @@ export default function Settings() {
             padding: '12px 14px',
             borderRadius: 'var(--radius-sm)',
             border: '1px solid var(--color-border-light)',
-            background: 'var(--color-bg)',
+            background: 'var(--color-bg-inset)',
             cursor: isTunnelClientView ? 'not-allowed' : 'pointer',
             opacity: isTunnelClientView ? 0.55 : 1,
           }}>
@@ -1058,8 +1101,18 @@ export default function Settings() {
         </div>
 
         <div className="card animate-slide-up stagger-2" style={{ padding: 20, order: 3, gridColumn: '1 / -1' }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>定时任务</div>
-          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(140px, 180px) minmax(140px, 180px) max-content', gap: 12, alignItems: 'end', marginBottom: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>定时任务</div>
+            <button
+              onClick={triggerScheduleCheckin}
+              disabled={testingCheckin}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', whiteSpace: 'nowrap', flexShrink: 0 }}
+            >
+              {testingCheckin ? '触发中...' : '测试一次签到'}
+            </button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(140px, 180px) minmax(140px, 180px)', gap: 12, marginBottom: 12 }}>
             <div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>签到方式</div>
               <ModernSelect
@@ -1072,7 +1125,11 @@ export default function Settings() {
               />
             </div>
             <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>签到间隔</div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                签到间隔{runtime.checkinScheduleMode !== 'interval' && (
+                  <span style={{ color: 'var(--color-text-muted)', opacity: 0.75 }}>（间隔方式可用）</span>
+                )}
+              </div>
               <ModernSelect
                 value={String(runtime.checkinIntervalHours)}
                 onChange={(value) => setRuntime((prev) => ({
@@ -1083,14 +1140,6 @@ export default function Settings() {
                 options={CHECKIN_INTERVAL_OPTIONS}
               />
             </div>
-            <button
-              onClick={triggerScheduleCheckin}
-              disabled={testingCheckin}
-              className="btn btn-ghost"
-              style={{ border: '1px solid var(--color-border)', whiteSpace: 'nowrap' }}
-            >
-              {testingCheckin ? '触发中...' : '测试一次签到'}
-            </button>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
             <div>
@@ -1109,6 +1158,73 @@ export default function Settings() {
                 onChange={(e) => setRuntime((prev) => ({ ...prev, balanceRefreshCron: e.target.value }))}
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
+            </div>
+          </div>
+          <div
+            style={{
+              marginTop: 16,
+              paddingTop: 16,
+              borderTop: '1px solid var(--color-border-light)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--color-text-primary)' }}>
+                Turnstile 过盾求解器
+              </span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-text-secondary)', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={runtime.turnstileSolverEnabled}
+                  onChange={(e) => setRuntime((prev) => ({ ...prev, turnstileSolverEnabled: e.target.checked }))}
+                  style={{ width: 16, height: 16, marginTop: 0, flexShrink: 0 }}
+                />
+                启用
+              </label>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10, lineHeight: 1.45 }}>
+              自动签到被站点 Turnstile 校验拦截时，实时调用求解器获取 token 后重放签到。
+              默认关闭，未配置时签到行为与历史版本完全一致。
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(220px, 1fr) minmax(160px, 180px)', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>求解器地址</div>
+                <input
+                  value={runtime.turnstileSolverBaseUrl}
+                  onChange={(e) => setRuntime((prev) => ({ ...prev, turnstileSolverBaseUrl: e.target.value }))}
+                  placeholder="http://127.0.0.1:5091（自建求解器）"
+                  style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                  disabled={!runtime.turnstileSolverEnabled}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>API Key（可留空）</div>
+                <input
+                  type="password"
+                  value={turnstileSolverApiKeyDraft}
+                  onChange={(e) => setTurnstileSolverApiKeyDraft(e.target.value)}
+                  placeholder={runtime.turnstileSolverApiKeyMasked || (runtime.turnstileSolverEnabled ? '自建求解器可留空' : '')}
+                  autoComplete="off"
+                  style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                  disabled={!runtime.turnstileSolverEnabled}
+                />
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(220px, 1fr) minmax(160px, 180px)', gap: 12, marginTop: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>求解超时（秒）</div>
+                <input
+                  type="number"
+                  value={runtime.turnstileSolverTimeoutSeconds}
+                  onChange={(e) => setRuntime((prev) => ({ ...prev, turnstileSolverTimeoutSeconds: Math.min(180, Math.max(15, Math.trunc(Number(e.target.value) || 60))) }))}
+                  style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                  disabled={!runtime.turnstileSolverEnabled}
+                />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 2 }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.45 }}>
+                  云端求解服务需填 API Key；自建求解器（如 turnstile-solver）通常无需鉴权，留空即可。
+                </div>
+              </div>
             </div>
           </div>
           <div
@@ -2078,7 +2194,7 @@ export default function Settings() {
                   />
                 </div>
               )}
-              <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)' }}>
+              <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg-inset)', borderRadius: 'var(--radius-sm)', fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)' }}>
                 {generatedConnectionString || 'Fill host/user/password to generate connection string'}
               </code>
             </div>
@@ -2158,33 +2274,7 @@ export default function Settings() {
           )}
         </div>
 
-        <div style={{ order: 0, gridColumn: '1 / -1' }}><UpdateCenterSection /></div>
-
-        <div className="card animate-slide-up stagger-7" style={{ padding: 20, order: 10, border: '1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border))' }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10, color: 'var(--color-danger)' }}>危险操作</div>
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 12 }}>
-            重新初始化系统会清空当前 metapi 使用中的全部数据库内容；若当前运行在外部 MySQL/Postgres，也会先清空该外部库中的 metapi 数据，然后切回默认 SQLite。
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 14 }}>
-            完成后管理员 Token 保留当前值不变，页面将自动刷新并恢复登录态。
-          </div>
-          <button
-            onClick={() => setFactoryResetOpen(true)}
-            disabled={isTunnelClientView}
-            title={isTunnelClientView ? '公网隧道访问时不可用，请在本机/内网控制台操作' : undefined}
-            className="btn btn-danger"
-          >
-            重新初始化系统
-          </button>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}>
-            <button onClick={handleClearCache} disabled={clearingCache} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-              {clearingCache ? <><span className="spinner spinner-sm" /> 清理中...</> : '清除缓存并重建路由'}
-            </button>
-            <button onClick={handleClearUsage} disabled={clearingUsage} className="btn btn-link btn-link-warning">
-              {clearingUsage ? <><span className="spinner spinner-sm" /> 清理中...</> : '清除占用与使用日志'}
-            </button>
-          </div>
-        </div>
+        <div style={{ order: 0, height: '100%', display: 'flex' }}><UpdateCenterSection /></div>
 
         <div className="card animate-slide-up stagger-7" style={{ padding: 20, order: 9 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>会话与安全</div>
@@ -2197,7 +2287,7 @@ export default function Settings() {
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
             当前识别到的管理端 IP（由服务端判定）：
           </div>
-          <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 10 }}>
+          <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg-inset)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 10 }}>
             {runtime.currentAdminIp || '未知'}
           </code>
           <textarea
@@ -2222,7 +2312,20 @@ export default function Settings() {
                 clearAuthSession(localStorage);
                 window.location.reload();
               }}
-              className="btn btn-danger"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                fontSize: 13,
+                fontWeight: 500,
+                padding: '6px 12px',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--color-danger)',
+                color: 'var(--color-danger)',
+                background: 'transparent',
+                whiteSpace: 'nowrap',
+                cursor: 'pointer',
+              }}
             >
               退出登录
             </button>

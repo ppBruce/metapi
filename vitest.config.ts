@@ -1,6 +1,12 @@
 import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  // Persist the transform/deps cache under node_modules so CI can cache it
+  // across runs (deps + vite transform results only change with the lockfile
+  // or config, matching the setup-node cache key). Set at the Vite level —
+  // vitest's own `test.cache.dir` is deprecated; its caches land in
+  // cacheDir/vitest, still inside node_modules/.vitest for the CI cache.
+  cacheDir: 'node_modules/.vitest',
   test: {
     exclude: [
       ...configDefaults.exclude,
@@ -31,11 +37,5 @@ export default defineConfig({
     // (reading 'close')` in `afterAll` (the hook timed out before `app` was
     // assigned). Give hooks a larger budget than tests.
     hookTimeout: 60_000,
-    // Persist the transform/deps cache under node_modules so CI can cache it
-    // across runs (deps + vite transform results only change with the
-    // lockfile or config, matching the setup-node cache key).
-    cache: {
-      dir: 'node_modules/.vitest',
-    },
   },
 });

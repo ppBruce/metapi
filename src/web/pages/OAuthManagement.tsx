@@ -2196,8 +2196,8 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
               <div className="oauth-import-picker-copy">已选择 {importDrafts.length} 份 JSON，点击可重新选择</div>
               <div className="oauth-import-picker-hint">支持多选，只会导入其中的 OAuth 账号。</div>
               <div className="oauth-import-file-list">
-                {importDrafts.map((draft) => (
-                  <div key={draft.sourceName} className="oauth-import-file-item">
+                {importDrafts.map((draft, index) => (
+                  <div key={`${draft.sourceName}-${index}`} className="oauth-import-file-item">
                     <span className="oauth-import-file-name">
                       {draft.sourceName}
                       {draft.error ? ` · ${draft.error}` : ''}
@@ -2261,8 +2261,8 @@ export default function OAuthManagement({ siteId: filterSiteId }: OAuthManagemen
                 : `已识别 ${importPreviewSummary.totalCount} 份 JSON，其中 ${importPreviewSummary.invalidCount} 份无效。`}
             </div>
             <div className="oauth-import-preview-list">
-              {importPreviewSummary.items.map((item) => (
-                <div key={item.sourceName} className="oauth-import-preview-item">
+              {importPreviewSummary.items.map((item, index) => (
+                <div key={`${item.sourceName}-${index}`} className="oauth-import-preview-item">
                   <div className="oauth-import-preview-item-head">
                     <div className="oauth-import-preview-item-name">{item.sourceName}</div>
                     <span className={`badge oauth-import-preview-badge ${item.valid ? 'badge-success' : 'badge-danger'}`}>

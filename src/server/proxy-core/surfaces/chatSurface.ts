@@ -23,17 +23,10 @@ import {
 import {executeEndpointFlow} from '../orchestration/endpointFlow.js';
 import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
 import {
-  downgradeReasoningEffortInBody,
-  isReasoningEffortRejection,
-  isNoneReasoningEffortRejection,
-  readReasoningEffortFromBody,
-  resolveInPlaceEffortRetryCeiling,
-  stripReasoningEffortFromBody,
-} from '../../services/reasoningEffort.js';
-import {
-  clampRequestBodyToSiteEffortCeiling,
-  learnReasoningEffortCeilingFromFailure,
-} from '../../services/siteReasoningEffortCapabilityService.js';
+  clampBuiltBodyToEffortCeiling,
+  isEffortRejectionRetryable,
+  recoverForEffortRejection,
+} from './effortRecovery.js';
 import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
 import { anthropicMessagesTransformer } from '../../transformers/anthropic/messages/index.js';
 import { shouldPreferResponsesForAnthropicContinuation } from '../../transformers/anthropic/messages/compatibility.js';
@@ -65,7 +58,7 @@ import {
   getProxyMaxChannelRetries,
   resolveProxyChannelFirstByteTimeoutMs,
 } from '../../services/proxyChannelRetry.js';
-import { shouldAbortSameSiteEndpointFallback, resolveFailoverBackoffMs, sleepMs, canRetryInPlaceForRecoveringFailure, isRecoveringTransientFailure, shouldGraceRetryInPlaceOnce } from '../../services/proxyRetryPolicy.js';
+import { shouldAbortSameSiteEndpointFallback, resolveFailoverBackoffMs, sleepMs, canRetryInPlaceForRecoveringFailure, isRecoveringTransientFailure, shouldGraceRetryInPlaceOnce, shouldInPlaceRetryEmptyContentOnce } from '../../services/proxyRetryPolicy.js';
 import { createRequestTraceId } from '../../services/requestTraceId.js';
 import { applyOpenAiServiceTierPolicy } from '../serviceTierPolicy.js';
 import { maybeHandleWebSearchOnlySimulation } from '../webSearchSimulation.js';
@@ -281,6 +274,8 @@ export async function handleChatSurfaceRequest(
     // the same window, so a second same-channel retry only burns time that
     // a different channel could use.
     let graceRetriedOnce = false;
+    // 空内容（含 pure-thinking 截断）：同站同账号原地重试一次，失败才切站。
+    let emptyContentRetriedOnce = false;
     const lastRetryFailure = {
       current: null as ReturnType<typeof finalizeRetryAsUpstreamFailure> | null,
     };
@@ -326,7 +321,7 @@ export async function handleChatSurfaceRequest(
       const terminalFailureOutcome = args.failureOutcome.action === 'retry'
         ? (
           canFailoverToNextChannel(reply)
-          && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+          && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, args.reason))
             ? null
             : args.finalizeTerminalRetry()
         )
@@ -343,6 +338,12 @@ export async function handleChatSurfaceRequest(
           graceRetriedOnce = true;
           inPlaceRetryChannel = args.selected;
           await sleepMs(resolveFailoverBackoffMs(args.status, args.reason, config.proxyFailoverBackoffMs));
+          return 'retried';
+        }
+        // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+        if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, args.reason)) {
+          emptyContentRetriedOnce = true;
+          inPlaceRetryChannel = args.selected;
           return 'retried';
         }
         if (inPlaceRecoveringRetry) {
@@ -365,7 +366,22 @@ export async function handleChatSurfaceRequest(
     };
 
   while (true) {
-    if (++loopGuard > LOOP_GUARD_MAX) break;
+    if (++loopGuard > LOOP_GUARD_MAX) {
+      console.error(`[proxy/chat] attempt loop exceeded LOOP_GUARD_MAX (${LOOP_GUARD_MAX}); failing request.`);
+      await reportProxyAllFailed({
+        model: requestedModel,
+        reason: 'Attempt loop exceeded the safety cap',
+        outcome: 'request_failed',
+        attemptedChannels: excludeChannelIds.length,
+        configuredAttempts: maxRetries + 1,
+      });
+      const guardPayload = {
+        error: { message: 'Upstream attempt loop exceeded the safety cap', type: 'server_error' as const },
+      };
+      await finalizeDebugFailure(502, guardPayload, null);
+      sendReplyIfWritable(reply, 502, guardPayload);
+      return reply;
+    }
     if (retryCount > maxRetries && !recoveryPass) {
       if (allFailuresRecovering && config.proxyFailoverBackoffMs > 0) {
         recoveryPass = true;
@@ -555,7 +571,7 @@ export async function handleChatSurfaceRequest(
         // A relay that already told us a value is not in its ladder must not be
         // sent that value again — clamp the built body to the ceiling learned
         // for this site + protocol (see siteReasoningEffortCapabilityService).
-        clampRequestBodyToSiteEffortCeiling(builtBody, selected.site.id, endpoint);
+        clampBuiltBodyToEffortCeiling(builtBody, selected.site.id, endpoint);
         return {
           endpoint,
           path: endpointRequest.path,
@@ -588,6 +604,7 @@ export async function handleChatSurfaceRequest(
             selected,
             siteUrl: siteApiBaseUrl,
             buildRequest: (endpoint) => buildEndpointRequest(endpoint),
+            bodyReadOptions: bodyReadGuards,
           });
           if (recovered?.upstream?.ok) {
             return recovered;
@@ -602,10 +619,17 @@ export async function handleChatSurfaceRequest(
         paramOverride: selected.site.paramOverride ?? null,
         disableCrossProtocolFallback: config.disableCrossProtocolFallback,
         firstByteTimeoutMs: resolveProxyChannelFirstByteTimeoutMs(retryCount),
+        bodyReadOptions: bodyReadGuards,
         endpointCandidates,
         buildRequest: (endpoint) => buildEndpointRequest(endpoint),
         dispatchRequest,
         tryRecover,
+        // Overrides (paramOverride/requestOverrideRules) merge AFTER the
+        // build-time clamp, so clamp the FINAL body too — a configured
+        // override must not resurrect a value this relay already rejected.
+        enforceEffortCeiling: (body, endpoint) => {
+          clampBuiltBodyToEffortCeiling(body, selected.site.id, endpoint);
+        },
         shouldAbortRemainingEndpoints: (ctx) => shouldAbortSameSiteEndpointFallback(
           ctx.response.status,
           ctx.rawErrText || ctx.errText,
@@ -615,46 +639,30 @@ export async function handleChatSurfaceRequest(
         // accepts. onAttemptFailure just downgraded the shared body, so
         // redispach the SAME endpoint on this channel immediately instead of
         // cascading elsewhere with a value other relays may also refuse.
-        shouldRetryInPlace: (ctx) => ctx.response.status === 400
-          && isReasoningEffortRejection(ctx.rawErrText || ctx.errText),
+        shouldRetryInPlace: (ctx) => isEffortRejectionRetryable(
+          ctx.response.status,
+          ctx.rawErrText || ctx.errText,
+        ),
         onAttemptFailure: async (ctx) => {
           // A 400 that names the effort means the value we forwarded is not in
           // this upstream's accepted ladder: relays that only take
           // low/medium/high reject `max`, and the Anthropic messages conversion
           // rejects `xhigh`. Step the value down one rung so the NEXT attempt
-          // (the failover retry) can actually complete, instead of replaying the
-          // same rejected body against every channel on the route. Only a
+          // (the in-place retry, or the failover retry) can complete, instead
+          // of replaying the same rejected body against every channel. Only a
           // rejection downgrades — the first attempt always sends exactly what
-          // the client asked for.
-          if (ctx.response.status === 400 && isReasoningEffortRejection(ctx.rawErrText || ctx.errText)) {
-            // Two kinds of effort verdict:
-            // 1) `none` rejected outright — the model does not support
-            //    disabling reasoning and no ladder rung sits below `none`.
-            //    Strip the field so the in-place retry goes out without it.
-            // 2) A ladder rejection — remember the verdict for this
-            //    site+protocol so later requests stop opening with a value
-            //    this relay refuses, and step this request's own body down
-            //    one rung for the in-place retry. A rejection that spells
-            //    out its accepted ladder ("valid levels: low, medium,
-            //    high") teaches the top accepted rung directly instead of
-            //    one mechanical step below the rejected value.
-            if (isNoneReasoningEffortRejection(ctx.rawErrText || ctx.errText)) {
-              stripReasoningEffortFromBody(resolvedOpenAiBody);
-            } else {
-              const taughtCeiling = resolveInPlaceEffortRetryCeiling({
-                rejectedEffort: readReasoningEffortFromBody(resolvedOpenAiBody),
-                errorText: ctx.rawErrText || ctx.errText,
-              });
-              learnReasoningEffortCeilingFromFailure({
-                siteId: selected.site.id,
-                endpoint: ctx.request.endpoint,
-                errorText: ctx.rawErrText || ctx.errText,
-                body: resolvedOpenAiBody,
-                taughtCeiling,
-              });
-              downgradeReasoningEffortInBody(resolvedOpenAiBody);
-            }
-          }
+          // the client asked for. Shared logic lives in effortRecovery.ts so
+          // the chat/messages/responses surfaces behave identically.
+          recoverForEffortRejection({
+            status: ctx.response.status,
+            errText: ctx.rawErrText || ctx.errText,
+            siteId: selected.site.id,
+            endpoint: ctx.request.endpoint,
+            bodies: [resolvedOpenAiBody],
+            // The relay judged the FINAL outbound body (overrides merged);
+            // learning must use its effort, not the source's client value.
+            rejectedBody: ctx.request.body,
+          });
           const memoryWrite = recordUpstreamEndpointFailure({
             ...endpointRuntimeContext,
             endpoint: ctx.request.endpoint,
@@ -777,7 +785,7 @@ export async function handleChatSurfaceRequest(
           type: 'server_error',
         },
       });
-      return;
+      return reply;
     }
     const channelLease = leaseResult.lease;
 
@@ -953,7 +961,7 @@ export async function handleChatSurfaceRequest(
                 finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(502, failureReason),
                 upstreamPath: successfulUpstreamPath,
               }) === 'retried') continue;
-              return;
+              return reply;
             }
             await recordStreamSuccess(latency);
             await finalizeDebugSuccess(
@@ -1022,7 +1030,7 @@ export async function handleChatSurfaceRequest(
             const terminalFailureOutcome = failureOutcome.action === 'retry'
               ? (
                 canFailoverToNextChannel(reply)
-                && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+                && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason))
                   ? null
                   : finalizeRetryAsUpstreamFailure(failure.status, failure.reason)
               )
@@ -1041,6 +1049,12 @@ export async function handleChatSurfaceRequest(
                 graceRetriedOnce = true;
                 inPlaceRetryChannel = selected;
                 await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
+                continue;
+              }
+              // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+              if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason)) {
+                emptyContentRetriedOnce = true;
+                inPlaceRetryChannel = selected;
                 continue;
               }
               if (inPlaceRecoveringRetry) {
@@ -1063,7 +1077,7 @@ export async function handleChatSurfaceRequest(
               successfulUpstreamPath,
             );
             sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-            return;
+            return reply;
           }
 
           const streamResult = streamSession.consumeUpstreamFinalPayload(fallbackData, fallbackText, streamResponse);
@@ -1103,7 +1117,7 @@ export async function handleChatSurfaceRequest(
               finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(502, failureReason),
               upstreamPath: successfulUpstreamPath,
             }) === 'retried') continue;
-            return;
+            return reply;
           }
           await recordStreamSuccess(latency);
           await finalizeDebugSuccess(
@@ -1185,7 +1199,7 @@ export async function handleChatSurfaceRequest(
               finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(502, failureReason),
               upstreamPath: successfulUpstreamPath,
             }) === 'retried') continue;
-            return;
+            return reply;
           }
 
           // Once SSE has been hijacked and streamed downstream, we can no longer
@@ -1220,7 +1234,7 @@ export async function handleChatSurfaceRequest(
       let rawText = '';
       let upstreamData: unknown;
       if (upstreamContentType.includes('text/event-stream') && successfulUpstreamPath.endsWith('/responses')) {
-        const collected = await collectResponsesFinalPayloadFromSse(upstream, modelName);
+        const collected = await collectResponsesFinalPayloadFromSse(upstream, modelName, bodyReadGuards);
         rawText = collected.rawText;
         upstreamData = collected.payload;
       } else {
@@ -1268,7 +1282,7 @@ export async function handleChatSurfaceRequest(
         const terminalFailureOutcome = failureOutcome.action === 'retry'
           ? (
             canFailoverToNextChannel(reply)
-            && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+            && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason))
               ? null
               : finalizeRetryAsUpstreamFailure(failure.status, failure.reason)
           )
@@ -1284,6 +1298,12 @@ export async function handleChatSurfaceRequest(
             graceRetriedOnce = true;
             inPlaceRetryChannel = selected;
             await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
+            continue;
+          }
+          // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+          if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason)) {
+            emptyContentRetriedOnce = true;
+            inPlaceRetryChannel = selected;
             continue;
           }
           if (inPlaceRecoveringRetry) {
@@ -1306,7 +1326,7 @@ export async function handleChatSurfaceRequest(
           successfulUpstreamPath,
         );
         sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-        return;
+        return reply;
       }
       const normalizedFinal = isGeminiNativeRuntimePath(successfulUpstreamPath)
         ? buildOpenAiFinalFromGeminiNativePayload(upstreamData, modelName, rawText)
@@ -1394,7 +1414,7 @@ export async function handleChatSurfaceRequest(
         }
         await finalizeDebugFailure(endpointFailureStatus || 400, payload, null);
         sendReplyIfWritable(reply, endpointFailureStatus || 400, payload);
-        return;
+        return reply;
       }
       if (isSiteApiEndpointFailure) {
         const failureOutcome = await failureToolkit.handleUpstreamFailure({
@@ -1413,7 +1433,7 @@ export async function handleChatSurfaceRequest(
         const terminalFailureOutcome = failureOutcome.action === 'retry'
           ? (
             canFailoverToNextChannel(reply)
-            && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+            && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err.message || null))
               ? null
               : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err.message || 'unknown error')
           )
@@ -1426,6 +1446,12 @@ export async function handleChatSurfaceRequest(
             graceRetriedOnce = true;
             inPlaceRetryChannel = selected;
             await sleepMs(resolveFailoverBackoffMs(endpointFailureStatus || 502, err.message || null, config.proxyFailoverBackoffMs));
+            continue;
+          }
+          // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+          if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err.message || null)) {
+            emptyContentRetriedOnce = true;
+            inPlaceRetryChannel = selected;
             continue;
           }
           if (inPlaceRecoveringRetry) {
@@ -1454,7 +1480,7 @@ export async function handleChatSurfaceRequest(
           null,
         );
         sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-        return;
+        return reply;
       }
       const failureOutcome = await failureToolkit.handleExecutionError({
         selected,
@@ -1470,7 +1496,7 @@ export async function handleChatSurfaceRequest(
       const terminalFailureOutcome = failureOutcome.action === 'retry'
         ? (
           canFailoverToNextChannel(reply)
-          && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+          && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null))
             ? null
             : finalizeRetryAsExecutionFailure(err?.message || 'network failure')
         )
@@ -1483,6 +1509,12 @@ export async function handleChatSurfaceRequest(
           graceRetriedOnce = true;
           inPlaceRetryChannel = selected;
           await sleepMs(resolveFailoverBackoffMs(502, err?.message || null, config.proxyFailoverBackoffMs));
+          continue;
+        }
+        // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+        if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null)) {
+          emptyContentRetriedOnce = true;
+          inPlaceRetryChannel = selected;
           continue;
         }
         if (inPlaceRecoveringRetry) {
@@ -1505,7 +1537,7 @@ export async function handleChatSurfaceRequest(
         null,
       );
       sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-      return;
+      return reply;
       } finally {
         channelLease.release();
       }

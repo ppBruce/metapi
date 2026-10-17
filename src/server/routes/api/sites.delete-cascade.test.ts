@@ -42,6 +42,7 @@ describe('site deletion connection cascade', () => {
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
+    await db.delete(schema.proxyLogs).run();
     await db.delete(schema.siteAnnouncements).run();
     await db.delete(schema.siteApiEndpoints).run();
     await db.delete(schema.siteDisabledModels).run();
@@ -85,6 +86,14 @@ describe('site deletion connection cascade', () => {
       modelName: 'gpt-5',
       available: true,
     }).run();
+    // A usage log on this account — must be dropped with the site, not orphaned.
+    await db.insert(schema.proxyLogs).values({
+      accountId: account.id,
+      modelRequested: 'gpt-5',
+      modelActual: 'gpt-5',
+      status: 'success',
+      httpStatus: 200,
+    }).run();
 
     // Warm connection-management cache before deletion.
     const warm = await app.inject({ method: 'GET', url: '/api/accounts?limit=100' });
@@ -102,6 +111,9 @@ describe('site deletion connection cascade', () => {
     expect(await db.select().from(schema.accountTokens).all()).toHaveLength(0);
     expect(await db.select().from(schema.modelAvailability).all()).toHaveLength(0);
     expect(await db.select().from(schema.tokenModelAvailability).all()).toHaveLength(0);
+    // Deleting a site must not orphan its usage logs (proxy_logs has no FK to
+    // accounts); they are dropped together with the accounts.
+    expect(await db.select().from(schema.proxyLogs).all()).toHaveLength(0);
   });
 
   it('removes pure API Key connections that only store accounts.api_token', async () => {

@@ -188,7 +188,7 @@ export default function UpdateCenterSection() {
   ];
 
   return (
-    <div className="card" style={{ padding: 14 }}>
+    <div className="card" style={{ padding: 14, flex: 1 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
         <div style={{ fontSize: 13, fontWeight: 600 }}>{tr('更新中心')}</div>
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>

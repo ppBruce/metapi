@@ -74,6 +74,25 @@ describe('PaginationControls', () => {
     root.unmount();
   });
 
+  it('offers 首页 only when page 1 is outside the numeric window', () => {
+    const nearStart = create(
+      <PaginationControls page={2} totalPages={20} onPageChange={onPageChange} visible />,
+    );
+    expect(collectText(nearStart.root)).not.toContain('首页');
+    nearStart.unmount();
+
+    const deep = create(
+      <PaginationControls page={15} totalPages={20} onPageChange={onPageChange} visible />,
+    );
+    const firstButton = deep.root.findAll(
+      (node) => node.type === 'button' && node.props?.['aria-label'] === '回到第一页',
+    );
+    expect(firstButton).toHaveLength(1);
+    firstButton[0]!.props.onClick();
+    expect(onPageChange).toHaveBeenCalledWith(1);
+    deep.unmount();
+  });
+
   it('hides page navigation buttons when totalPages <= 1 but still shows range and size selector', () => {
     const root = create(
       <PaginationControls

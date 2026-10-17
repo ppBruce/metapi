@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { buildModelAnalysisFromDailyUsage } from './modelAnalysisService.js';
 import { parseCheckinRewardAmount } from './checkinRewardParser.js';
@@ -27,6 +27,8 @@ export type DashboardSummaryPayload = {
   activeAccounts: number;
   totalAccounts: number;
   todayCheckin: { success: number; failed: number; total: number };
+  dailyTrend: Array<{ day: string; spend: number; calls: number; tokens: number }>;
+  dailyCheckin: Array<{ day: string; success: number; failed: number }>;
   proxy24h: {
     success: number;
     failed: number;
@@ -265,6 +267,37 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     0,
   );
 
+  // 7-day daily trend for the dashboard sparklines. Spend/calls/tokens come
+  // from the model-day usage projection; check-in counts from checkin_logs.
+  const trendSinceDay = getLocalRangeStartDayKey(6);
+  const trendSinceUtc = new Date(Date.now() - 7 * 86400000)
+    .toISOString().slice(0, 19).replace('T', ' ');
+  const [dailyTrendRows, dailyCheckinRows] = await Promise.all([
+    db
+      .select({
+        day: schema.modelDayUsage.localDay,
+        spend: sql<number>`coalesce(sum(${schema.modelDayUsage.totalSpend}), 0)`,
+        calls: sql<number>`coalesce(sum(${schema.modelDayUsage.totalCalls}), 0)`,
+        tokens: sql<number>`coalesce(sum(${schema.modelDayUsage.totalTokens}), 0)`,
+      })
+      .from(schema.modelDayUsage)
+      .where(gte(schema.modelDayUsage.localDay, trendSinceDay))
+      .groupBy(schema.modelDayUsage.localDay)
+      .orderBy(asc(schema.modelDayUsage.localDay))
+      .all(),
+    db
+      .select({
+        day: sql<string>`substr(${schema.checkinLogs.createdAt}, 1, 10)`,
+        success: sql<number>`coalesce(sum(case when ${schema.checkinLogs.status} = 'success' then 1 else 0 end), 0)`,
+        failed: sql<number>`coalesce(sum(case when ${schema.checkinLogs.status} = 'failed' then 1 else 0 end), 0)`,
+      })
+      .from(schema.checkinLogs)
+      .where(gte(schema.checkinLogs.createdAt, trendSinceUtc))
+      .groupBy(sql`substr(${schema.checkinLogs.createdAt}, 1, 10)`)
+      .orderBy(sql`substr(${schema.checkinLogs.createdAt}, 1, 10)`)
+      .all(),
+  ]);
+
   return {
     totalBalance,
     totalUsed: toRoundedMicroNumber(totalUsed),
@@ -277,6 +310,17 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
       failed: checkinFailed,
       total: checkinTotal,
     },
+    dailyTrend: dailyTrendRows.map((row: any) => ({
+      day: String(row.day || ''),
+      spend: toRoundedMicroNumber(Number(row.spend || 0)),
+      calls: Math.round(Number(row.calls || 0)),
+      tokens: Math.round(Number(row.tokens || 0)),
+    })),
+    dailyCheckin: dailyCheckinRows.map((row: any) => ({
+      day: String(row.day || ''),
+      success: Math.round(Number(row.success || 0)),
+      failed: Math.round(Number(row.failed || 0)),
+    })),
     proxy24h: {
       success: proxySuccess,
       failed: proxyFailed,

@@ -6,7 +6,8 @@ import React, {
   useState,
   useCallback,
 } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import {PillTabBg} from '../components/PillTabBg.js';
+import {useLocation, useNavigate} from 'react-router-dom';
 import {api, type ProxyDebugTraceListItem, type ProxyLogDetail, type ProxyLogListItem, type ProxyLogsSummary, type ProxyLogStatusFilter} from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { ModelBadge } from '../components/BrandIcon.js';
@@ -826,6 +827,7 @@ export default function ProxyLogs() {
               setPage(1);
             }}
           >
+            {statusFilter === tab.key && <PillTabBg />}
             {tab.label}{' '}
             <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.7 }}>
               {tab.count}
@@ -981,8 +983,8 @@ export default function ProxyLogs() {
               viewBox="0 0 24 24"
               stroke="currentColor"
               style={{
-                scale: '-1 1',
-                animation: autoRefresh ? 'spin 1s linear infinite reverse' : 'none',
+                transform: 'scaleX(-1)',
+                animation: autoRefresh ? 'spin-mirrored 1s linear infinite' : 'none',
               }}
             >
               <path
@@ -1013,8 +1015,8 @@ export default function ProxyLogs() {
               viewBox="0 0 24 24"
               stroke="currentColor"
               style={{
-                scale: '-1 1',
-                animation: loading ? 'spin 1s linear infinite reverse' : 'none',
+                transform: 'scaleX(-1)',
+                animation: loading ? 'spin-mirrored 1s linear infinite' : 'none',
               }}
             >
               <path
@@ -1281,7 +1283,7 @@ export default function ProxyLogs() {
                   padding: 14,
                   borderRadius: 'var(--radius-sm)',
                   border: '1px solid var(--color-border-light)',
-                  background: 'var(--color-bg)',
+                  background: 'var(--color-bg-inset)',
                   color: 'var(--color-text-muted)',
                   fontSize: 12,
                   lineHeight: 1.6,
@@ -1671,7 +1673,7 @@ export default function ProxyLogs() {
                       <div className="mobile-summary-metric-label">{tr('输入/输出')}</div>
                       <div className="mobile-summary-metric-value">
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                          <span>
+                          <span style={{ color: 'var(--color-text-primary)', fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>
                             {formatProxyLogTokenPair(
                               resolveProxyLogInputTokens(detailLog),
                               detailLog.completionTokens,
@@ -1747,6 +1749,22 @@ export default function ProxyLogs() {
                           ) || '--'
                         }
                       />
+                      {/* Locator tokens `[site:]` / `[status:]`, rendered like
+                          every other token field in this card: they are the only
+                          place a failed row's answering site and upstream status
+                          are visible on a phone. */}
+                      {pathMeta.siteLabel ? (
+                        <MobileField
+                          label="上游站点"
+                          value={pathMeta.siteLabel}
+                        />
+                      ) : null}
+                      {pathMeta.upstreamStatus ? (
+                        <MobileField
+                          label="上游状态码"
+                          value={pathMeta.upstreamStatus}
+                        />
+                      ) : null}
                       {detailState?.loading && (
                         <div style={{ color: 'var(--color-text-muted)' }}>
                           加载详情中...
@@ -1790,7 +1808,7 @@ export default function ProxyLogs() {
                         </div>
                       )}
                       {detail && pathMeta.errorMessage.trim().length > 0 && (
-                        <div style={{ color: 'var(--color-danger)' }}>
+                        <div style={{ color: 'var(--color-danger)', overflowWrap: 'anywhere' }}>
                           {pathMeta.errorMessage}
                         </div>
                       )}
@@ -1894,7 +1912,6 @@ export default function ProxyLogs() {
                       </td>
                       <td
                         style={{
-                          fontSize: 12,
                           whiteSpace: 'nowrap',
                           fontVariantNumeric: 'tabular-nums',
                           color: 'var(--color-text-secondary)',
@@ -2076,7 +2093,7 @@ export default function ProxyLogs() {
                         }}
                       >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, lineHeight: 1.25 }}>
-                          <span>
+                          <span style={{ color: 'var(--color-text-primary)', fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>
                             {formatProxyLogTokenPair(
                               resolveProxyLogInputTokens(detailLog),
                               detailLog.completionTokens,
@@ -2126,8 +2143,8 @@ export default function ProxyLogs() {
                       </td>
                     </tr>
                     {expanded === log.id && (
-                      <tr style={{ background: 'var(--color-bg)' }}>
-                        <td colSpan={PROXY_LOG_TABLE_COLUMN_COUNT} style={{ padding: 0, background: 'var(--color-bg)' }}>
+                      <tr style={{ background: 'var(--color-bg-inset)' }}>
+                        <td colSpan={PROXY_LOG_TABLE_COLUMN_COUNT} style={{ padding: 0, background: 'var(--color-bg-inset)' }}>
                           <div className="anim-collapse is-open">
                             <div className="anim-collapse-inner">
                               <div
@@ -2251,6 +2268,22 @@ export default function ProxyLogs() {
                                           >
                                             {detailLog.username || '未知账号'}
                                           </strong>
+                                          {detailLog.tokenName ? (
+                                            <>
+                                              ，令牌:{' '}
+                                              <strong
+                                                style={{
+                                                  color:
+                                                    'var(--color-text-primary)',
+                                                }}
+                                              >
+                                                {detailLog.tokenName}
+                                              </strong>
+                                              {detailLog.tokenGroup
+                                                ? `（${detailLog.tokenGroup}）`
+                                                : ''}
+                                            </>
+                                          ) : null}
                                         </>
                                       )}
                                     </div>
@@ -2530,6 +2563,77 @@ export default function ProxyLogs() {
                                   )}
                                 </div>
 
+                                {/* Locator tokens `[site:]` / `[status:]`: same
+                                    chip treatment as the request paths above,
+                                    because they answer the same question — where
+                                    did this attempt actually go — for a failed
+                                    row whose message text does not say. */}
+                                {detail && pathMeta.siteLabel ? (
+                                  <div
+                                    style={{
+                                      display: 'flex',
+                                      gap: 6,
+                                      alignItems: 'center',
+                                    }}
+                                  >
+                                    <span
+                                      style={{
+                                        fontWeight: 600,
+                                        color: 'var(--color-primary)',
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      上游站点
+                                    </span>
+                                    <code
+                                      style={{
+                                        fontFamily: 'var(--font-mono)',
+                                        fontSize: 12,
+                                        background: 'var(--color-bg-card)',
+                                        padding: '1px 8px',
+                                        borderRadius: 6,
+                                        border:
+                                          '1px solid var(--color-border-light)',
+                                      }}
+                                    >
+                                      {pathMeta.siteLabel}
+                                    </code>
+                                  </div>
+                                ) : null}
+
+                                {detail && pathMeta.upstreamStatus ? (
+                                  <div
+                                    style={{
+                                      display: 'flex',
+                                      gap: 6,
+                                      alignItems: 'center',
+                                    }}
+                                  >
+                                    <span
+                                      style={{
+                                        fontWeight: 600,
+                                        color: 'var(--color-primary)',
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      上游状态码
+                                    </span>
+                                    <code
+                                      style={{
+                                        fontFamily: 'var(--font-mono)',
+                                        fontSize: 12,
+                                        background: 'var(--color-bg-card)',
+                                        padding: '1px 8px',
+                                        borderRadius: 6,
+                                        border:
+                                          '1px solid var(--color-border-light)',
+                                      }}
+                                    >
+                                      {pathMeta.upstreamStatus}
+                                    </code>
+                                  </div>
+                                ) : null}
+
                                 {detail &&
                                   pathMeta.errorMessage.trim().length > 0 && (
                                     <div style={{ display: 'flex', gap: 6 }}>
@@ -2546,6 +2650,7 @@ export default function ProxyLogs() {
                                         style={{
                                           color: 'var(--color-danger)',
                                           whiteSpace: 'pre-wrap',
+                                          overflowWrap: 'anywhere',
                                         }}
                                       >
                                         {pathMeta.errorMessage}

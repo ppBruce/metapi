@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import Database from 'better-sqlite3';
 import mysql from 'mysql2/promise';
 import pg from 'pg';
@@ -58,6 +59,7 @@ let proxyLogDownstreamApiKeyIdColumnAvailable: boolean | null = null;
 let proxyLogClientColumnsAvailable: boolean | null = null;
 let proxyLogStreamTimingColumnsAvailable: boolean | null = null;
 let proxyLogRequestTraceIdColumnAvailable: boolean | null = null;
+let proxyLogTokenIdColumnAvailable: boolean | null = null;
 
 function buildMysqlPoolOptions(
   connectionString = config.dbUrl,
@@ -784,6 +786,26 @@ function ensureProxyLogRequestTraceIdSchema() {
 }
 
 
+function ensureProxyLogTokenIdSchema() {
+  if (!tableExists('proxy_logs')) {
+    return;
+  }
+
+  if (!tableColumnExists('proxy_logs', 'token_id')) {
+    execSqliteLegacyCompat('ALTER TABLE proxy_logs ADD COLUMN token_id integer;');
+  }
+  try {
+    execSqliteLegacyCompat(
+      'CREATE INDEX IF NOT EXISTS proxy_logs_token_id_created_at_idx ON proxy_logs(token_id, created_at);',
+    );
+  } catch {
+    // Ignore duplicate/unsupported index creation on older sqlite builds.
+  }
+
+  proxyLogTokenIdColumnAvailable = true;
+}
+
+
 function normalizeSchemaErrorMessage(error: unknown): string {
   if (typeof error === 'object' && error && 'message' in error) {
     return String((error as { message?: unknown }).message || '');
@@ -856,6 +878,33 @@ export async function hasProxyLogCacheTokensColumns(): Promise<boolean> {
   );
   proxyLogCacheTokensColumnsAvailable = Number(result.rowCount || 0) > 0;
   return proxyLogCacheTokensColumnsAvailable;
+}
+
+export async function hasProxyLogTokenIdColumn(): Promise<boolean> {
+  if (proxyLogTokenIdColumnAvailable !== null) {
+    return proxyLogTokenIdColumnAvailable;
+  }
+
+  if (runtimeDbDialect === 'sqlite') {
+    proxyLogTokenIdColumnAvailable = tableExists('proxy_logs')
+      && tableColumnExists('proxy_logs', 'token_id');
+    return proxyLogTokenIdColumnAvailable;
+  }
+
+  if (runtimeDbDialect === 'mysql') {
+    if (!mysqlPool) return false;
+    const [rows] = await mysqlPool.query('SHOW COLUMNS FROM `proxy_logs` LIKE ?', ['token_id']);
+    proxyLogTokenIdColumnAvailable = Array.isArray(rows) && rows.length > 0;
+    return proxyLogTokenIdColumnAvailable;
+  }
+
+  if (!pgPool) return false;
+  const result = await pgPool.query(
+    'SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2 LIMIT 1',
+    ['proxy_logs', 'token_id'],
+  );
+  proxyLogTokenIdColumnAvailable = Number(result.rowCount || 0) > 0;
+  return proxyLogTokenIdColumnAvailable;
 }
 
 export async function ensureProxyLogCacheTokensColumns(): Promise<boolean> {
@@ -1337,6 +1386,7 @@ export async function ensureProxyLogStreamTimingColumns(): Promise<boolean> {
   if (runtimeDbDialect === 'sqlite') {
     ensureProxyLogStreamTimingSchema();
     ensureProxyLogRequestTraceIdSchema();
+    ensureProxyLogTokenIdSchema();
     proxyLogStreamTimingColumnsAvailable = tableExists('proxy_logs')
       && requiredColumns.every((column) => tableColumnExists('proxy_logs', column.name));
     return proxyLogStreamTimingColumnsAvailable;
@@ -1438,7 +1488,89 @@ function notifyDrainWaiters(): void {
   dbDrainWaiters.length = 0;
 }
 
+// ── SQLite transaction isolation ───────────────────────────────────────────
+// better-sqlite3 executes on a single shared connection, so two overlapping
+// drizzle transactions interleave BEGIN/COMMIT on that one connection: the
+// second BEGIN fails outright and statements issued by other requests slide
+// into the open transaction window — if the transaction later rolls back,
+// those writes are silently discarded. Serialize instead:
+//   * only one transaction executes at a time (promise queue),
+//   * non-transactional statements wait until the open window closes,
+//   * nested transactions become savepoints inside the same window.
+const sqliteTxContext = new AsyncLocalStorage<true>();
+let sqliteTxQueue: Promise<void> = Promise.resolve();
+let sqliteTxSavepointSeq = 0;
+
+/**
+ * FIFO gate shared by outer transactions and standalone SQLite statements.
+ * Reserving a slot is synchronous, before awaiting the predecessor, so a
+ * statement blocked behind transaction A cannot be overtaken by transaction B.
+ */
+async function acquireSqliteOperationLock(): Promise<() => void> {
+  let release!: () => void;
+  const previous = sqliteTxQueue;
+  sqliteTxQueue = new Promise<void>((resolve) => { release = resolve; });
+  await previous.catch(() => undefined);
+  return release;
+}
+
+function createSqliteTxClient(): any {
+  const txRaw = drizzleSqliteProxy(
+    (sqlText, params, method) => sqliteProxyQuery(sqlText, params, method as SqlMethod),
+    { schema },
+  ) as any;
+  return wrapDbClient(txRaw, async <R>(fn: (tx: any) => Promise<R> | R) => runSqliteTransaction(fn));
+}
+
+async function runSqliteTransaction<R>(fn: (tx: any) => Promise<R> | R): Promise<R> {
+  if (sqliteTxContext.getStore()) {
+    // Nested transaction: scope with a savepoint inside the open window.
+    const sqlite = requireSqliteConnection();
+    const savepoint = `metapi_sp_${++sqliteTxSavepointSeq}`;
+    sqlite.exec(`savepoint ${savepoint}`);
+    try {
+      const result = await fn(createSqliteTxClient());
+      sqlite.exec(`release ${savepoint}`);
+      return result;
+    } catch (error) {
+      try {
+        sqlite.exec(`rollback to ${savepoint}`);
+        sqlite.exec(`release ${savepoint}`);
+      } catch {
+        // Outer transaction may already be unusable; surface the original error.
+      }
+      throw error;
+    }
+  }
+
+  let releaseOperation!: () => void;
+  try {
+    releaseOperation = await acquireSqliteOperationLock();
+    const sqlite = requireSqliteConnection();
+    sqlite.exec('begin immediate');
+    try {
+      const result = await sqliteTxContext.run(true, async () => {
+        return await fn(createSqliteTxClient());
+      });
+      sqlite.exec('commit');
+      return result;
+    } catch (error) {
+      try {
+        sqlite.exec('rollback');
+      } catch {
+        // Connection may already be closed; prefer the original error.
+      }
+      throw error;
+    }
+  } finally {
+    releaseOperation?.();
+  }
+}
+
 async function sqliteProxyQuery(sqlText: string, params: unknown[], method: SqlMethod) {
+  const releaseOperation = sqliteTxContext.getStore()
+    ? null
+    : await acquireSqliteOperationLock();
   dbInFlightQueries += 1;
   try {
     await acquireDbQuery();
@@ -1462,6 +1594,7 @@ async function sqliteProxyQuery(sqlText: string, params: unknown[], method: SqlM
     return { rows };
   } finally {
     releaseDbQuery();
+    releaseOperation?.();
   }
 }
 
@@ -1716,6 +1849,7 @@ function initSqliteDb() {
   ensureProxyLogClientSchema();
   ensureProxyLogStreamTimingSchema();
   ensureProxyLogRequestTraceIdSchema();
+  ensureProxyLogTokenIdSchema();
   ensureProxyVideoTaskSchema();
   ensureProxyFileSchema();
   ensureProbeLogsSchema();
@@ -1725,7 +1859,7 @@ function initSqliteDb() {
     (sqlText, params, method) => sqliteProxyQuery(sqlText, params, method as SqlMethod),
     { schema },
   ) as any;
-  return wrapDbClient(rawDb);
+  return wrapDbClient(rawDb, async <R>(fn: (tx: any) => Promise<R> | R) => runSqliteTransaction(fn));
 }
 
 type AppDb = ReturnType<typeof initSqliteDb>;

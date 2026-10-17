@@ -129,7 +129,7 @@ describe('site favicon proxy routing', () => {
     }
   });
 
-  it('keeps the site proxy on CDN redirects without forwarding origin cookies', async () => {
+  it('uses the connect-time DNS guard on CDN redirects without forwarding origin cookies', async () => {
     await db.insert(schema.sites).values({
       name: 'cdn-site', url: 'https://site.example.com', platform: 'new-api',
       proxyUrl: 'http://127.0.0.1:9876',
@@ -148,13 +148,17 @@ describe('site favicon proxy routing', () => {
     // image, so nothing is parsed out of it.
     expect(fetchMock).toHaveBeenCalledTimes(4);
     const { ProxyAgent } = await import('undici');
-    const [, cdnInit] = fetchMock.mock.calls[1];
-    expect(cdnInit.dispatcher).toBeInstanceOf(ProxyAgent);
+    const [originInit, cdnInit] = [fetchMock.mock.calls[0][1], fetchMock.mock.calls[1][1]];
+    expect(originInit.dispatcher).toBeInstanceOf(ProxyAgent);
+    // A proxy resolves target hosts itself, so only the configured origin may
+    // use it; CDN hops must use the guarded direct Agent.
+    expect(cdnInit.dispatcher).not.toBeInstanceOf(ProxyAgent);
+    expect(cdnInit.dispatcher).toBeDefined();
     expect(new Headers(cdnInit.headers).get('cookie')).toBeNull();
     expect(new Headers(cdnInit.headers).get('authorization')).toBeNull();
   });
 
-  it('uses the site proxy for the homepage and its declared CDN icon', async () => {
+  it('uses the site proxy for the homepage but guards its declared CDN icon', async () => {
     await db.insert(schema.sites).values({
       name: 'html-site', url: 'https://site.example.com', platform: 'new-api',
       proxyUrl: 'http://127.0.0.1:9876',
@@ -178,7 +182,9 @@ describe('site favicon proxy routing', () => {
     // Exactly two requests: the document, then the icon it declares. No static
     // path is guessed first, and none is guessed afterwards either.
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    for (const [, init] of fetchMock.mock.calls) expect(init.dispatcher).toBeInstanceOf(ProxyAgent);
+    expect(fetchMock.mock.calls[0][1].dispatcher).toBeInstanceOf(ProxyAgent);
+    expect(fetchMock.mock.calls[1][1].dispatcher).toBeDefined();
+    expect(fetchMock.mock.calls[1][1].dispatcher).not.toBeInstanceOf(ProxyAgent);
   });
 
   it('never retries directly after the configured proxy fails', async () => {
@@ -282,6 +288,25 @@ describe('site favicon proxy routing', () => {
     expect(fetchMock).toHaveBeenCalledTimes(8);
   });
 
+  it('rejects an icon download that exceeds the byte cap while streaming', async () => {
+    await db.insert(schema.sites).values({
+      name: 'huge-icon', url: 'https://huge.example.com', platform: 'new-api',
+      proxyUrl: 'http://127.0.0.1:9876',
+    }).run();
+    // No content-length: the cap must be enforced while reading the stream,
+    // not from headers. 700KB crosses the 512KB MAX_ICON_BYTES cap.
+    const huge = Buffer.alloc(700 * 1024, 0x61);
+    fetchMock.mockImplementation(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(huge));
+        controller.close();
+      },
+    }), { status: 200, headers: { 'content-type': 'image/svg+xml' } }));
+
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fhuge.example.com');
+    expect(response.statusCode).toBe(404);
+  });
+
   it('rejects a private redirect target even for a configured public site', async () => {
     await db.insert(schema.sites).values({
       name: 'redirect-guard', url: 'https://site.example.com', platform: 'new-api',
@@ -299,6 +324,74 @@ describe('site favicon proxy routing', () => {
     const response = await app.inject('/api/site-favicon?url=http%3A%2F%2F127.0.0.1%3A9');
     expect(response.statusCode).toBe(403);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('guards an unconfigured public origin at connect time', async () => {
+    // No site row vouches for this origin, so the fetch must not ride the host's
+    // own egress (which would resolve the hostname outside any guard) — it goes
+    // through the guarded dispatcher instead.
+    const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Funconfigured.example.com');
+    expect(response.statusCode).toBe(200);
+    const { Agent, ProxyAgent } = await import('undici');
+    const dispatcher = fetchMock.mock.calls[0][1].dispatcher;
+    expect(dispatcher).toBeInstanceOf(Agent);
+    expect(dispatcher).not.toBeInstanceOf(ProxyAgent);
+  });
+
+  it('does not lend the host system proxy to an unconfigured origin', async () => {
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7897';
+    try {
+      const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Funconfigured.example.com');
+      expect(response.statusCode).toBe(200);
+      const { ProxyAgent } = await import('undici');
+      expect(fetchMock.mock.calls[0][1].dispatcher).not.toBeInstanceOf(ProxyAgent);
+    } finally {
+      delete process.env.HTTPS_PROXY;
+    }
+  });
+
+  it('guards a cross-origin redirect hop of a configured site', async () => {
+    await db.insert(schema.sites).values({
+      name: 'hop-site', url: 'https://site.example.com', platform: 'new-api',
+    }).run();
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7897';
+    try {
+      fetchMock.mockImplementation(async (url) => String(url) === 'https://site.example.com/'
+        ? new Response('', { status: 302, headers: { location: 'https://cdn.example.com/logo.png' } })
+        : new Response(svg, { headers: { 'content-type': 'image/svg+xml' } }));
+      const response = await app.inject('/api/site-favicon?url=https%3A%2F%2Fsite.example.com');
+      expect(response.statusCode).toBe(200);
+      const { Agent, ProxyAgent } = await import('undici');
+      // The configured origin keeps the system proxy; the hop onto another host
+      // does not — that address is only ever checked at connect time.
+      expect(fetchMock.mock.calls[0][1].dispatcher).toBeInstanceOf(ProxyAgent);
+      const [, cdnInit] = fetchMock.mock.calls[1];
+      expect(cdnInit.dispatcher).toBeInstanceOf(Agent);
+      expect(cdnInit.dispatcher).not.toBeInstanceOf(ProxyAgent);
+    } finally {
+      delete process.env.HTTPS_PROXY;
+    }
+  });
+
+  it('serves a declared icon on the configured host even when that host is private', async () => {
+    await db.insert(schema.sites).values({
+      name: 'internal-site', url: 'http://127.0.0.1:9999', platform: 'new-api',
+    }).run();
+    fetchMock.mockImplementation(async (url) => {
+      if (String(url) === 'http://127.0.0.1:9999/') {
+        return new Response('<link rel="icon" href="/logo.png">', {
+          headers: { 'content-type': 'text/html' },
+        });
+      }
+      if (String(url) === 'http://127.0.0.1:9999/logo.png') {
+        return new Response(svg, { headers: { 'content-type': 'image/svg+xml' } });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    const response = await app.inject('/api/site-favicon?url=http%3A%2F%2F127.0.0.1%3A9999');
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['x-favicon-source']).toBe('http://127.0.0.1:9999/logo.png');
   });
 
   it('uses the configured proxy when a site URL contains a path', async () => {

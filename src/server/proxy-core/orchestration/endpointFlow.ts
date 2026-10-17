@@ -1,6 +1,11 @@
 import { fetch } from 'undici';
 import { applyRequestOverrideRules } from '../../services/requestOverride.js';
-import { readRuntimeResponseText } from '../executors/types.js';
+import {
+  learnUpstreamRequestBodyEncoding,
+  maybeCompressUpstreamRequestBody,
+  resolveRequestOrigin,
+} from '../../services/requestBodyCompression.js';
+import { readRuntimeResponseText, type ReadRuntimeResponseTextOptions } from '../executors/types.js';
 import { fetchWithObservedFirstByte, isObservedFirstByteTimeoutResponse } from '../firstByteTimeout.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
 import { mergeParamOverrideIntoBody } from '../../services/siteParamOverride.js';
@@ -82,11 +87,21 @@ export type ExecuteEndpointFlowInput = {
     signal?: AbortSignal,
   ) => Promise<Awaited<ReturnType<typeof fetch>>>;
   firstByteTimeoutMs?: number;
+  /** Guard every failure-body read and stop fallback when the caller is gone. */
+  bodyReadOptions?: ReadRuntimeResponseTextOptions;
   tryRecover?: (ctx: EndpointAttemptContext) => Promise<EndpointRecoverResult>;
   shouldDowngrade?: (ctx: EndpointAttemptContext) => boolean;
   shouldAbortRemainingEndpoints?: (ctx: EndpointAttemptContext & { errText: string }) => boolean;
   /** Same-endpoint redispach after an effort rejection (body already downgraded by onAttemptFailure). */
   shouldRetryInPlace?: (ctx: EndpointAttemptContext & { errText: string }) => boolean;
+  /**
+   * Clamp the FINAL outbound body (after paramOverride/requestOverrideRules)
+   * to the site's learned effort ceiling. Overrides merge AFTER the surface's
+   * build-time clamp, so without this hook a configured override could
+   * resurrect a value the relay already rejected — including on the in-place
+   * retry, which would burn the only bounded redispach on the same 400.
+   */
+  enforceEffortCeiling?: (body: Record<string, unknown>, endpoint: UpstreamEndpoint) => void;
   onDowngrade?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
   onAttemptFailure?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
   onAttemptSuccess?: (ctx: EndpointAttemptSuccessContext) => void | Promise<void>;
@@ -111,6 +126,7 @@ async function runEndpointFlowHook<T>(
 
 export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Promise<EndpointFlowResult> {
   const endpointCount = input.endpointCandidates.length;
+  input.bodyReadOptions?.signal?.throwIfAborted();
   if (endpointCount <= 0) {
     return {
       ok: false,
@@ -122,8 +138,17 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
   let finalStatus = 0;
   let finalErrText = 'unknown error';
   let finalRawErrText: string | undefined;
+  const readFailureBody = (response: Awaited<ReturnType<typeof fetch>>) => (
+    readRuntimeResponseText(response, input.bodyReadOptions).catch((error) => {
+      // An idle upstream error body may still fall back; a disconnected caller
+      // must not silently turn into "unknown error" and dispatch another hop.
+      if (input.bodyReadOptions?.signal?.aborted) throw error;
+      return 'unknown error';
+    })
+  );
 
   for (let endpointIndex = 0; endpointIndex < endpointCount; endpointIndex += 1) {
+    input.bodyReadOptions?.signal?.throwIfAborted();
     const endpoint = input.endpointCandidates[endpointIndex] as UpstreamEndpoint;
     const request = input.buildRequest(endpoint, endpointIndex);
     if (input.requestOverrideRules) {
@@ -132,6 +157,9 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
     if (input.paramOverride) {
       request.body = mergeParamOverrideIntoBody(request.body, input.paramOverride);
     }
+    // Last gate before dispatch: clamp the FINAL body (overrides included) to
+    // the site's learned effort ceiling.
+    input.enforceEffortCeiling?.(request.body, endpoint);
     const defaultTarget = buildUpstreamUrl(input.siteUrl, request.path);
     // proxyUrl doubles as an upstream-base override ONLY on the default fetch
     // path (no dispatch hook). Flows that supply dispatchRequest already apply
@@ -146,22 +174,35 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       requestToDispatch: BuiltEndpointRequest,
       targetUrlToDispatch = targetUrl,
     ) => {
+      input.bodyReadOptions?.signal?.throwIfAborted();
       const configuredTimeoutMs = Math.max(0, Math.trunc(input.firstByteTimeoutMs ?? 0));
       const elapsedMs = Math.max(0, Date.now() - attemptStartedAtMs);
       const remainingTimeoutMs = configuredTimeoutMs > 0
         ? Math.max(1, configuredTimeoutMs - elapsedMs)
         : 0;
       return fetchWithObservedFirstByte(
-        async (signal) => (
-          input.dispatchRequest
-            ? await input.dispatchRequest(requestToDispatch, targetUrlToDispatch, signal)
-            : await fetch(targetUrlToDispatch, await withSiteProxyRequestInit(targetUrlToDispatch, {
-              method: 'POST',
-              headers: requestToDispatch.headers,
-              body: JSON.stringify(requestToDispatch.body),
-              signal,
-            }))
-        ),
+        async (signal) => {
+          if (input.dispatchRequest) {
+            return await input.dispatchRequest(requestToDispatch, targetUrlToDispatch, signal);
+          }
+          // Cascade hops re-upload the whole prompt through a tunnel; when the
+          // upstream is a metapi instance that advertised support, send it
+          // gzipped. Unknown/unpatched origins keep receiving plain JSON.
+          const origin = resolveRequestOrigin(targetUrlToDispatch);
+          const encoded = await maybeCompressUpstreamRequestBody({
+            origin,
+            headers: requestToDispatch.headers,
+            bodyText: JSON.stringify(requestToDispatch.body),
+          });
+          const dispatched = await fetch(targetUrlToDispatch, await withSiteProxyRequestInit(targetUrlToDispatch, {
+            method: 'POST',
+            headers: encoded.headers,
+            body: encoded.body,
+            signal,
+          }));
+          learnUpstreamRequestBodyEncoding(origin, dispatched);
+          return dispatched;
+        },
         {
           firstByteTimeoutMs: remainingTimeoutMs,
           startedAtMs: attemptStartedAtMs,
@@ -186,7 +227,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       };
     }
 
-    let rawErrText = await readRuntimeResponseText(response).catch(() => 'unknown error');
+    let rawErrText = await readFailureBody(response);
     const baseContext: EndpointAttemptContext = {
       endpointIndex,
       endpointCount,
@@ -255,10 +296,11 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
         baseContext.request = recovered.request ?? baseContext.request;
         baseContext.targetUrl = recovered.targetUrl ?? baseContext.targetUrl;
         baseContext.response = recovered.upstream;
-        baseContext.rawErrText = await readRuntimeResponseText(recovered.upstream).catch(() => 'unknown error');
+        baseContext.rawErrText = await readFailureBody(recovered.upstream);
       }
     }
 
+    input.bodyReadOptions?.signal?.throwIfAborted();
     rawErrText = baseContext.rawErrText;
     response = baseContext.response;
     const errText = withUpstreamPath(
@@ -292,6 +334,9 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       if (input.paramOverride) {
         retryRequest.body = mergeParamOverrideIntoBody(retryRequest.body, input.paramOverride);
       }
+      // Same final-body clamp on the in-place retry: an override would
+      // otherwise resurrect the exact value the relay just rejected.
+      input.enforceEffortCeiling?.(retryRequest.body, endpoint);
       const retryTargetUrl = input.proxyUrl && !input.dispatchRequest
         ? buildUpstreamUrl(input.proxyUrl, retryRequest.path)
         : buildUpstreamUrl(input.siteUrl, retryRequest.path);
@@ -313,7 +358,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       }
       // Still rejected: keep the loop's failure bookkeeping on the retry
       // response and let the normal cascade decide (next endpoint / channel).
-      rawErrText = await readRuntimeResponseText(retryResponse).catch(() => 'unknown error');
+      rawErrText = await readFailureBody(retryResponse);
       baseContext.request = retryRequest;
       baseContext.targetUrl = retryTargetUrl;
       baseContext.response = retryResponse;

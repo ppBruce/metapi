@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   isModelDisabledForSite,
+  canonicalLookupKeyPreservingFree,
   type SiteDisabledModelsIndex,
 } from './siteDisabledModels.js';
 
@@ -113,5 +114,29 @@ describe('isModelDisabledForSite', () => {
     const index = indexWithAccounts(283, [], [[291, ['deepseek/deepseek-v4-flash:free']]]);
     expect(isModelDisabledForSite(index, 283, 'deepseek-v4-flash:free', 291)).toBe(true);
     expect(isModelDisabledForSite(index, 283, 'deepseek-v4-flash', 291)).toBe(false);
+  });
+
+  // Regression: the marketplace probe passed canonicalizeModelName() as its
+  // second lookup key. That strips the free label, so a non-free disable
+  // ("stepfun/step-5-preview") wrongly matched the free sibling
+  // ("step-5-preview:free") inside canonicalNonFree, and the free variant was
+  // dropped from the probe target list even though it was never disabled.
+  // The probe must look up with a free-preserving key instead.
+  it('canonicalLookupKeyPreservingFree keeps the free label so siblings stay separate', () => {
+    expect(canonicalLookupKeyPreservingFree('stepfun/step-5-preview')).toBe('step-5-preview');
+    expect(canonicalLookupKeyPreservingFree('stepfun/step-5-preview:free')).toBe('step-5-preview:free');
+    // provider prefix still collapses (the point of the second key)
+    expect(canonicalLookupKeyPreservingFree('qwen/qwen3.8-max-preview')).toBe('qwen3.8-max-preview');
+  });
+
+  it('free-preserving key keeps a non-free disable off the free sibling', () => {
+    const index = indexFrom([[302, ['stepfun/step-5-preview']]]);
+    const freeKey = canonicalLookupKeyPreservingFree('stepfun/step-5-preview:free');
+    expect(freeKey).toBe('step-5-preview:free');
+    // The free variant is NOT disabled and must not be treated as blocked.
+    expect(isModelDisabledForSite(index, 302, 'stepfun/step-5-preview:free', 359)).toBe(false);
+    expect(isModelDisabledForSite(index, 302, freeKey, 359)).toBe(false);
+    // The exact non-free entry stays blocked.
+    expect(isModelDisabledForSite(index, 302, 'stepfun/step-5-preview', 359)).toBe(true);
   });
 });

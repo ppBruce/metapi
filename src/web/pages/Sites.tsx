@@ -358,18 +358,25 @@ export default function Sites() {
   const [probeSaving, setProbeSaving] = useState(false);
   const [probeLatencyThreshold, setProbeLatencyThreshold] = useState('0');
   const [probing, setProbing] = useState(false);
-  type ProbeLogEntry = { time: string; text: string; color?: string };
+  type ProbeLogEntry = { id: number; time: string; text: string; color?: string };
   const [probeLog, setProbeLog] = useState<ProbeLogEntry[]>([]);
   const [probeCompleted, setProbeCompleted] = useState(false);
   const probeAbortRef = useRef<AbortController | null>(null);
   const autoDetectTimerRef = useRef<number | null>(null);
   const probeLogEndRef = useRef<HTMLDivElement | null>(null);
+  const probeLogSeqRef = useRef(0);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const selectedInitializationPreset = useMemo(
     () => getSiteInitializationPreset(selectedInitializationPresetId),
     [selectedInitializationPresetId],
   );
   const primarySiteUrlAnalysis = useMemo(() => analyzePrimarySiteUrl(form.url), [form.url]);
+  // API 地址池空框的幽灵提示：主站已填时显示「留空则跟随主站：<主站>」，
+  // 让「不填=跟随主站」的后果直接出现在决策点上（保存语义不变：空行不存，运行时回退）。
+  const apiEndpointGhostPlaceholder = useMemo(() => {
+    const primary = String(form.url ?? '').trim();
+    return primary ? `留空则跟随主站：${primary}` : 'API 请求地址（如 https://api.nih.cc）';
+  }, [form.url]);
   const latestPrimarySiteUrlRef = useRef(form.url);
   const latestProxyUrlRef = useRef(form.proxyUrl);
   const latestPlatformRef = useRef(form.platform);
@@ -441,7 +448,7 @@ export default function Sites() {
     borderRadius: 'var(--radius-sm)',
     fontSize: 13,
     outline: 'none',
-    background: 'var(--color-bg)',
+    background: 'var(--color-bg-inset)',
     color: 'var(--color-text-primary)',
   } as const;
 
@@ -466,6 +473,10 @@ export default function Sites() {
   );
   const [exactPageSize, setExactPageSize] = usePersistedPageSize('sites');
   const effectivePageSize = exactPageSize;
+  // resetKey = 排序模式 only：切换排序才回到第 1 页；列表在挂载/刷新后从空填充
+  // 时（0→N）绝不能重置 —— 那会和 URL 的 ?page=N 恢复互相拉扯，先画一帧第 1 页
+  // 再跳回来（移动端可见的「页面来回闪烁」）。越界页码由 resolveClientPagination
+  // 收敛，列表缩短无需重置。
   const {
     page: safePage,
     setPage,
@@ -473,7 +484,7 @@ export default function Sites() {
     pageSize,
     pagedItems: pagedSites,
     showControls: showSitePagination,
-  } = useClientPagination(sortedSites, `${sortMode}:${sites.length}`, effectivePageSize);
+  } = useClientPagination(sortedSites, sortMode, effectivePageSize);
   const activeDragIndex = activeDragSiteId == null
     ? -1
     : pagedSites.findIndex((site) => site.id === activeDragSiteId);
@@ -499,12 +510,21 @@ export default function Sites() {
   };
 
   // 页码持久化到 URL（?page=N），跳详情页返回后仍停留在原页。
+  // 只在 URL 本身变化（前进/后退/外链进入）时把 URL 页同步回 state；不能把
+  // safePage 放进依赖里 —— 点击翻页时 setPage(next) 是紧急更新（先画新页），
+  // navigate 是低优先级 transition（URL 后提交），中间那一帧会把「新状态 vs
+  // 旧 URL」误判为不一致而把页码拽回旧页，移动端就能看到 3→2→3 的来回闪。
+  // 用 ref 读最新 safePage 做比较，effect 只随 location.search 触发。
+  const safePageRef = useRef(safePage);
+  useEffect(() => {
+    safePageRef.current = safePage;
+  });
   useEffect(() => {
     const urlPage = Number.parseInt(new URLSearchParams(location.search).get('page') || '', 10);
-    if (Number.isFinite(urlPage) && urlPage >= 1 && urlPage !== safePage) {
+    if (Number.isFinite(urlPage) && urlPage >= 1 && urlPage !== safePageRef.current) {
       setPage(urlPage);
     }
-  }, [location.search, safePage, setPage]);
+  }, [location.search, setPage]);
 
   const normalizedFormPlatform = String(form.platform ?? '').trim();
 
@@ -669,7 +689,10 @@ export default function Sites() {
     const siteId = editor.editingSiteId;
     const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const addLog = (text: string, color?: string) =>
-      setProbeLog((prev) => [...prev, { time: now(), text, color }]);
+      setProbeLog((prev) => [
+        ...prev,
+        { id: probeLogSeqRef.current++, time: now(), text, color },
+      ]);
 
     probeAbortRef.current?.abort();
     const controller = new AbortController();
@@ -756,7 +779,11 @@ export default function Sites() {
               .then((res: any) => {
                 setAvailableModels(Array.isArray(res?.models) ? res.models : []);
               })
-              .catch(() => {})
+              .catch((err: unknown) => {
+                // Silent before: the model list silently kept stale data.
+                console.warn('[sites] failed to refresh available models after probe', err);
+                toast.error('刷新可用模型失败');
+              })
               .finally(() => setProbeCompleted(true));
           } else if (type === 'error') {
             addLog(d.message || '探测失败', 'var(--color-danger)');
@@ -766,7 +793,11 @@ export default function Sites() {
               .then((res: any) => {
                 setAvailableModels(Array.isArray(res?.models) ? res.models : []);
               })
-              .catch(() => {})
+              .catch((err: unknown) => {
+                // Silent before: the model list silently kept stale data.
+                console.warn('[sites] failed to refresh available models after probe', err);
+                toast.error('刷新可用模型失败');
+              })
               .finally(() => setProbeCompleted(true));
           }
         } catch { /* ignore parse errors */ }
@@ -791,7 +822,7 @@ export default function Sites() {
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
       if (e instanceof Error && e.name === 'AbortError') {
-        setProbeLog((prev) => [...prev, { time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '已手动停止', color: 'var(--color-text-muted)' }]);
+        setProbeLog((prev) => [...prev, { id: probeLogSeqRef.current++, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '已手动停止', color: 'var(--color-text-muted)' }]);
         return;
       }
       addLog(eMessage || '探测失败', 'var(--color-danger)');
@@ -1297,6 +1328,18 @@ export default function Sites() {
     }
   };
 
+  // 切换排序会把分页重置回第 1 页（useClientPagination 的 resetKey 变了）；
+  // 清掉 URL 里残留的 ?page=N，与每页条数切换同一处理 —— 否则 URL 同步
+  // effect 会用旧页码把我们刚重置的页码拽回旧页。
+  const handleSortModeChange = (nextValue: string) => {
+    setSortMode(nextValue as SortMode);
+    const params = new URLSearchParams(location.search);
+    if (params.get('page') !== null) {
+      params.delete('page');
+      navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
+    }
+  };
+
   return (
     <div className="animate-fade-in">
       <div className="page-header">
@@ -1318,7 +1361,7 @@ export default function Sites() {
             <ModernSelect
             size="sm"
             value={sortMode}
-            onChange={(nextValue) => setSortMode(nextValue as SortMode)}
+            onChange={handleSortModeChange}
             options={[
             { value: 'custom', label: '默认排序' },
             { value: 'balance-desc', label: '余额高到低' },
@@ -1395,7 +1438,7 @@ export default function Sites() {
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>排序方式</div>
               <ModernSelect
                 value={sortMode}
-                onChange={(nextValue) => setSortMode(nextValue as SortMode)}
+                onChange={handleSortModeChange}
                 options={[
                   { value: 'custom', label: '默认排序' },
                   { value: 'balance-desc', label: '余额高到低' },
@@ -1506,7 +1549,7 @@ export default function Sites() {
               style={{
                 border: `1px solid ${normalizedFormPlatform ? 'color-mix(in srgb, var(--color-primary) 28%, var(--color-border))' : 'var(--color-border)'}`,
                 borderRadius: 'var(--radius-sm)',
-                background: 'var(--color-bg)',
+                background: 'var(--color-bg-inset)',
                 boxShadow: normalizedFormPlatform ? '0 0 0 2px color-mix(in srgb, var(--color-primary) 10%, transparent)' : 'none',
                 transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
               }}
@@ -1633,12 +1676,12 @@ export default function Sites() {
                   padding: 10,
                   border: '1px solid var(--color-border-light)',
                   borderRadius: 'var(--radius-sm)',
-                  background: 'var(--color-bg)',
+                  background: 'var(--color-bg-inset)',
                 }}
               >
                 <div style={{ display: 'flex', gap: 8, flexDirection: isMobile ? 'column' : 'row', alignItems: isMobile ? 'stretch' : 'center' }}>
                   <input
-                    placeholder="API 请求地址（如 https://api.nih.cc）"
+                    placeholder={apiEndpointGhostPlaceholder}
                     value={endpoint.url}
                     onChange={(e) => updateApiEndpointRow(index, { url: e.target.value })}
                     style={{ ...formInputStyle, flex: 1, fontFamily: 'var(--font-mono)' }}
@@ -1752,7 +1795,7 @@ export default function Sites() {
               padding: '10px 12px',
               border: '1px solid var(--color-border)',
               borderRadius: 'var(--radius-sm)',
-              background: 'var(--color-bg)',
+              background: 'var(--color-bg-inset)',
               color: 'var(--color-text-primary)',
               fontSize: 13,
             }}>
@@ -1776,7 +1819,7 @@ export default function Sites() {
             </div>
           </div>
 
-          <div style={{ display: selectedOauthProvider ? 'none' : 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
+          <div style={{ display: selectedOauthProvider ? 'none' : 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
             <div style={{ padding: 14, border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'color-mix(in srgb, var(--color-surface) 82%, transparent)' }}>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>请求体参数覆盖（paramOverride）</div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5, marginBottom: 8 }}>
@@ -1797,44 +1840,10 @@ export default function Sites() {
                 }}
               />
             </div>
-            <div style={{ padding: '14px', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'color-mix(in srgb, var(--color-surface) 82%, transparent)' }}>
-              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>凭证提示</div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
-                添加账号时的凭证验证策略提示
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {(['auto', 'api_key', 'session'] as const).map((mode) => (
-                  <label
-                    key={mode}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      cursor: 'pointer',
-                      fontSize: 13,
-                      color: 'var(--color-text-secondary)',
-                    }}
-                  >
-                    <input
-                      type="radio"
-                      name="credentialMode"
-                      value={mode}
-                      checked={form.protocolProfile.credentialMode === mode}
-                      onChange={(e) => setForm((prev) => ({
-                        ...prev,
-                        protocolProfile: { ...prev.protocolProfile, credentialMode: e.target.value },
-                      }))}
-                      style={{ accentColor: 'var(--color-primary)', width: 14, height: 14 }}
-                    />
-                    {mode === 'auto' ? '自动' : mode === 'api_key' ? 'API Key（sk-...）' : 'Session Cookie'}
-                  </label>
-                ))}
-              </div>
-            </div>
           </div>
 
           {isEditing && (
-            <div style={{ marginTop: 16, padding: '14px', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg)' }}>
+            <div style={{ marginTop: 16, padding: '14px', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg-inset)' }}>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>刷新后自动测试请求</div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
                 开启后，每次自动获取模型列表成功后，会对指定模型发送一次真实测试请求。若判定不可用，自动加入该 key 的禁用列表并重建路由。
@@ -1884,7 +1893,7 @@ export default function Sites() {
                   style={{
                     width: '100%', padding: '6px 10px', border: '1px solid var(--color-border)',
                     borderRadius: 'var(--radius-sm)', fontSize: 12, outline: 'none',
-                    background: 'var(--color-bg)', color: 'var(--color-text-primary)',
+                    background: 'var(--color-bg-inset)', color: 'var(--color-text-primary)',
                     marginBottom: 10, opacity: probeEnabled ? 1 : 0.5,
                     fontFamily: 'var(--font-mono)',
                   }}
@@ -1902,7 +1911,7 @@ export default function Sites() {
                   style={{
                     width: 90, padding: '5px 8px', border: '1px solid var(--color-border)',
                     borderRadius: 'var(--radius-sm)', fontSize: 12, outline: 'none',
-                    background: 'var(--color-bg)', color: 'var(--color-text-primary)',
+                    background: 'var(--color-bg-inset)', color: 'var(--color-text-primary)',
                   }}
                 />
                 <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>ms（响应超过该时间则自动禁用，0=不限）</span>
@@ -1940,13 +1949,13 @@ export default function Sites() {
               {probeLog.length > 0 && (
                 <div style={{
                   marginTop: 10, padding: '8px 10px',
-                  background: 'var(--color-bg)', border: '1px solid var(--color-border-light)',
+                  background: 'var(--color-bg-inset)', border: '1px solid var(--color-border-light)',
                   borderRadius: 'var(--radius-sm)', fontSize: 11,
                   fontFamily: 'var(--font-mono)', maxHeight: 200, overflowY: 'auto',
                   lineHeight: 1.8,
                 }}>
-                  {probeLog.map((entry, i) => (
-                    <div key={i} style={{ color: entry.color || 'var(--color-text-secondary)' }}>
+                  {probeLog.map((entry) => (
+                    <div key={entry.id} style={{ color: entry.color || 'var(--color-text-secondary)' }}>
                       <span style={{ color: 'var(--color-text-muted)', marginRight: 8 }}>{entry.time}</span>
                       {entry.text}
                     </div>
@@ -1965,7 +1974,7 @@ export default function Sites() {
                   <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', padding: '4px 0' }}>
                     {brandGroups.map(([brandName, models]) => (
                       <div key={brandName}>
-                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-secondary)', padding: '4px 12px', background: 'var(--color-bg)', borderBottom: '1px solid var(--color-border-light)' }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-secondary)', padding: '4px 12px', background: 'var(--color-bg-inset)', borderBottom: '1px solid var(--color-border-light)' }}>
                           {brandName} ({models.length})
                         </div>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, padding: '6px 12px' }}>
@@ -2024,7 +2033,18 @@ export default function Sites() {
       )}
 
       <div className="card" style={{ overflowX: 'auto', paddingBottom: 12 }}>
-        {sites.length > 0 ? (
+        {!loaded ? (
+          // 首次加载显示骨架：加载期 sites 为空，若走空态分支会先画一帧
+          // 「暂无站点」再换成列表（移动端可见的闪烁之一）。
+          <div
+            aria-busy="true"
+            style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}
+          >
+            <div className="skeleton" style={{ width: '100%', height: 64, borderRadius: 'var(--radius-md)' }} />
+            <div className="skeleton" style={{ width: '100%', height: 64, borderRadius: 'var(--radius-md)' }} />
+            <div className="skeleton" style={{ width: '100%', height: 64, borderRadius: 'var(--radius-md)' }} />
+          </div>
+        ) : sites.length > 0 ? (
           <DndContext
             sensors={siteSortSensors}
             collisionDetection={closestCenter}
@@ -2335,15 +2355,8 @@ export default function Sites() {
                         })()}
                       </div>
                     </td>
-                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                      <a
-                        href={site.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{ color: 'var(--color-text-muted)', textDecoration: 'underline' }}
-                      >
-                        {formatDateTimeLocal(site.createdAt)}
-                      </a>
+                    <td style={{ color: 'var(--color-text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
+                      {formatDateTimeLocal(site.createdAt)}
                     </td>
                     <td className="site-balance-cell">
                       <SiteBalanceDisplay
@@ -2490,7 +2503,17 @@ export default function Sites() {
           visible={showSitePagination}
           rangeLabel={`显示第 ${(safePage - 1) * pageSize + 1} - ${Math.min(safePage * pageSize, sortedSites.length)} 条，共 ${sortedSites.length} 条`}
           pageSize={exactPageSize}
-          onPageSizeChange={setExactPageSize}
+          onPageSizeChange={(next) => {
+            setExactPageSize(next);
+            // The pagination hook resets to page 1 when the size changes; clear
+            // the stale ?page=N or the page-sync effect will use it to drag the
+            // state right back to the old page.
+            const params = new URLSearchParams(location.search);
+            if (params.get('page') !== null) {
+              params.delete('page');
+              navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
+            }
+          }}
         />
       </div>
     </div>

@@ -5,14 +5,17 @@ import { and, asc, eq, inArray, gte, lt, sql } from 'drizzle-orm';
 import { detectSite } from '../../services/siteDetector.js';
 import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
 import { formatUtcSqlDateTime, getLocalDayRangeUtc } from '../../services/localTimeService.js';
+import { getTodayIncomeValue } from '../../services/todayIncomeRewardService.js';
 import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
 import { scheduleRouteDecisionRefresh } from '../../services/routeDecisionRefreshScheduler.js';
 import { parseSiteParamOverrideInput } from '../../services/siteParamOverride.js';
 import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
 import { getCredentialModeFromExtraConfig, getSub2ApiSubscriptionFromExtraConfig } from '../../services/accountExtraConfig.js';
 import {
+  aggregateSiteRuntimeHealth,
   extractRuntimeHealth,
   type RuntimeHealthInfo,
+  type SiteAccountHealthInput,
 } from '../../services/accountHealthService.js';
 import {
   parseSiteBatchPayload,
@@ -556,7 +559,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     }).from(schema.accountTokens).all();
 
     // 获取今日消费和签到奖励（按账号聚合，后面再按站点汇总）
-    const { startUtc, endUtc } = getLocalDayRangeUtc();
+    const { localDay, startUtc, endUtc } = getLocalDayRangeUtc();
     const [todaySpendRows, todayCheckinRows] = await Promise.all([
       db.select({
         accountId: schema.proxyLogs.accountId,
@@ -604,7 +607,13 @@ export async function sitesRoutes(app: FastifyInstance) {
     for (const row of accountRows) {
       totalBalanceBySiteId[row.siteId] = roundMetric((totalBalanceBySiteId[row.siteId] || 0) + Number(row.balance || 0));
       totalBalanceUsedBySiteId[row.siteId] = roundMetric((totalBalanceUsedBySiteId[row.siteId] || 0) + Number(row.balanceUsed || 0));
-      totalTodayRewardBySiteId[row.siteId] = roundMetric((totalTodayRewardBySiteId[row.siteId] || 0) + (rewardByAccount[row.id] || 0));
+      // A MetAPI peer reports today's income via its admin-only overview,
+      // not a local check-in. The balance refresh stores that value in the
+      // account snapshot; use the greater of it and parsed local reward so
+      // the same credited income is never counted twice.
+      const todayIncome = getTodayIncomeValue(row.extraConfig, localDay);
+      const accountReward = Math.max(rewardByAccount[row.id] || 0, todayIncome);
+      totalTodayRewardBySiteId[row.siteId] = roundMetric((totalTodayRewardBySiteId[row.siteId] || 0) + accountReward);
       totalTodaySpendBySiteId[row.siteId] = roundMetric((totalTodaySpendBySiteId[row.siteId] || 0) + (spendByAccount[row.id] || 0));
       subscriptionBySiteId[row.siteId] = aggregateSiteSubscription(subscriptionBySiteId[row.siteId], row.extraConfig);
       accountCountBySiteId[row.siteId] = (accountCountBySiteId[row.siteId] || 0) + 1;
@@ -630,21 +639,18 @@ export async function sitesRoutes(app: FastifyInstance) {
       }
     }
 
-    // 按站点汇总健康状态
-    const siteHealthState: Record<number, RuntimeHealthInfo> = {};
+    // 按站点汇总健康状态：只统计 active 账号、顺序无关、按严重度取最优。
+    // （禁用账号不参与判定；全禁用才显示禁用；无快照显示未检测。）
+    const accountsBySiteId: Record<number, SiteAccountHealthInput[]> = {};
     for (const row of accountRows) {
-      const health = extractRuntimeHealth(row.extraConfig);
-      const existing = siteHealthState[row.siteId];
-      if (!existing) {
-        siteHealthState[row.siteId] = health ?? {
-          state: 'unknown', reason: '尚未检测', source: 'none', checkedAt: null,
-        };
-      } else if (health && health.state === 'unhealthy' && existing.state !== 'unhealthy') {
-        // 任一账号 unhealthy 则站点标记 unhealthy
-        siteHealthState[row.siteId] = health;
-      } else if (health && health.state === 'degraded' && existing.state === 'healthy') {
-        siteHealthState[row.siteId] = health;
-      }
+      (accountsBySiteId[row.siteId] ??= []).push({
+        status: row.status,
+        health: extractRuntimeHealth(row.extraConfig),
+      });
+    }
+    const siteHealthState: Record<number, RuntimeHealthInfo> = {};
+    for (const [siteIdKey, accounts] of Object.entries(accountsBySiteId)) {
+      siteHealthState[Number(siteIdKey)] = aggregateSiteRuntimeHealth(accounts);
     }
 
     // Per-key disabled models: shown in the site list so a customized list is
@@ -1089,6 +1095,15 @@ export async function sitesRoutes(app: FastifyInstance) {
       const accountIds = accountRows.map((row: any) => row.id).filter((id: any) => Number.isFinite(id) && id > 0);
 
       if (accountIds.length > 0) {
+        // Drop this site's usage logs together with the accounts. proxy_logs
+        // carries no FK to accounts/sites, so leaving them would orphan the
+        // rows (they surface as "unknown account/site" and vanish from any
+        // per-site filter). Consistent with the log_cleanup retention policy:
+        // logs are ephemeral, not a permanent archive.
+        await tx.delete(schema.proxyLogs)
+          .where(inArray(schema.proxyLogs.accountId, accountIds))
+          .run();
+
         const tokenRows = await tx.select({ id: schema.accountTokens.id })
           .from(schema.accountTokens)
           .where(inArray(schema.accountTokens.accountId, accountIds))

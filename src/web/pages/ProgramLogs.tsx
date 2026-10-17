@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
 import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
@@ -90,8 +90,11 @@ export default function ProgramLogs() {
   const [pageSize, setPageSize] = usePersistedPageSize('programLogs');
   const isMobile = useIsMobile();
   const toast = useToast();
+  const loadSeqRef = useRef(0);
 
   const load = async (silent = false) => {
+    // Fast page/filter flips fire overlapping loads; only the newest may apply.
+    const seq = ++loadSeqRef.current;
     if (silent) setRefreshing(true);
     else setLoading(true);
 
@@ -102,15 +105,19 @@ export default function ProgramLogs() {
       if (filterType) params.set('type', filterType);
       if (onlyUnread) params.set('read', 'false');
       const result = await api.getEvents(params.toString());
+      if (seq !== loadSeqRef.current) return;
       const safeRows = Array.isArray(result?.items) ? result.items : [];
       setEvents(safeRows as ProgramEvent[]);
       setTotal(Number(result?.total || 0));
     } catch (e) {
+      if (seq !== loadSeqRef.current) return;
       const eMessage = e instanceof Error ? e.message : String(e);
       toast.error(eMessage || '加载程序日志失败');
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
@@ -118,12 +125,14 @@ export default function ProgramLogs() {
     load();
   }, [filterType, onlyUnread, pageSize, page]);
 
-  const visibleRows = useMemo(() => events, [events]);
-
   const withRowLoading = async (id: number, fn: () => Promise<void>) => {
     setRowLoading((prev) => ({ ...prev, [id]: true }));
     try {
       await fn();
+    } catch (e) {
+      // Previously escaped as an unhandled rejection: the spinner stopped and
+      // the row stayed unread with zero user feedback.
+      toast.error(e instanceof Error ? e.message : '操作失败');
     } finally {
       setRowLoading((prev) => ({ ...prev, [id]: false }));
     }
@@ -291,7 +300,7 @@ export default function ProgramLogs() {
           </div>
         ) : isMobile ? (
           <div className="mobile-card-list">
-            {visibleRows.length > 0 ? visibleRows.map((row) => {
+            {events.length > 0 ? events.map((row) => {
               const level = levelLabel(row.level || 'info');
               const eventStatus = eventStatusLabel(row);
               return (
@@ -335,7 +344,7 @@ export default function ProgramLogs() {
               </div>
             )}
           </div>
-        ) : visibleRows.length > 0 ? (
+        ) : events.length > 0 ? (
           <table className="data-table program-logs-table">
             <colgroup>
               <col style={{ width: 160 }} />
@@ -358,12 +367,12 @@ export default function ProgramLogs() {
               </tr>
             </thead>
             <tbody>
-              {visibleRows.map((row, idx) => {
+              {events.map((row, idx) => {
                 const level = levelLabel(row.level || 'info');
                 const eventStatus = eventStatusLabel(row);
                 return (
                   <tr key={row.id} className={`animate-slide-up stagger-${Math.min(idx + 1, 5)}`}>
-                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    <td style={{ color: 'var(--color-text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
                       {formatDateTimeLocal(row.createdAt)}
                     </td>
                     <td>

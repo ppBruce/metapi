@@ -38,6 +38,13 @@ const QUICK_TUNNEL_URL_RE = /https:\/\/([a-z0-9-]+)\.trycloudflare\.com/gi;
 const SHORT_ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const DEFAULT_TUNNEL_WORKER_URL = 'https://abc-tunnel.us';
 const QUICK_TUNNEL_RETRY_DELAYS_MS = [10_000, 30_000, 60_000, 300_000] as const;
+// Quick-tunnel edge transport protocol. http2 (TCP/7844) survives networks that
+// black-hole QUIC/UDP better than quic; mirrors upstream quick-tunnel settings.
+const QUICK_TUNNEL_PROTOCOL_OPTIONS = new Set(['http2', 'quic', 'auto']);
+const DEFAULT_QUICK_TUNNEL_PROTOCOL = 'http2';
+// Keep cloudflared retrying transient connection/protocol errors in-process
+// (default is 5) so a black-holed edge IP does not kill the connector.
+const QUICK_TUNNEL_RETRIES = '99';
 const CLOUDFLARED_DOWNLOAD_DEFAULT_BASE_URL = 'https://github.com/cloudflare/cloudflared/releases/latest/download';
 // Hard cap for the one-time binary download: a blocked network (GitHub
 // unreachable, black-holed packets) otherwise hangs the enable request forever
@@ -64,6 +71,20 @@ let retryTimer: NodeJS.Timeout | null = null;
 let retryAttempt = 0;
 let healthProbeTimer: NodeJS.Timeout | null = null;
 let healthProbeFailures = 0;
+
+/**
+ * Resolve the cloudflared edge transport protocol for quick tunnels.
+ * Defaults to http2; override via TUNNEL_TRANSPORT_PROTOCOL or
+ * CLOUDFLARED_PROTOCOL (http2|quic|auto). Invalid values fall back to http2.
+ */
+export function resolveQuickTunnelTransportProtocol(env: NodeJS.ProcessEnv = process.env): string {
+  const requested = String(
+    env.TUNNEL_TRANSPORT_PROTOCOL || env.CLOUDFLARED_PROTOCOL || DEFAULT_QUICK_TUNNEL_PROTOCOL,
+  )
+    .trim()
+    .toLowerCase();
+  return QUICK_TUNNEL_PROTOCOL_OPTIONS.has(requested) ? requested : DEFAULT_QUICK_TUNNEL_PROTOCOL;
+}
 
 export function getQuickTunnelRetryDelay(attempt: number): number {
   const index = Math.max(0, Math.min(Math.floor(attempt), QUICK_TUNNEL_RETRY_DELAYS_MS.length - 1));
@@ -185,7 +206,8 @@ export async function registerStableTunnelMapping(shortId: string, tunnelUrl: st
       return;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      console.warn(`[Tunnel] stable mapping register attempt ${attempt}/${REGISTER_MAPPING_ATTEMPTS} failed: ${lastError.message}`);
+      // Callers log the exhausted failure once (and throttle repeated repairs).
+      // Per-attempt warnings would multiply one failed repair into three lines.
     }
   }
   throw lastError ?? new Error('持久化公网地址注册失败');
@@ -433,6 +455,9 @@ async function waitForTunnelUrl(proc: ChildProcessWithoutNullStreams, timeoutMs 
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      // Detach listeners: a timed-out wait otherwise keeps accumulating data
+      // listeners and its buffer closure on a child that outlives the wait.
+      cleanup();
       reject(new Error('启动隧道超时：未从 cloudflared 输出中解析到公网 URL'));
     }, timeoutMs);
 
@@ -469,19 +494,45 @@ async function waitForTunnelUrl(proc: ChildProcessWithoutNullStreams, timeoutMs 
   });
 }
 
-function killProcessTree(pid: number | null | undefined) {
+const KILL_ESCALATION_TIMEOUT_MS = 2000;
+const KILL_POLL_INTERVAL_MS = 100;
+
+function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const tick = () => {
+      if (!isProcessRunning(pid)) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      const timer = setTimeout(tick, KILL_POLL_INTERVAL_MS);
+      timer.unref?.();
+    };
+    tick();
+  });
+}
+
+async function killProcessTree(pid: number | null | undefined): Promise<void> {
   if (!pid || !isProcessRunning(pid)) return;
   try {
     process.kill(pid, 'SIGTERM');
   } catch {
-    // ignore
+    return;
   }
+  // A wedged cloudflared ignores SIGTERM. Leaving it alive lets the next
+  // startCloudflareTunnel spawn a second connector racing the old one for the
+  // same local port, so confirm exit and escalate to SIGKILL.
+  if (await waitForProcessExit(pid, KILL_ESCALATION_TIMEOUT_MS)) return;
   try {
-    // best-effort force after short delay handled by caller if needed
-    process.kill(pid, 0);
+    process.kill(pid, 'SIGKILL');
   } catch {
     return;
   }
+  await waitForProcessExit(pid, KILL_ESCALATION_TIMEOUT_MS);
 }
 
 function stopTunnelHealthProbe() {
@@ -515,9 +566,38 @@ async function probeTunnelPublicUrl(): Promise<boolean> {
 }
 
 const STABLE_MAPPING_REPAIR_INTERVAL_MS = 5 * 60 * 1000;
-const PROBE_WARN_INTERVAL_MS = 2 * 60 * 1000;
+const PROBE_WARN_MIN_INTERVAL_MS = 2 * 60 * 1000;
+const PROBE_WARN_MAX_INTERVAL_MS = 60 * 60 * 1000;
 let lastStableMappingRepairAtMs = 0;
-let lastProbeWarnAtMs = 0;
+
+/** Log only the first and exponentially spaced repeats; keep health probes unchanged. */
+export function createTunnelWarningThrottle() {
+  let lastWarnAtMs: number | null = null;
+  let intervalMs = PROBE_WARN_MIN_INTERVAL_MS;
+  let lastCategory: string | null = null;
+  return {
+    shouldWarn(nowMs = Date.now(), category = 'default'): boolean {
+      if (category !== lastCategory) {
+        lastCategory = category;
+        lastWarnAtMs = nowMs;
+        intervalMs = PROBE_WARN_MIN_INTERVAL_MS;
+        return true;
+      }
+      if (lastWarnAtMs !== null) {
+        if (nowMs - lastWarnAtMs < intervalMs) return false;
+        intervalMs = Math.min(intervalMs * 2, PROBE_WARN_MAX_INTERVAL_MS);
+      }
+      lastWarnAtMs = nowMs;
+      return true;
+    },
+    reset(): void {
+      lastWarnAtMs = null;
+      lastCategory = null;
+      intervalMs = PROBE_WARN_MIN_INTERVAL_MS;
+    },
+  };
+}
+const tunnelWarningThrottle = createTunnelWarningThrottle();
 
 function currentStablePublicUrl(): string | null {
   return buildStablePublicUrl(currentShortId);
@@ -541,7 +621,9 @@ async function attemptStableMappingRepair(options?: { directKnownHealthy?: boole
   try {
     await registerStableTunnelMapping(currentShortId, currentTunnelUrl);
   } catch (error) {
-    console.warn(`[Tunnel] stable mapping repair failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (tunnelWarningThrottle.shouldWarn(Date.now(), 'mapping')) {
+      console.warn(`[Tunnel] stable mapping repair failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return false;
   }
   if (!(await waitForPublicUrlHealthy(stableUrl, 15_000))) {
@@ -560,6 +642,7 @@ async function attemptStableMappingRepair(options?: { directKnownHealthy?: boole
       lastError: null,
     });
   }
+  tunnelWarningThrottle.reset();
   console.log(`[Tunnel] stable mapping repaired: ${stableUrl} -> ${currentTunnelUrl}`);
   return true;
 }
@@ -573,6 +656,7 @@ function startTunnelHealthProbe() {
       const stableUrl = currentStablePublicUrl();
       if (healthy) {
         healthProbeFailures = 0;
+        tunnelWarningThrottle.reset();
         // 运行正常但公网地址还是降级后的临时地址：尝试把稳定地址修回来。
         if (stableUrl && currentPublicUrl !== stableUrl) {
           await attemptStableMappingRepair({ directKnownHealthy: true });
@@ -588,16 +672,14 @@ function startTunnelHealthProbe() {
       if (connectorAlive) {
         healthProbeFailures = 0;
         if (stableUrl && (await attemptStableMappingRepair({ directKnownHealthy: true }))) return;
-        if (Date.now() - lastProbeWarnAtMs > PROBE_WARN_INTERVAL_MS) {
-          lastProbeWarnAtMs = Date.now();
+        if (tunnelWarningThrottle.shouldWarn(Date.now(), 'mapping')) {
           console.warn(`[Tunnel] stable URL probe failed while connector is alive (mapping-side issue): ${currentPublicUrl}`);
         }
         return;
       }
       // 刚重建隧道或刚注册映射时，给公网映射收敛留出缓冲期，避免抖动引发重启循环。
       if (Date.now() - stableMappingFreshAtMs < STABLE_MAPPING_RECOVERY_GRACE_MS) {
-        if (Date.now() - lastProbeWarnAtMs > PROBE_WARN_INTERVAL_MS) {
-          lastProbeWarnAtMs = Date.now();
+        if (tunnelWarningThrottle.shouldWarn(Date.now(), 'connector-grace')) {
           console.warn('[Tunnel] connector unreachable during recovery grace window; restart deferred');
         }
         return;
@@ -605,8 +687,7 @@ function startTunnelHealthProbe() {
       // 本机到 Cloudflare 整体不可达（网络侧问题）时，重启 cloudflared 也救不了，等网络恢复再说。
       const cloudflareReachable = await probeUrlAlive(tunnelWorkerBaseUrl(), TUNNEL_HEALTH_PROBE_TIMEOUT_MS);
       if (!cloudflareReachable) {
-        if (Date.now() - lastProbeWarnAtMs > PROBE_WARN_INTERVAL_MS) {
-          lastProbeWarnAtMs = Date.now();
+        if (tunnelWarningThrottle.shouldWarn(Date.now(), 'cloudflare-network')) {
           console.warn('[Tunnel] connector unreachable and Cloudflare unreachable from this host; restart deferred until network recovers');
         }
         return;
@@ -650,7 +731,7 @@ export async function stopCloudflareTunnel(options?: { persistDisabled?: boolean
     }
   }
   const pid = child?.pid || readStateFile().pid;
-  killProcessTree(pid);
+  await killProcessTree(pid);
   child = null;
   currentTunnelUrl = null;
   // Keep shortId + stable public URL so the same address comes back after restart.
@@ -713,6 +794,8 @@ export async function startCloudflareTunnel(): Promise<TunnelStatus> {
       '--url',
       `http://127.0.0.1:${localPort}`,
       '--no-autoupdate',
+      '--retries',
+      QUICK_TUNNEL_RETRIES,
     ];
 
     const localTmp = join(tunnelDir(), 'tmp');
@@ -721,6 +804,7 @@ export async function startCloudflareTunnel(): Promise<TunnelStatus> {
       cwd: tunnelDir(),
       env: {
         ...process.env,
+        TUNNEL_TRANSPORT_PROTOCOL: resolveQuickTunnelTransportProtocol(),
         TMPDIR: localTmp,
         TEMP: localTmp,
         TMP: localTmp,

@@ -87,6 +87,14 @@ const limitModelsMarketplaceRead = createRateLimitGuard({
   max: 30,
   windowMs: 60_000,
 });
+// Request-trace metrics run a GROUP BY over proxy_logs with a window that can
+// stretch to 90 days; unbounded repeat calls can pin the DB the same way the
+// marketplace/model reads can, so bound this endpoint too.
+const limitProxyRequestMetricsRead = createRateLimitGuard({
+  bucket: 'proxy-request-metrics-read',
+  max: 30,
+  windowMs: 60_000,
+});
 // Probe endpoints hit upstreams directly — bound them so a loop cannot
 // turn into an upstream probe storm.
 const limitModelProbe = createRateLimitGuard({
@@ -376,6 +384,10 @@ function mapProxyLogRow(
       name?: string | null;
       url?: string | null;
     } | null;
+    account_tokens?: {
+      name?: string | null;
+      tokenGroup?: string | null;
+    } | null;
     downstream_api_keys: {
       id?: number | null;
       name?: string | null;
@@ -412,6 +424,9 @@ function mapProxyLogRow(
     clientConfidence: clientMeta.clientConfidence,
     usageSource: normalizeProxyLogUsageSource(legacyMeta.usageSource),
     username: row.accounts?.username || null,
+    tokenId: typeof row.proxy_logs.tokenId === 'number' ? row.proxy_logs.tokenId : null,
+    tokenName: row.account_tokens?.name || null,
+    tokenGroup: row.account_tokens?.tokenGroup || null,
     siteId: row.sites?.id || null,
     siteName: row.sites?.name || null,
     siteUrl: row.sites?.url || null,
@@ -681,6 +696,10 @@ export async function statsRoutes(app: FastifyInstance) {
               name: schema.sites.name,
               url: schema.sites.url,
             },
+            account_tokens: {
+              name: schema.accountTokens.name,
+              tokenGroup: schema.accountTokens.tokenGroup,
+            },
             downstream_api_keys: {
               id: schema.downstreamApiKeys.id,
               name: schema.downstreamApiKeys.name,
@@ -694,6 +713,10 @@ export async function statsRoutes(app: FastifyInstance) {
             eq(schema.proxyLogs.accountId, schema.accounts.id),
           )
           .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+          .leftJoin(
+            schema.accountTokens,
+            eq(schema.proxyLogs.tokenId, schema.accountTokens.id),
+          )
           .leftJoin(
             schema.downstreamApiKeys,
             eq(
@@ -715,6 +738,10 @@ export async function statsRoutes(app: FastifyInstance) {
         id?: number | null;
         name?: string | null;
         url?: string | null;
+      } | null;
+      account_tokens: {
+        name?: string | null;
+        tokenGroup?: string | null;
       } | null;
       downstream_api_keys: {
         id?: number | null;
@@ -872,7 +899,27 @@ export async function statsRoutes(app: FastifyInstance) {
         .all();
     })();
 
-    const [clientOptionRows, summaryRow, siteRows, modelOptionRows, downstreamKeyRows] = await Promise.all([
+    // Site filter options are derived from the usage logs themselves, not
+    // from every row in `sites`. Logs join through accounts, so a site whose
+    // accounts were removed (or never had any) has no rows left — listing it
+    // anyway is what kept deleted sites in the dropdown while every log
+    // query for them returned nothing.
+    const siteRows = await (async () => {
+      const query = db
+        .select({
+          id: schema.sites.id,
+          name: schema.sites.name,
+          status: schema.sites.status,
+        })
+        .from(schema.proxyLogs)
+        .innerJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+        .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .groupBy(schema.sites.id)
+        .orderBy(schema.sites.id);
+      return query.all();
+    })();
+
+    const [clientOptionRows, summaryRow, modelOptionRows, downstreamKeyRows] = await Promise.all([
       clientOptionRowsPromise,
       (async () => {
         let summaryQuery = db
@@ -903,14 +950,6 @@ export async function statsRoutes(app: FastifyInstance) {
         }
         return summaryQuery.get();
       })(),
-      db
-        .select({
-          id: schema.sites.id,
-          name: schema.sites.name,
-          status: schema.sites.status,
-        })
-        .from(schema.sites)
-        .all(),
       modelOptionRowsPromise,
       db
         .select({
@@ -1001,8 +1040,10 @@ export async function statsRoutes(app: FastifyInstance) {
     const raw = reply.raw;
     const acceptHeader = String(request.headers.accept || '');
     if (!acceptHeader.includes('text/event-stream') && acceptHeader !== '*/*') {
-      reply.code(406).send({ message: 'This endpoint requires text/event-stream' });
-      return;
+      // Return the reply instead of falling through with undefined: the handler
+      // promise then stays pending until the 406 has flushed, so the onSend
+      // chain (suspended on the async capability/security hooks) never restarts.
+      return reply.code(406).send({ message: 'This endpoint requires text/event-stream' });
     }
 
     reply.hijack();
@@ -1113,6 +1154,7 @@ export async function statsRoutes(app: FastifyInstance) {
 
   app.get(
     '/api/stats/proxy-request-metrics',
+    { preHandler: [limitProxyRequestMetricsRead] },
     async (request) => {
       const query = (request.query || {}) as Record<string, unknown>;
       // Keep unbounded scans opt-in: request-level metrics default to the last 24h.

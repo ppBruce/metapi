@@ -7,6 +7,7 @@ import {
   type PlatformVariantFailure,
 } from './platformVariantFailures.js';
 import { fetchJsonWithShieldCookieRetry, classifyShieldGateFailureText, NewApiShieldError } from './newApiShield.js';
+import { getTurnstileSolverSettings, solveTurnstileToken, isTurnstileRequiredMessage } from '../turnstileSolver.js';
 import { CODEX_CLI_USER_AGENT } from '../../shared/codexClientFamily.js';
 import { locateTokenInKeys } from '../../shared/tokenMask.js';
 
@@ -1120,6 +1121,13 @@ export class NewApiAdapter extends BasePlatformAdapter {
         if (this.isAlreadyCheckedInMessage(directMessage)) {
           return { success: false, message: directMessage };
         }
+        // Cloudflare Turnstile gate (new-api: "Turnstile token 为空"): solve the
+        // widget via the configured solver and retry with the token as the
+        // `turnstile` URL query param (the new-api middleware reads c.Query).
+        if (isTurnstileRequiredMessage(directMessage)) {
+          const solved = await this.tryTurnstileCheckin(baseUrl, () => this.authHeaders(accessToken, resolvedUserId || undefined));
+          if (solved) return solved;
+        }
         firstFailureMessage = this.rememberCheckinFailureMessage(firstFailureMessage, directMessage);
       } catch (err) {
         if (err instanceof NewApiShieldError && err.failure.terminal) return finalizeFailure(err.message);
@@ -1168,6 +1176,13 @@ export class NewApiAdapter extends BasePlatformAdapter {
           const cookieMessage = this.extractResponseMessage(res);
           if (this.isAlreadyCheckedInMessage(cookieMessage)) {
             return { success: false, message: cookieMessage };
+          }
+          if (isTurnstileRequiredMessage(cookieMessage)) {
+            const solved = await this.tryTurnstileCheckin(baseUrl, () => ({
+              Cookie: cookie,
+              ...this.userIdHeaders(cookieUserId),
+            }));
+            if (solved) return solved;
           }
           firstFailureMessage = this.rememberCheckinFailureMessage(firstFailureMessage, cookieMessage);
         } catch (err) {
@@ -1248,6 +1263,62 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
 
     return finalizeFailure(firstFailureMessage);
+  }
+
+  /**
+   * Cloudflare Turnstile 绕过：当签到请求被 new-api 的 Turnstile 中间件拦下
+   * （"Turnstile token 为空"），用配置的求解器（云端或自建）实时求解 token，
+   * 再以 `?turnstile=<token>` 重放签到请求。
+   *
+   * token 单次有效 + 300 秒过期，因此每次都实时求解，不缓存。
+   * 返回 null 表示无需/无法求解（无配置、取不到 sitekey、求解失败），
+   * 让上层走原本的失败分类逻辑。
+   */
+  private async tryTurnstileCheckin(
+    baseUrl: string,
+    buildHeaders: () => Record<string, string>,
+  ): Promise<CheckinResult | null> {
+    const settings = await getTurnstileSolverSettings();
+    if (!settings) return null;
+
+    // 站点 /api/status 公开下发 sitekey
+    let sitekey: string | null = null;
+    try {
+      const status = await this.fetchJson<any>(`${baseUrl}/api/status`);
+      sitekey = status?.data?.turnstile_site_key
+        || status?.data?.turnstileSiteKey
+        || null;
+    } catch {
+      return null;
+    }
+    if (!sitekey) return null;
+
+    const pageUrl = `${baseUrl.replace(/\/+$/, '')}/sign-in`;
+    const solved = await solveTurnstileToken(settings, { pageUrl, sitekey });
+    if (!solved.success || !solved.token) return null;
+
+    try {
+      const url = new URL(`${baseUrl.replace(/\/+$/, '')}/api/user/checkin`);
+      url.searchParams.set('turnstile', solved.token);
+      const res = await this.fetchJson<any>(url.toString(), {
+        method: 'POST',
+        headers: buildHeaders(),
+      });
+      if (res?.success) {
+        return {
+          success: true,
+          message: res.message || 'checkin success',
+          reward: res.data?.reward?.toString(),
+        };
+      }
+      const retryMessage = this.extractResponseMessage(res);
+      if (this.isAlreadyCheckedInMessage(retryMessage)) {
+        return { success: false, message: retryMessage };
+      }
+    } catch {
+      // 重放失败不吞掉原始 Turnstile 失败分类；这里返回 null 走原逻辑
+    }
+    return null;
   }
 
   async getBalance(baseUrl: string, accessToken: string, platformUserId?: number): Promise<BalanceInfo> {

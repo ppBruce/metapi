@@ -78,6 +78,10 @@ interface RuntimeSettingsBody {
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
+  turnstileSolverEnabled?: boolean;
+  turnstileSolverBaseUrl?: string;
+  turnstileSolverApiKey?: string;
+  turnstileSolverTimeoutSeconds?: number;
   balanceRefreshCron?: string;
   logCleanupCron?: string;
   logCleanupUsageLogsEnabled?: boolean;
@@ -144,6 +148,38 @@ function maskSecret(value: string): string {
   if (!value) return '';
   if (value.length <= 8) return '****';
   return `${value.slice(0, 4)}****${value.slice(-4)}`;
+}
+
+/**
+ * Read the Turnstile solver config from the settings table.
+ * Absent/unparseable config falls back to "disabled with empty fields",
+ * which keeps historical behavior: without a config, checkin flows run
+ * exactly as before this feature existed.
+ */
+const TURNSTILE_SOLVER_CONFIG_KEY = 'turnstile_solver_config';
+async function readTurnstileSolverConfig(): Promise<{ enabled: boolean; baseUrl: string; apiKey: string; timeoutSeconds: number }> {
+  try {
+    const row = await db.select({ value: schema.settings.value })
+      .from(schema.settings)
+      .where(eq(schema.settings.key, TURNSTILE_SOLVER_CONFIG_KEY))
+      .get();
+    if (!row?.value) {
+      return { enabled: false, baseUrl: '', apiKey: '', timeoutSeconds: 60 };
+    }
+    const parsed: unknown = JSON.parse(String(row.value));
+    if (!parsed || typeof parsed !== 'object') {
+      return { enabled: false, baseUrl: '', apiKey: '', timeoutSeconds: 60 };
+    }
+    const p = parsed as Record<string, unknown>;
+    return {
+      enabled: p.enabled !== false,
+      baseUrl: String(p.baseUrl || '').trim(),
+      apiKey: String(p.apiKey || '').trim(),
+      timeoutSeconds: Math.min(180, Math.max(15, Number(p.timeoutSeconds) || 60)),
+    };
+  } catch {
+    return { enabled: false, baseUrl: '', apiKey: '', timeoutSeconds: 60 };
+  }
 }
 
 
@@ -616,10 +652,16 @@ async function getRuntimeSettingsResponse(currentAdminIp = '', tunnelClientView 
   const { resolveGlobalSensitiveWordDetection, resolveAntiProbeMinTextLength } = await import('../../services/sensitiveWordDetectionService.js');
   const sensitiveWordDetectionEnabled = await resolveGlobalSensitiveWordDetection();
   const antiProbeMinTextLength = await resolveAntiProbeMinTextLength();
+  const turnstileSolverConfig = await readTurnstileSolverConfig();
   return {
     checkinCron: config.checkinCron,
     checkinScheduleMode: config.checkinScheduleMode,
     checkinIntervalHours: config.checkinIntervalHours,
+    // Turnstile 过盾求解器：enabled + masked key（不回显明文 apiKey）
+    turnstileSolverEnabled: turnstileSolverConfig.enabled,
+    turnstileSolverBaseUrl: turnstileSolverConfig.baseUrl,
+    turnstileSolverApiKeyMasked: maskSecret(turnstileSolverConfig.apiKey),
+    turnstileSolverTimeoutSeconds: turnstileSolverConfig.timeoutSeconds,
     balanceRefreshCron: config.balanceRefreshCron,
     logCleanupCron: config.logCleanupCron,
     logCleanupUsageLogsEnabled: config.logCleanupUsageLogsEnabled,
@@ -965,9 +1007,55 @@ export async function settingsRoutes(app: FastifyInstance) {
       config.checkinCron = nextCheckinCron;
       config.checkinScheduleMode = nextCheckinScheduleMode;
       config.checkinIntervalHours = nextCheckinIntervalHours;
-      upsertSetting('checkin_cron', config.checkinCron);
-      upsertSetting('checkin_schedule_mode', config.checkinScheduleMode);
-      upsertSetting('checkin_interval_hours', config.checkinIntervalHours);
+      await upsertSetting('checkin_cron', config.checkinCron);
+      await upsertSetting('checkin_schedule_mode', config.checkinScheduleMode);
+      await upsertSetting('checkin_interval_hours', config.checkinIntervalHours);
+    }
+
+    // Turnstile solver: settings-table JSON `turnstile_solver_config`
+    // ({ enabled, baseUrl, apiKey, timeoutSeconds }). apiKey is optional —
+    // self-hosted solvers (turnstile-solver container, jsdom-based) usually
+    // require no auth, only hosted cloud services need a key.
+    const turnstileSolverTouched = body.turnstileSolverEnabled !== undefined
+      || body.turnstileSolverBaseUrl !== undefined
+      || body.turnstileSolverApiKey !== undefined
+      || body.turnstileSolverTimeoutSeconds !== undefined;
+    if (turnstileSolverTouched) {
+      const prev = await readTurnstileSolverConfig();
+      const nextEnabled = body.turnstileSolverEnabled !== undefined
+        ? !!body.turnstileSolverEnabled
+        : prev.enabled;
+      // baseUrl is required whenever the solver is enabled. Empty body value
+      // means "keep the current one" (same convention as notification secrets).
+      const nextBaseUrl = body.turnstileSolverBaseUrl !== undefined
+        ? String(body.turnstileSolverBaseUrl || '').trim()
+        : prev.baseUrl;
+      if (nextEnabled && !nextBaseUrl) {
+        return reply.code(400).send({ success: false, message: '启用 Turnstile 过盾时求解器地址不能为空' });
+      }
+      if (nextBaseUrl && !isValidHttpUrl(nextBaseUrl)) {
+        return reply.code(400).send({ success: false, message: 'Turnstile 求解器地址无效，请填写 http/https 地址' });
+      }
+      // Only a freshly typed key replaces the stored one; masked/empty input
+      // preserves the existing key (mirrors webhookSecret handling).
+      const nextApiKey = body.turnstileSolverApiKey !== undefined && body.turnstileSolverApiKey.trim()
+        ? String(body.turnstileSolverApiKey).trim()
+        : prev.apiKey;
+      const nextTimeoutSeconds = body.turnstileSolverTimeoutSeconds !== undefined
+        ? Math.min(180, Math.max(15, Math.trunc(Number(body.turnstileSolverTimeoutSeconds) || 60)))
+        : prev.timeoutSeconds;
+      if (nextEnabled) {
+        const changed = JSON.stringify({ enabled: prev.enabled, baseUrl: prev.baseUrl, timeoutSeconds: prev.timeoutSeconds })
+          !== JSON.stringify({ enabled: nextEnabled, baseUrl: nextBaseUrl, timeoutSeconds: nextTimeoutSeconds })
+          || (body.turnstileSolverApiKey !== undefined && body.turnstileSolverApiKey.trim() !== '');
+        if (changed) changedLabels.push(`Turnstile 过盾求解器（${nextBaseUrl}）`);
+      }
+      await upsertSetting('turnstile_solver_config', {
+        enabled: nextEnabled,
+        baseUrl: nextBaseUrl,
+        apiKey: nextApiKey,
+        timeoutSeconds: nextTimeoutSeconds,
+      });
     }
 
     if (body.balanceRefreshCron !== undefined) {
@@ -978,7 +1066,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`余额刷新 Cron（${config.balanceRefreshCron} -> ${body.balanceRefreshCron}）`);
       }
       updateBalanceRefreshCron(body.balanceRefreshCron);
-      upsertSetting('balance_refresh_cron', body.balanceRefreshCron);
+      await upsertSetting('balance_refresh_cron', body.balanceRefreshCron);
     }
 
     const logCleanupTouched =
@@ -1030,10 +1118,10 @@ export async function settingsRoutes(app: FastifyInstance) {
         retentionDays: nextLogCleanupRetentionDays,
       });
       stopProxyLogRetentionService();
-      upsertSetting('log_cleanup_cron', nextLogCleanupCron);
-      upsertSetting('log_cleanup_usage_logs_enabled', nextUsageLogsEnabled);
-      upsertSetting('log_cleanup_program_logs_enabled', nextProgramLogsEnabled);
-      upsertSetting('log_cleanup_retention_days', nextLogCleanupRetentionDays);
+      await upsertSetting('log_cleanup_cron', nextLogCleanupCron);
+      await upsertSetting('log_cleanup_usage_logs_enabled', nextUsageLogsEnabled);
+      await upsertSetting('log_cleanup_program_logs_enabled', nextProgramLogsEnabled);
+      await upsertSetting('log_cleanup_retention_days', nextLogCleanupRetentionDays);
     }
 
     if (body.payloadRules !== undefined) {
@@ -1120,7 +1208,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Codex 上游 WebSocket 默认策略');
       }
       config.codexUpstreamWebsocketEnabled = nextValue;
-      upsertSetting('codex_upstream_websocket_enabled', config.codexUpstreamWebsocketEnabled);
+      await upsertSetting('codex_upstream_websocket_enabled', config.codexUpstreamWebsocketEnabled);
     }
 
     if (body.streamIncludeUsageEnabled !== undefined) {
@@ -1139,7 +1227,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('流式用量注入（include_usage）策略');
       }
       config.streamIncludeUsageEnabled = nextValue;
-      upsertSetting('stream_include_usage_enabled', config.streamIncludeUsageEnabled);
+      await upsertSetting('stream_include_usage_enabled', config.streamIncludeUsageEnabled);
     }
 
     if (body.contextAwareRouting !== undefined) {
@@ -1154,7 +1242,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('上下文感知路由策略');
       }
       config.contextAwareRouting = nextMode;
-      upsertSetting('context_aware_routing', config.contextAwareRouting);
+      await upsertSetting('context_aware_routing', config.contextAwareRouting);
     }
 
     if (body.contextRoutingMarginPct !== undefined) {
@@ -1169,7 +1257,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('上下文路由安全余量');
       }
       config.contextRoutingMarginPct = nextMargin;
-      upsertSetting('context_routing_margin_pct', config.contextRoutingMarginPct);
+      await upsertSetting('context_routing_margin_pct', config.contextRoutingMarginPct);
     }
 
     if (body.contextRoutingDefaultOutputTokens !== undefined) {
@@ -1184,7 +1272,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('上下文路由默认输出预算');
       }
       config.contextRoutingDefaultOutputTokens = Math.trunc(nextDefault);
-      upsertSetting('context_routing_default_output_tokens', config.contextRoutingDefaultOutputTokens);
+      await upsertSetting('context_routing_default_output_tokens', config.contextRoutingDefaultOutputTokens);
     }
 
     if (body.responsesCompactFallbackToResponsesEnabled !== undefined) {
@@ -1203,7 +1291,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Compact 不支持时回退到普通 Responses');
       }
       config.responsesCompactFallbackToResponsesEnabled = nextValue;
-      upsertSetting('responses_compact_fallback_to_responses_enabled', config.responsesCompactFallbackToResponsesEnabled);
+      await upsertSetting('responses_compact_fallback_to_responses_enabled', config.responsesCompactFallbackToResponsesEnabled);
     }
 
     if (body.disableCrossProtocolFallback !== undefined) {
@@ -1222,7 +1310,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('失败时不尝试其他协议');
       }
       config.disableCrossProtocolFallback = nextValue;
-      upsertSetting('disable_cross_protocol_fallback', config.disableCrossProtocolFallback);
+      await upsertSetting('disable_cross_protocol_fallback', config.disableCrossProtocolFallback);
     }
 
     if (body.proxySessionChannelConcurrencyLimit !== undefined) {
@@ -1235,7 +1323,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`会话通道并发上限（${config.proxySessionChannelConcurrencyLimit} -> ${nextLimit}）`);
       }
       config.proxySessionChannelConcurrencyLimit = nextLimit;
-      upsertSetting('proxy_session_channel_concurrency_limit', config.proxySessionChannelConcurrencyLimit);
+      await upsertSetting('proxy_session_channel_concurrency_limit', config.proxySessionChannelConcurrencyLimit);
     }
 
     if (body.proxySessionChannelQueueWaitMs !== undefined) {
@@ -1248,7 +1336,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`会话通道排队等待（${config.proxySessionChannelQueueWaitMs}ms -> ${nextQueueWaitMs}ms）`);
       }
       config.proxySessionChannelQueueWaitMs = nextQueueWaitMs;
-      upsertSetting('proxy_session_channel_queue_wait_ms', config.proxySessionChannelQueueWaitMs);
+      await upsertSetting('proxy_session_channel_queue_wait_ms', config.proxySessionChannelQueueWaitMs);
     }
 
     if (body.proxyDebugTraceEnabled !== undefined) {
@@ -1266,7 +1354,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('代理调试追踪');
       }
       config.proxyDebugTraceEnabled = nextValue;
-      upsertSetting('proxy_debug_trace_enabled', config.proxyDebugTraceEnabled);
+      await upsertSetting('proxy_debug_trace_enabled', config.proxyDebugTraceEnabled);
     }
 
     if (body.proxyDebugCaptureHeaders !== undefined) {
@@ -1284,7 +1372,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('代理调试请求头采集');
       }
       config.proxyDebugCaptureHeaders = nextValue;
-      upsertSetting('proxy_debug_capture_headers', config.proxyDebugCaptureHeaders);
+      await upsertSetting('proxy_debug_capture_headers', config.proxyDebugCaptureHeaders);
     }
 
     if (body.proxyDebugCaptureBodies !== undefined) {
@@ -1302,7 +1390,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('代理调试请求体采集');
       }
       config.proxyDebugCaptureBodies = nextValue;
-      upsertSetting('proxy_debug_capture_bodies', config.proxyDebugCaptureBodies);
+      await upsertSetting('proxy_debug_capture_bodies', config.proxyDebugCaptureBodies);
     }
 
     if (body.proxyDebugCaptureStreamChunks !== undefined) {
@@ -1320,7 +1408,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('代理调试流式分片采集');
       }
       config.proxyDebugCaptureStreamChunks = nextValue;
-      upsertSetting('proxy_debug_capture_stream_chunks', config.proxyDebugCaptureStreamChunks);
+      await upsertSetting('proxy_debug_capture_stream_chunks', config.proxyDebugCaptureStreamChunks);
     }
 
     if (body.proxyDebugTargetSessionId !== undefined) {
@@ -1329,7 +1417,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('代理调试目标会话');
       }
       config.proxyDebugTargetSessionId = nextValue;
-      upsertSetting('proxy_debug_target_session_id', config.proxyDebugTargetSessionId);
+      await upsertSetting('proxy_debug_target_session_id', config.proxyDebugTargetSessionId);
     }
 
     if (body.proxyDebugTargetClientKind !== undefined) {
@@ -1338,7 +1426,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('代理调试目标客户端');
       }
       config.proxyDebugTargetClientKind = nextValue;
-      upsertSetting('proxy_debug_target_client_kind', config.proxyDebugTargetClientKind);
+      await upsertSetting('proxy_debug_target_client_kind', config.proxyDebugTargetClientKind);
     }
 
     if (body.proxyDebugTargetModel !== undefined) {
@@ -1347,7 +1435,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('代理调试目标模型');
       }
       config.proxyDebugTargetModel = nextValue;
-      upsertSetting('proxy_debug_target_model', config.proxyDebugTargetModel);
+      await upsertSetting('proxy_debug_target_model', config.proxyDebugTargetModel);
     }
 
     if (body.proxyDebugRetentionHours !== undefined) {
@@ -1360,7 +1448,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`代理调试保留时长（${config.proxyDebugRetentionHours}h -> ${nextValue}h）`);
       }
       config.proxyDebugRetentionHours = nextValue;
-      upsertSetting('proxy_debug_retention_hours', config.proxyDebugRetentionHours);
+      await upsertSetting('proxy_debug_retention_hours', config.proxyDebugRetentionHours);
     }
 
     if (body.proxyDebugMaxBodyBytes !== undefined) {
@@ -1373,7 +1461,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`代理调试抓取体积上限（${config.proxyDebugMaxBodyBytes}B -> ${nextValue}B）`);
       }
       config.proxyDebugMaxBodyBytes = nextValue;
-      upsertSetting('proxy_debug_max_body_bytes', config.proxyDebugMaxBodyBytes);
+      await upsertSetting('proxy_debug_max_body_bytes', config.proxyDebugMaxBodyBytes);
     }
 
     if (body.proxyErrorKeywords !== undefined) {
@@ -1392,7 +1480,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('上游错误关键词');
       }
       config.proxyErrorKeywords = nextKeywords;
-      upsertSetting('proxy_error_keywords', config.proxyErrorKeywords);
+      await upsertSetting('proxy_error_keywords', config.proxyErrorKeywords);
     }
 
     if (body.proxyEmptyContentFailEnabled !== undefined) {
@@ -1411,7 +1499,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('空内容判定失败');
       }
       config.proxyEmptyContentFailEnabled = nextValue;
-      upsertSetting('proxy_empty_content_fail_enabled', config.proxyEmptyContentFailEnabled);
+      await upsertSetting('proxy_empty_content_fail_enabled', config.proxyEmptyContentFailEnabled);
     }
 
     if (body.webhookUrl !== undefined) {
@@ -1419,7 +1507,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Webhook 地址');
       }
       config.webhookUrl = String(body.webhookUrl || '').trim();
-      upsertSetting('webhook_url', config.webhookUrl);
+      await upsertSetting('webhook_url', config.webhookUrl);
     }
 
     if (body.webhookSecret !== undefined) {
@@ -1428,7 +1516,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Webhook 加签密钥');
       }
       config.webhookSecret = nextSecret;
-      upsertSetting('webhook_secret', nextSecret);
+      await upsertSetting('webhook_secret', nextSecret);
     }
 
     if (body.webhookEnabled !== undefined) {
@@ -1436,7 +1524,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Webhook 开关');
       }
       config.webhookEnabled = !!body.webhookEnabled;
-      upsertSetting('webhook_enabled', config.webhookEnabled);
+      await upsertSetting('webhook_enabled', config.webhookEnabled);
     }
 
     if (body.notifyChannels !== undefined) {
@@ -1455,7 +1543,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('推送通道');
       }
       config.notifyChannels = nextChannels;
-      upsertSetting('notify_channels', nextChannels);
+      await upsertSetting('notify_channels', nextChannels);
     }
 
     if (body.serverChanEnabled !== undefined) {
@@ -1463,7 +1551,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Server 酱开关');
       }
       config.serverChanEnabled = !!body.serverChanEnabled;
-      upsertSetting('serverchan_enabled', config.serverChanEnabled);
+      await upsertSetting('serverchan_enabled', config.serverChanEnabled);
     }
 
     if (body.serverChanKey !== undefined) {
@@ -1471,7 +1559,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Server 酱密钥');
       }
       config.serverChanKey = String(body.serverChanKey || '').trim();
-      upsertSetting('serverchan_key', config.serverChanKey);
+      await upsertSetting('serverchan_key', config.serverChanKey);
     }
 
     if (body.telegramEnabled !== undefined) {
@@ -1479,7 +1567,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Telegram 开关');
       }
       config.telegramEnabled = !!body.telegramEnabled;
-      upsertSetting('telegram_enabled', config.telegramEnabled);
+      await upsertSetting('telegram_enabled', config.telegramEnabled);
     }
 
     if (body.telegramApiBaseUrl !== undefined) {
@@ -1489,7 +1577,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Telegram API Base URL');
       }
       config.telegramApiBaseUrl = nextTelegramApiBaseUrl;
-      upsertSetting('telegram_api_base_url', config.telegramApiBaseUrl);
+      await upsertSetting('telegram_api_base_url', config.telegramApiBaseUrl);
     }
 
     if (body.telegramBotToken !== undefined) {
@@ -1497,7 +1585,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Telegram Bot Token');
       }
       config.telegramBotToken = String(body.telegramBotToken || '').trim();
-      upsertSetting('telegram_bot_token', config.telegramBotToken);
+      await upsertSetting('telegram_bot_token', config.telegramBotToken);
     }
 
     if (body.telegramChatId !== undefined) {
@@ -1505,7 +1593,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Telegram Chat ID');
       }
       config.telegramChatId = String(body.telegramChatId || '').trim();
-      upsertSetting('telegram_chat_id', config.telegramChatId);
+      await upsertSetting('telegram_chat_id', config.telegramChatId);
     }
 
     if (body.telegramMessageThreadId !== undefined) {
@@ -1514,7 +1602,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('Telegram Topic ID');
       }
       config.telegramMessageThreadId = nextTelegramMessageThreadId;
-      upsertSetting('telegram_message_thread_id', config.telegramMessageThreadId);
+      await upsertSetting('telegram_message_thread_id', config.telegramMessageThreadId);
     }
 
     if (body.smtpEnabled !== undefined) {
@@ -1522,7 +1610,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('SMTP 开关');
       }
       config.smtpEnabled = !!body.smtpEnabled;
-      upsertSetting('smtp_enabled', config.smtpEnabled);
+      await upsertSetting('smtp_enabled', config.smtpEnabled);
     }
 
     if (body.smtpHost !== undefined) {
@@ -1530,7 +1618,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('SMTP 主机');
       }
       config.smtpHost = String(body.smtpHost || '').trim();
-      upsertSetting('smtp_host', config.smtpHost);
+      await upsertSetting('smtp_host', config.smtpHost);
     }
 
     if (body.smtpPort !== undefined) {
@@ -1542,7 +1630,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`SMTP 端口（${config.smtpPort} -> ${Math.trunc(smtpPort)}）`);
       }
       config.smtpPort = Math.trunc(smtpPort);
-      upsertSetting('smtp_port', config.smtpPort);
+      await upsertSetting('smtp_port', config.smtpPort);
     }
 
     if (body.smtpSecure !== undefined) {
@@ -1550,7 +1638,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('SMTP 安全连接');
       }
       config.smtpSecure = !!body.smtpSecure;
-      upsertSetting('smtp_secure', config.smtpSecure);
+      await upsertSetting('smtp_secure', config.smtpSecure);
     }
 
     if (body.smtpUser !== undefined) {
@@ -1558,7 +1646,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('SMTP 用户');
       }
       config.smtpUser = String(body.smtpUser || '').trim();
-      upsertSetting('smtp_user', config.smtpUser);
+      await upsertSetting('smtp_user', config.smtpUser);
     }
 
     if (body.smtpPass !== undefined) {
@@ -1566,7 +1654,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('SMTP 密码');
       }
       config.smtpPass = String(body.smtpPass || '').trim();
-      upsertSetting('smtp_pass', config.smtpPass);
+      await upsertSetting('smtp_pass', config.smtpPass);
     }
 
     if (body.smtpFrom !== undefined) {
@@ -1574,7 +1662,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('发件人地址');
       }
       config.smtpFrom = String(body.smtpFrom || '').trim();
-      upsertSetting('smtp_from', config.smtpFrom);
+      await upsertSetting('smtp_from', config.smtpFrom);
     }
 
     if (body.smtpTo !== undefined) {
@@ -1582,7 +1670,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('收件人地址');
       }
       config.smtpTo = String(body.smtpTo || '').trim();
-      upsertSetting('smtp_to', config.smtpTo);
+      await upsertSetting('smtp_to', config.smtpTo);
     }
 
     if (body.notifyCooldownSec !== undefined) {
@@ -1595,7 +1683,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`告警冷静期（${config.notifyCooldownSec}s -> ${nextCooldown}s）`);
       }
       config.notifyCooldownSec = nextCooldown;
-      upsertSetting('notify_cooldown_sec', config.notifyCooldownSec);
+      await upsertSetting('notify_cooldown_sec', config.notifyCooldownSec);
     }
 
     if (body.tunnelDashboardAccess !== undefined) {
@@ -1604,7 +1692,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('tunnelDashboardAccess');
       }
       config.tunnelDashboardAccess = next;
-      upsertSetting('tunnel_dashboard_access', next);
+      await upsertSetting('tunnel_dashboard_access', next);
     }
 
     if (body.adminIpAllowlist !== undefined) {
@@ -1626,7 +1714,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('管理端 IP 白名单');
       }
       config.adminIpAllowlist = nextAllowlist;
-      upsertSetting('admin_ip_allowlist', nextAllowlist);
+      await upsertSetting('admin_ip_allowlist', nextAllowlist);
     }
 
     if (body.routingWeights !== undefined) {
@@ -1641,7 +1729,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push('路由权重');
       }
       config.routingWeights = nextWeights;
-      upsertSetting('routing_weights', nextWeights);
+      await upsertSetting('routing_weights', nextWeights);
     }
 
     if (body.defaultRoutingStrategy !== undefined) {
@@ -1650,7 +1738,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`全局路由策略（${config.defaultRoutingStrategy} -> ${nextStrategy}）`);
       }
       config.defaultRoutingStrategy = nextStrategy;
-      upsertSetting('default_routing_strategy', nextStrategy);
+      await upsertSetting('default_routing_strategy', nextStrategy);
     }
 
     if (body.routingFallbackUnitCost !== undefined) {
@@ -1663,7 +1751,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`无价模型默认单价（${config.routingFallbackUnitCost} -> ${normalized}）`);
       }
       config.routingFallbackUnitCost = normalized;
-      upsertSetting('routing_fallback_unit_cost', normalized);
+      await upsertSetting('routing_fallback_unit_cost', normalized);
     }
 
     if (body.proxyFirstByteTimeoutSec !== undefined) {
@@ -1676,7 +1764,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`首字超时（${config.proxyFirstByteTimeoutSec}s -> ${normalized}s）`);
       }
       config.proxyFirstByteTimeoutSec = normalized;
-      upsertSetting('proxy_first_byte_timeout_sec', normalized);
+      await upsertSetting('proxy_first_byte_timeout_sec', normalized);
     }
 
     if (body.proxyChannelFailoverMaxAttempts !== undefined) {
@@ -1702,7 +1790,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`路由探测率（${config.proxyRouteProbeRate} -> ${normalized}）`);
       }
       config.proxyRouteProbeRate = normalized;
-      upsertSetting('proxy_route_probe_rate', normalized);
+      await upsertSetting('proxy_route_probe_rate', normalized);
     }
 
     if (body.proxyConcurrencySpreadEnabled !== undefined) {
@@ -1713,7 +1801,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         );
       }
       config.proxyConcurrencySpreadEnabled = nextValue;
-      upsertSetting('proxy_concurrency_spread_enabled', nextValue);
+      await upsertSetting('proxy_concurrency_spread_enabled', nextValue);
     }
 
     if (body.routeProbabilityFloor !== undefined) {
@@ -1726,7 +1814,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`概率保底下限（${config.routeProbabilityFloor ?? 0.05} -> ${normalized}）`);
       }
       config.routeProbabilityFloor = normalized;
-      upsertSetting('route_probability_floor', normalized);
+      await upsertSetting('route_probability_floor', normalized);
     }
 
     if (body.routeQuotaExhaustionExclude !== undefined) {
@@ -1735,7 +1823,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`quota 超限排除（${config.routeQuotaExhaustionExclude !== false ? '开' : '关'} -> ${nextValue ? '开' : '关'}）`);
       }
       config.routeQuotaExhaustionExclude = nextValue;
-      upsertSetting('route_quota_exhaustion_exclude', nextValue);
+      await upsertSetting('route_quota_exhaustion_exclude', nextValue);
     }
 
     if (body.tokenRouterFailureCooldownMaxSec !== undefined) {
@@ -1747,7 +1835,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         changedLabels.push(`路由失败冷却上限（${config.tokenRouterFailureCooldownMaxSec}s -> ${normalized}s）`);
       }
       config.tokenRouterFailureCooldownMaxSec = normalized;
-      upsertSetting('token_router_failure_cooldown_max_sec', normalized);
+      await upsertSetting('token_router_failure_cooldown_max_sec', normalized);
     }
 
     if (pendingPayloadRules !== undefined) {
@@ -1785,7 +1873,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.put<{ Body: unknown }>('/api/settings/database/runtime', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '切换运行时数据库')) return;
+    if (rejectTunnelAdminAction(request, reply, '切换运行时数据库')) return reply;
     try {
       const parsedBody = parseDatabaseMigrationPayload(request.body);
       if (!parsedBody.success) {
@@ -1852,7 +1940,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Body: unknown }>('/api/settings/database/migrate', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '迁移数据库')) return;
+    if (rejectTunnelAdminAction(request, reply, '迁移数据库')) return reply;
     try {
       const parsedBody = parseDatabaseMigrationPayload(request.body);
       if (!parsedBody.success) {
@@ -1892,7 +1980,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Body: unknown }>('/api/settings/backup/import', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '导入备份数据')) return;
+    if (rejectTunnelAdminAction(request, reply, '导入备份数据')) return reply;
     const parsedBody = parseBackupImportPayload(request.body);
     if (!parsedBody.success) {
       return reply.code(400).send({ success: false, message: '导入数据格式错误：需要 JSON 对象' });
@@ -1980,7 +2068,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/settings/backup/webdav/import', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '从 WebDAV 导入备份')) return;
+    if (rejectTunnelAdminAction(request, reply, '从 WebDAV 导入备份')) return reply;
     try {
       const result = await importBackupFromWebdav();
       for (const item of result.appliedSettings) {
@@ -2158,7 +2246,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/settings/maintenance/factory-reset', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '恢复出厂设置')) return;
+    if (rejectTunnelAdminAction(request, reply, '恢复出厂设置')) return reply;
     const body = (request.body || {}) as { confirm?: unknown };
     if (body.confirm !== true) {
       return reply.code(400).send({

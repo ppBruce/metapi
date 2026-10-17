@@ -323,6 +323,11 @@ export type RuntimeSettingsPayload = {
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
+  turnstileSolverEnabled?: boolean;
+  turnstileSolverBaseUrl?: string;
+  /** Only a newly typed key is sent; GET runtime settings exposes a mask. */
+  turnstileSolverApiKey?: string;
+  turnstileSolverTimeoutSeconds?: number;
   balanceRefreshCron?: string;
   logCleanupCron?: string;
   logCleanupUsageLogsEnabled?: boolean;

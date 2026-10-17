@@ -14,6 +14,10 @@ const runtimeSettingsPayloadSchema = z.object({
   smtpSecure: z.boolean().optional(),
   logCleanupUsageLogsEnabled: z.boolean().optional(),
   logCleanupProgramLogsEnabled: z.boolean().optional(),
+  turnstileSolverEnabled: z.boolean().optional(),
+  turnstileSolverBaseUrl: z.string().optional(),
+  turnstileSolverApiKey: z.string().optional(),
+  turnstileSolverTimeoutSeconds: z.number().optional(),
 }).passthrough();
 
 const databaseMigrationPayloadSchema = z.object({

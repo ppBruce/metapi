@@ -994,7 +994,7 @@ export default function Models() {
             className={`filter-item ${activeBrand === brandName ? 'active' : ''}`}
             onClick={() => setActiveBrand(activeBrand === brandName ? null : brandName)}
           >
-            <span className="filter-item-icon" style={{ background: 'var(--color-bg)', borderRadius: 6, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <span className="filter-item-icon" style={{ background: 'var(--color-bg-inset)', borderRadius: 6, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <BrandGlyph brand={brand} size={14} fallbackText={brandName} />
             </span>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{brandName}</span>
@@ -1006,7 +1006,7 @@ export default function Models() {
             className={`filter-item ${activeBrand === '__other__' ? 'active' : ''}`}
             onClick={() => setActiveBrand(activeBrand === '__other__' ? null : '__other__')}
           >
-            <span className="filter-item-icon" style={{ background: 'var(--color-bg)', color: 'var(--color-text-muted)', fontSize: 10, borderRadius: 6 }}>?</span>
+            <span className="filter-item-icon" style={{ background: 'var(--color-bg-inset)', color: 'var(--color-text-muted)', fontSize: 10, borderRadius: 6 }}>?</span>
             {tr('其他')}
             <span className="filter-item-count">{brandList.otherCount}</span>
           </div>
@@ -1024,7 +1024,7 @@ export default function Models() {
             className={`filter-item ${activeSiteId === key ? 'active' : ''}`}
             onClick={() => setActiveSiteId(activeSiteId === key ? null : key)}
           >
-            <span className="filter-item-icon" style={{ background: 'var(--color-bg)', borderRadius: 6, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <span className="filter-item-icon" style={{ background: 'var(--color-bg-inset)', borderRadius: 6, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <SiteIcon name={site} size={14} url={siteUrl} siteId={siteId} />
             </span>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{site}</span>
@@ -1163,7 +1163,7 @@ export default function Models() {
               </button>
             )}
             <button onClick={handleRefresh} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}>
-              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ scale: '-1 1' }}>
+              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ transform: 'scaleX(-1)' }}>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
             </button>
@@ -1541,7 +1541,7 @@ export default function Models() {
                         <BrandIcon model={m.name} size={28} />
                       </td>
                       <td>
-                        <code style={{ fontSize: 12, padding: '3px 8px', background: 'var(--color-bg)', borderRadius: 6, border: '1px solid var(--color-border-light)' }}>
+                        <code style={{ fontSize: 12, padding: '3px 8px', background: 'var(--color-bg-inset)', borderRadius: 6, border: '1px solid var(--color-border-light)' }}>
                           {m.name}
                         </code>
                       </td>

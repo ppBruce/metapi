@@ -8,7 +8,7 @@ describe('Settings mobile layout', () => {
 
     expect(source).toContain("import { useIsMobile } from '../components/useIsMobile.js'");
     expect(source).toContain('const isMobile = useIsMobile()');
-    expect(source).toContain("gridTemplateColumns: isMobile ? '1fr' : 'minmax(140px, 180px) minmax(140px, 180px) max-content'");
+    expect(source).toContain("gridTemplateColumns: isMobile ? '1fr' : 'minmax(140px, 180px) minmax(140px, 180px)'");
     expect(source).toContain("gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr'");
     expect(source).toContain("gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr'");
   });

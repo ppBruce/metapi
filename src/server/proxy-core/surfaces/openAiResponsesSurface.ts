@@ -22,6 +22,11 @@ import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration
 import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
 import { getProxyAuthContext, getProxyResourceOwner } from '../../middleware/auth.js';
 import { promoteRequiredEndpointCandidateAfterProtocolError } from '../../transformers/shared/endpointCompatibility.js';
+import {
+  clampBuiltBodyToEffortCeiling,
+  isEffortRejectionRetryable,
+  recoverForEffortRejection,
+} from './effortRecovery.js';
 
 import {
   ProxyInputFileResolutionError,
@@ -68,7 +73,7 @@ import {
 import { createRequestTraceId } from '../../services/requestTraceId.js';
 import { mapUpstreamErrorForClient } from '../../shared/siteProtocolProfile.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
-import { shouldAbortSameSiteEndpointFallback, resolveFailoverBackoffMs, sleepMs, canRetryInPlaceForRecoveringFailure, isRecoveringTransientFailure, shouldGraceRetryInPlaceOnce } from '../../services/proxyRetryPolicy.js';
+import { shouldAbortSameSiteEndpointFallback, resolveFailoverBackoffMs, sleepMs, canRetryInPlaceForRecoveringFailure, isRecoveringTransientFailure, shouldGraceRetryInPlaceOnce, shouldInPlaceRetryEmptyContentOnce } from '../../services/proxyRetryPolicy.js';
 import {
   acquireSurfaceChannelLease,
   bindSurfaceStickyChannel,
@@ -255,6 +260,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
     // Grace-window in-place retries are bounded to ONE per request (see
     // chatSurface for rationale): a second same-channel retry rarely helps.
     let graceRetriedOnce = false;
+    // 空内容（含 pure-thinking 截断）：同站同账号原地重试一次，失败才切站。
+    let emptyContentRetriedOnce = false;
     const lastRetryFailure = {
       current: null as ReturnType<typeof finalizeRetryAsUpstreamFailure> | null,
     };
@@ -298,7 +305,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         };
         await finalizeDebugFailure(502, guardPayload, null);
         sendReplyIfWritable(reply, 502, guardPayload);
-        return;
+        return reply;
       }
       if (retryCount > maxRetries && !recoveryPass) {
         if (allFailuresRecovering && config.proxyFailoverBackoffMs > 0) {
@@ -565,6 +572,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
               })
               : endpointRequest.body as Record<string, unknown>
           );
+          // A relay that already told us a value is not in its ladder must not
+          // be sent that value again — clamp the built body to the ceiling
+          // learned for this site+protocol (see siteReasoningEffortCapabilityService).
+          clampBuiltBodyToEffortCeiling(requestBody, selected.site.id, endpoint);
           const requestHeaders = (
             isCompactRequest && endpoint === 'responses'
               ? ensureCompactResponsesJsonAcceptHeader(endpointRequest.headers, {
@@ -616,7 +627,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
               selected,
             siteUrl: siteApiBaseUrl,
               buildRequest: (endpoint) => buildEndpointRequest(endpoint),
-            });
+              bodyReadOptions: bodyReadGuards,
+              });
             if (recovered?.upstream?.ok) {
               return recovered;
             }
@@ -647,7 +659,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               }
               ctx.request = recoveredRequest;
               ctx.response = recoveredResponse;
-              ctx.rawErrText = await readRuntimeResponseText(recoveredResponse).catch(() => 'unknown error');
+              ctx.rawErrText = await readRuntimeResponseText(recoveredResponse, bodyReadGuards).catch(() => 'unknown error');
             }
           }
           const compactFallbackEnabled = config.responsesCompactFallbackToResponsesEnabled;
@@ -701,7 +713,16 @@ export async function handleOpenAiResponsesSurfaceRequest(
             }
             ctx.request = recoveredRequest;
             ctx.response = recoveredResponse;
-            ctx.rawErrText = await readRuntimeResponseText(recoveredResponse).catch(() => 'unknown error');
+            ctx.rawErrText = await readRuntimeResponseText(recoveredResponse, bodyReadGuards).catch(() => 'unknown error');
+          }
+          // An effort rejection is a request-shape verdict about the effort
+          // VALUE, not about the body/header shape: the compatibility replay
+          // below rebuilds bodies for protocol-shape mismatches (it would
+          // preserve an unaccepted `max` or drop `reasoning` entirely), so it
+          // cannot help and must not swallow the verdict before the shared
+          // effort recovery (onAttemptFailure + in-place retry) handles it.
+          if (isEffortRejectionRetryable(ctx.response.status, ctx.rawErrText)) {
+            return null;
           }
           return endpointStrategy.tryRecover(ctx);
         };
@@ -713,15 +734,51 @@ export async function handleOpenAiResponsesSurfaceRequest(
           paramOverride: selected.site.paramOverride ?? null,
           disableCrossProtocolFallback: isCompactRequest || config.disableCrossProtocolFallback,
           firstByteTimeoutMs: resolveProxyChannelFirstByteTimeoutMs(retryCount),
+          bodyReadOptions: bodyReadGuards,
           endpointCandidates,
           buildRequest: (endpoint) => buildEndpointRequest(endpoint),
           dispatchRequest,
           tryRecover,
+          // Overrides (paramOverride/requestOverrideRules) merge AFTER the
+          // build-time clamp, so clamp the FINAL body too — a configured
+          // override must not resurrect a value this relay already rejected.
+          enforceEffortCeiling: (body, endpoint) => {
+            clampBuiltBodyToEffortCeiling(body, selected.site.id, endpoint);
+          },
           shouldAbortRemainingEndpoints: (ctx) => shouldAbortSameSiteEndpointFallback(
             ctx.response.status,
             ctx.rawErrText || ctx.errText,
           ),
+          // An effort rejection is a request-shape verdict, not a channel-health
+          // signal: the relay answered instantly and told us which ladder it
+          // accepts. onAttemptFailure just downgraded the shared bodies, so
+          // redispatch the SAME endpoint on this channel immediately instead of
+          // cascading elsewhere with a value other relays may also refuse
+          // (same contract as the chat surface — see effortRecovery.ts).
+          shouldRetryInPlace: (ctx) => isEffortRejectionRetryable(
+            ctx.response.status,
+            ctx.rawErrText || ctx.errText,
+          ),
           onAttemptFailure: async (ctx) => {
+            // A 400 that names the effort means the value we forwarded is not in
+            // this upstream's accepted ladder (low/medium/high relays reject
+            // `max`; Anthropic message conversions reject `xhigh`). Step the
+            // value(s) in the shared source bodies down one rung so the
+            // in-place retry (and the failover retry) carry an accepted value.
+            // Applies to every source body the endpoint builder reads:
+            // responses-format (normalizedResponsesBody) and the openai-format
+            // body used for chat/messages upstream endpoints. Only a rejection
+            // downgrades — the first attempt always sends what the client asked.
+            recoverForEffortRejection({
+              status: ctx.response.status,
+              errText: ctx.rawErrText || ctx.errText,
+              siteId: selected.site.id,
+              endpoint: ctx.request.endpoint,
+              bodies: [normalizedResponsesBody, openAiBody],
+              // The relay judged the FINAL outbound body (overrides merged);
+              // learning must use its effort, not the source's client value.
+              rejectedBody: ctx.request.body,
+            });
             const memoryWrite = isCompactRequest
               ? null
               : recordUpstreamEndpointFailure({
@@ -856,7 +913,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             type: 'server_error',
           },
         });
-        return;
+        return reply;
       }
       const channelLease = leaseResult.lease;
 
@@ -1069,7 +1126,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	              const terminalFailureOutcome = failureOutcome.action === 'retry'
 	                ? (
 	                  canFailoverToNextChannel(reply)
-	                  && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+	                  && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason))
 	                    ? null
 	                    : finalizeRetryAsUpstreamFailure(failure.status, failure.reason)
 	                )
@@ -1085,6 +1142,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 graceRetriedOnce = true;
 	                  inPlaceRetryChannel = selected;
 	                  await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
+	                  continue;
+	                }
+	                // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+	                if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason)) {
+	                  emptyContentRetriedOnce = true;
+	                  inPlaceRetryChannel = selected;
 	                  continue;
 	                }
 	                if (inPlaceRecoveringRetry) {
@@ -1107,7 +1170,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	                successfulUpstreamPath,
 	              );
 	              sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-	              return;
+	              return reply;
             }
 
             startSseResponse();
@@ -1337,7 +1400,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             || successfulUpstreamPath.endsWith('/responses/compact')
           )
         ) {
-          const collected = await collectResponsesFinalPayloadFromSse(upstream, modelName);
+          const collected = await collectResponsesFinalPayloadFromSse(upstream, modelName, bodyReadGuards);
           rawText = collected.rawText;
           upstreamData = collected.payload;
         } else {
@@ -1393,7 +1456,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	          const terminalFailureOutcome = failureOutcome.action === 'retry'
 	            ? (
 	              canFailoverToNextChannel(reply)
-	              && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+	              && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason))
 	                ? null
 	                : finalizeRetryAsUpstreamFailure(failure.status, failure.reason)
 	            )
@@ -1409,6 +1472,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 graceRetriedOnce = true;
 	              inPlaceRetryChannel = selected;
 	              await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
+	              continue;
+	            }
+	            // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+	            if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason)) {
+	              emptyContentRetriedOnce = true;
+	              inPlaceRetryChannel = selected;
 	              continue;
 	            }
 	            if (inPlaceRecoveringRetry) {
@@ -1431,7 +1500,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	            successfulUpstreamPath,
 	          );
 	          sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-	          return;
+	          return reply;
         }
         const normalized = openAiResponsesTransformer.transformFinalResponse(
           upstreamData,
@@ -1525,7 +1594,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             const terminalFailureOutcome = failureOutcome.action === 'retry'
               ? (
                 canFailoverToNextChannel(reply)
-                && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+                && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null))
                   ? null
                   : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err?.message || 'unknown error')
               )
@@ -1541,6 +1610,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 graceRetriedOnce = true;
                 inPlaceRetryChannel = selected;
                 await sleepMs(resolveFailoverBackoffMs(endpointFailureStatus || 502, err?.message || null, config.proxyFailoverBackoffMs));
+                continue;
+              }
+              // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+              if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null)) {
+                emptyContentRetriedOnce = true;
+                inPlaceRetryChannel = selected;
                 continue;
               }
               if (inPlaceRecoveringRetry) {
@@ -1566,7 +1641,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               null,
             );
             sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-            return;
+            return reply;
           }
 	        const failureOutcome = await failureToolkit.handleExecutionError({
 	          selected,
@@ -1582,7 +1657,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           const terminalFailureOutcome = failureOutcome.action === 'retry'
             ? (
               canFailoverToNextChannel(reply)
-              && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry)
+              && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null))
                 ? null
                 : finalizeRetryAsExecutionFailure(err?.message || 'network failure')
             )
@@ -1598,6 +1673,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 graceRetriedOnce = true;
               inPlaceRetryChannel = selected;
               await sleepMs(resolveFailoverBackoffMs(502, err?.message || null, config.proxyFailoverBackoffMs));
+              continue;
+            }
+            // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
+            if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null)) {
+              emptyContentRetriedOnce = true;
+              inPlaceRetryChannel = selected;
               continue;
             }
             if (inPlaceRecoveringRetry) {
@@ -1619,7 +1700,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	            null,
           );
 		        sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
-		        return;
+		        return reply;
 	      } finally {
 	        channelLease.release();
 	      }

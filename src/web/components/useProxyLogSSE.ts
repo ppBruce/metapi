@@ -13,11 +13,16 @@ import { fetchAuthenticatedResponse } from '../api.js';
  * - Watchdog: no frame (including the heartbeat) within `WDOG_MS` means an
  *   intermediate proxy is buffering the stream (Cloudflare quick tunnels do), so
  *   SSE is abandoned and `onEvent` runs on a `FALLBACK_MS` poll instead.
+ * - The same fallback covers a handshake that never succeeds: a proxy that stamps
+ *   a media type on the body-less POST gets a 415 from the origin, and retrying
+ *   that forever would leave the page with no refresh at all. After
+ *   `HANDSHAKE_FALLBACK_ATTEMPTS` failed connects, polling takes over.
  */
 
 const WDOG_MS = 15_000; // Must exceed typical proxy flush delay but be short
                      // enough to degrade gracefully if SSE is buffered.
 const FALLBACK_MS = 5_000; // Polling interval when SSE is unavailable.
+const HANDSHAKE_FALLBACK_ATTEMPTS = 2; // Consecutive failed connects before polling.
 
 export function useProxyLogSSE(
   onEvent: () => void,
@@ -38,6 +43,7 @@ export function useProxyLogSSE(
     let watchdog: ReturnType<typeof setTimeout> | null = null;
     let fallbackTimer: ReturnType<typeof setInterval> | null = null;
     let sseUsable = true; // Set to false after a watchdog timeout.
+    let handshakeFailures = 0;
 
     const isVisible = () =>
       typeof document === 'undefined' ||
@@ -91,6 +97,7 @@ export function useProxyLogSSE(
         }
 
         reconnectDelay = 1000;
+        handshakeFailures = 0;
         reader = response.body.getReader();
         const currentReader = reader;
         activeReader = currentReader;
@@ -134,7 +141,15 @@ export function useProxyLogSSE(
         if (!disposed && !controller.signal.aborted) scheduleReconnect();
       } catch (error: any) {
         if (!disposed && !controller.signal.aborted && error?.message !== 'Session expired') {
-          scheduleReconnect();
+          // A handshake that keeps failing (a 4xx from a proxy that rewrote the
+          // request, an origin that refuses the stream) will not succeed on a
+          // retry: stop reconnecting and let polling drive the refresh.
+          handshakeFailures += 1;
+          if (handshakeFailures >= HANDSHAKE_FALLBACK_ATTEMPTS) {
+            startFallback();
+          } else {
+            scheduleReconnect();
+          }
         }
       } finally {
         removeAbortListener();

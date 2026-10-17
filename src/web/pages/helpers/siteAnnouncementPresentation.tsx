@@ -302,6 +302,10 @@ function sanitizeNode(node: Node): string {
   return `<${tag}${attrs.join('')}>${childrenHtml}</${tag}>`;
 }
 
+export function sanitizeRichHtml(html: string): string {
+  return sanitizeAnnouncementHtml(html);
+}
+
 function sanitizeAnnouncementHtml(html: string): string {
   if (typeof DOMParser !== 'function' || typeof Node === 'undefined') {
     return renderPlainText(extractVisibleTextFallback(html));

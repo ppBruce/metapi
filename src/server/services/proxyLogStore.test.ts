@@ -7,6 +7,7 @@ const {
   hasProxyLogDownstreamApiKeyIdColumnMock,
   hasProxyLogStreamTimingColumnsMock,
   hasProxyLogRequestTraceIdColumnMock,
+  hasProxyLogTokenIdColumnMock,
   hasProxyLogReasoningEffortColumnMock,
   dbInsertMock,
   dbInsertValuesMock,
@@ -19,6 +20,7 @@ const {
   hasProxyLogDownstreamApiKeyIdColumnMock: vi.fn(),
   hasProxyLogStreamTimingColumnsMock: vi.fn(),
   hasProxyLogRequestTraceIdColumnMock: vi.fn(),
+  hasProxyLogTokenIdColumnMock: vi.fn(),
   hasProxyLogReasoningEffortColumnMock: vi.fn(),
   dbInsertMock: vi.fn(),
   dbInsertValuesMock: vi.fn(),
@@ -49,6 +51,7 @@ const {
     clientConfidence: 'client_confidence',
     errorMessage: 'error_message',
     requestTraceId: 'request_trace_id',
+    tokenId: 'token_id',
     retryCount: 'retry_count',
     createdAt: 'created_at',
   },
@@ -67,6 +70,7 @@ vi.mock('../db/index.js', () => ({
   hasProxyLogDownstreamApiKeyIdColumn: (...args: unknown[]) => hasProxyLogDownstreamApiKeyIdColumnMock(...args),
   hasProxyLogStreamTimingColumns: (...args: unknown[]) => hasProxyLogStreamTimingColumnsMock(...args),
   hasProxyLogRequestTraceIdColumn: (...args: unknown[]) => hasProxyLogRequestTraceIdColumnMock(...args),
+  hasProxyLogTokenIdColumn: (...args: unknown[]) => hasProxyLogTokenIdColumnMock(...args),
   hasProxyLogReasoningEffortColumn: (...args: unknown[]) => hasProxyLogReasoningEffortColumnMock(...args),
 }));
 
@@ -81,6 +85,7 @@ describe('proxyLogStore', () => {
     hasProxyLogDownstreamApiKeyIdColumnMock.mockReset();
     hasProxyLogStreamTimingColumnsMock.mockReset();
     hasProxyLogRequestTraceIdColumnMock.mockReset();
+    hasProxyLogTokenIdColumnMock.mockReset();
     hasProxyLogReasoningEffortColumnMock.mockReset();
     dbInsertMock.mockReset();
     dbInsertValuesMock.mockReset();
@@ -91,6 +96,7 @@ describe('proxyLogStore', () => {
     hasProxyLogDownstreamApiKeyIdColumnMock.mockResolvedValue(false);
     hasProxyLogStreamTimingColumnsMock.mockResolvedValue(false);
     hasProxyLogRequestTraceIdColumnMock.mockResolvedValue(false);
+    hasProxyLogTokenIdColumnMock.mockResolvedValue(false);
     hasProxyLogReasoningEffortColumnMock.mockResolvedValue(false);
 
     dbInsertMock.mockReturnValue({
@@ -144,6 +150,46 @@ describe('proxyLogStore', () => {
 
     const values = dbInsertValuesMock.mock.calls[0][0] as Record<string, unknown>;
     expect(values).not.toHaveProperty('reasoningEffort');
+  });
+
+  it('persists the token snapshot when the column exists', async () => {
+    hasProxyLogTokenIdColumnMock.mockResolvedValue(true);
+
+    await insertProxyLog({
+      modelRequested: 'step-5-preview:free',
+      status: 'success',
+      channelId: 4,
+      tokenId: 91,
+    } as unknown as Parameters<typeof insertProxyLog>[0]);
+
+    const values = dbInsertValuesMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(values.tokenId).toBe(91);
+  });
+
+  it('omits the token snapshot when the column is missing', async () => {
+    hasProxyLogTokenIdColumnMock.mockResolvedValue(false);
+
+    await insertProxyLog({
+      modelRequested: 'step-5-preview:free',
+      status: 'success',
+      tokenId: 91,
+    } as unknown as Parameters<typeof insertProxyLog>[0]);
+
+    const values = dbInsertValuesMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(values).not.toHaveProperty('tokenId');
+  });
+
+  it('omits the token snapshot when no token was resolved', async () => {
+    hasProxyLogTokenIdColumnMock.mockResolvedValue(true);
+
+    await insertProxyLog({
+      modelRequested: 'step-5-preview',
+      status: 'success',
+      tokenId: null,
+    } as unknown as Parameters<typeof insertProxyLog>[0]);
+
+    const values = dbInsertValuesMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(values).not.toHaveProperty('tokenId');
   });
 
   it('prefers explicit cache tokens over the billing details copy', async () => {

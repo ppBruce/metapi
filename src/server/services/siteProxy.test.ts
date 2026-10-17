@@ -435,4 +435,110 @@ describe('siteProxy', () => {
 
     expect('dispatcher' in result).toBe(false);
   });
+
+  /**
+   * Cascade hops (this instance calling another metapi instance) are spaced far
+   * enough apart by agent turns that the conservative 30s global idle window
+   * hangs up between two turns, paying a fresh TLS handshake on every hop. A
+   * dedicated, longer-lived dispatcher serves only metapi-platform sites, so
+   * third-party relays keep the conservative shared-fate behaviour.
+   */
+  it('attaches the dedicated cascade dispatcher for metapi-platform sites', async () => {
+    const { withSiteProxyRequestInit } = await import('./siteProxy.js');
+    const { getGlobalDispatcher } = await import('undici');
+
+    await db.insert(schema.sites).values({
+      name: 'cascade-peer',
+      url: 'https://cascade-peer.example.com',
+      platform: 'metapi',
+    }).run();
+
+    const first = await withSiteProxyRequestInit('https://cascade-peer.example.com/v1/chat/completions', {
+      method: 'POST',
+    });
+    const second = await withSiteProxyRequestInit('https://cascade-peer.example.com/v1/chat/completions', {
+      method: 'POST',
+    });
+
+    expect('dispatcher' in first).toBe(true);
+    // One shared agent for every cascade hop, not a per-request dispatcher.
+    expect((first as { dispatcher?: unknown }).dispatcher).toBe(
+      (second as { dispatcher?: unknown }).dispatcher,
+    );
+    expect((first as { dispatcher?: unknown }).dispatcher).not.toBe(getGlobalDispatcher());
+  });
+
+  it('keeps the global dispatcher for non-metapi platforms', async () => {
+    const { withSiteProxyRequestInit } = await import('./siteProxy.js');
+
+    await db.insert(schema.sites).values({
+      name: 'ordinary-relay',
+      url: 'https://ordinary-relay.example.com',
+      platform: 'new-api',
+    }).run();
+
+    const result = await withSiteProxyRequestInit('https://ordinary-relay.example.com/v1/chat/completions', {
+      method: 'POST',
+    });
+
+    expect('dispatcher' in result).toBe(false);
+  });
+
+  it('lets an explicit site proxy win over the cascade dispatcher', async () => {
+    const { withSiteProxyRequestInit } = await import('./siteProxy.js');
+
+    await db.insert(schema.sites).values({
+      name: 'cascade-peer-via-proxy',
+      url: 'https://cascade-peer-proxy.example.com',
+      platform: 'metapi',
+      proxyUrl: 'http://127.0.0.1:7897',
+    }).run();
+
+    const result = await withSiteProxyRequestInit(
+      'https://cascade-peer-proxy.example.com/v1/chat/completions',
+      { method: 'POST' },
+    );
+
+    expect('dispatcher' in result).toBe(true);
+    // ProxyAgent, not the direct cascade agent: the hop must still go out through
+    // the proxy when the site is configured that way.
+    expect((result as { dispatcher?: { constructor?: { name?: string } } }).dispatcher?.constructor?.name)
+      .toBe('ProxyAgent');
+  });
+
+  /**
+   * The chat/responses/messages faces build their fetch init with
+   * `withSiteRecordProxyRequestInit` (via sharedSurface's dispatch hook), not
+   * with the URL-resolving variant — the cascade dispatcher has to be attached
+   * in both, or the hop the agent loop actually uses keeps the 30s window.
+   */
+  it('attaches the cascade dispatcher through the record-based init builder', async () => {
+    const { withSiteRecordProxyRequestInit } = await import('./siteProxy.js');
+    const { getGlobalDispatcher } = await import('undici');
+
+    const site = {
+      url: 'https://cascade-record.example.com',
+      platform: 'metapi',
+      proxyUrl: null,
+      customHeaders: null,
+      protocolProfile: null,
+      customHeadersOverrideRequestHeaders: false,
+    };
+    const fromRecord = withSiteRecordProxyRequestInit(site as never, { method: 'POST' });
+    const again = withSiteRecordProxyRequestInit(site as never, { method: 'POST' });
+
+    expect('dispatcher' in fromRecord).toBe(true);
+    // One shared agent for cascade hops, and not the conservative global one.
+    expect((fromRecord as { dispatcher?: unknown }).dispatcher).toBe(
+      (again as { dispatcher?: unknown }).dispatcher,
+    );
+    expect((fromRecord as { dispatcher?: unknown }).dispatcher).not.toBe(getGlobalDispatcher());
+
+    const plain = withSiteRecordProxyRequestInit({
+      ...site,
+      url: 'https://ordinary-record.example.com',
+      platform: 'new-api',
+    } as never, { method: 'POST' });
+    expect('dispatcher' in plain).toBe(false);
+  });
 });

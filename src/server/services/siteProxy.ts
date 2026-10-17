@@ -32,6 +32,28 @@ const globalNonProxyAgent = new Agent({
 
 setGlobalDispatcher(globalNonProxyAgent);
 
+// Cascade hops (this instance calling another metapi instance) deserve a longer
+// idle window than the conservative global one above. The peer is our own
+// software on a stable endpoint, and agent turns are spaced far enough apart
+// (10-26s in flight plus think/tool time) that the 30s window hangs up between
+// two turns — paying a fresh handshake on every hop, which is exactly the hop
+// that forwards the large prompts. Scoped to metapi-platform sites so the
+// shared-fate caution still applies to third-party relays.
+const CASCADE_PEER_KEEP_ALIVE_TIMEOUT_MS = 120_000;
+const CASCADE_PEER_KEEP_ALIVE_MAX_TIMEOUT_MS = 600_000;
+const cascadePeerDispatcher = new Agent({
+  keepAliveTimeout: CASCADE_PEER_KEEP_ALIVE_TIMEOUT_MS,
+  keepAliveMaxTimeout: CASCADE_PEER_KEEP_ALIVE_MAX_TIMEOUT_MS,
+  connections: 128,
+  pipelining: 1,
+  connect: { rejectUnauthorized: true },
+});
+
+/** True when a site is another metapi instance, i.e. a cascade hop. */
+export function isCascadePeerPlatform(platform: string | null | undefined): boolean {
+  return typeof platform === 'string' && platform.trim().toLowerCase() === 'metapi';
+}
+
 const SITE_PROXY_CACHE_TTL_MS = 3_000;
 // Proxy dispatchers (ProxyAgent / SOCKS) hold keep-alive sockets and TLS
 // state. Cache them for reuse but expire idle entries so long-running
@@ -123,6 +145,8 @@ export type SiteProxyConfigLike = {
   customHeaders?: unknown;
   customHeadersOverrideRequestHeaders?: boolean | null;
   protocolProfile?: unknown;
+  /** Present on full site rows; drives cascade-peer transport tuning. */
+  platform?: string | null;
 };
 
 let siteProxyCache: {
@@ -663,7 +687,11 @@ export async function withSiteProxyRequestInit(
   const proxyUrl = alsOverride ?? resolved.proxyUrl;
 
   if (!proxyUrl) {
-    return nextOptions;
+    // Direct hop: keep the cascade peer's TLS session across agent turns. The
+    // explicit-proxy branch below still wins for sites configured that way.
+    return isCascadePeerPlatform(resolved.platform)
+      ? { ...nextOptions, dispatcher: cascadePeerDispatcher }
+      : nextOptions;
   }
 
   const dispatcher = getDispatcherByProxyUrl(proxyUrl, alsOverride != null);
@@ -720,6 +748,12 @@ export function withSiteRecordProxyRequestInit(
   const siteProxyUrl = resolveProxyUrlForSite(site);
   const proxyUrl = accountNormalized || siteProxyUrl;
   const isAccountOverride = !!accountNormalized && accountNormalized !== siteProxyUrl;
+  if (!proxyUrl && isCascadePeerPlatform(site?.platform)) {
+    // Cascade hop (another metapi instance): keep its TLS session across agent
+    // turns, which the conservative 30s global window hangs up between requests.
+    // This is the init builder the chat/responses/messages faces actually use.
+    return { ...nextOptions, dispatcher: cascadePeerDispatcher };
+  }
   return withExplicitProxyRequestInit(proxyUrl, nextOptions, isAccountOverride);
 }
 

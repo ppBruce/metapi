@@ -8,6 +8,13 @@ const validateMock = vi.fn(() => true);
 const allMock = vi.fn();
 const refreshAllBalancesMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
+const schedulerBoundMock = vi.fn(async (...args: any[]): Promise<{ completed: boolean; result?: any }> => ({
+  completed: true,
+  result: await (refreshModelsAndRebuildRoutesMock as any)(...args),
+}));
+const attemptPlatformHttpSelfHealMock = vi.fn((_reason: string) => ({ attempt: 1 }));
+const notePlatformHttpHealthyMock = vi.fn();
+const insertValuesMock = vi.fn((..._args: unknown[]) => ({ run: async () => undefined }));
 const recoverAccountSessionMock = vi.fn();
 const startModelsDevPriceSyncMock = vi.fn();
 const stopModelsDevPriceSyncMock = vi.fn();
@@ -36,11 +43,15 @@ vi.mock('../db/index.js', () => {
   return {
     db: {
       select: () => queryChain,
+      insert: () => ({
+        values: (...args: unknown[]) => insertValuesMock(...args),
+      }),
     },
     schema: {
       settings: { key: 'key' },
       accounts: { checkinEnabled: 'checkinEnabled', status: 'status' },
       sites: { id: 'id' },
+      events: { id: 'id' },
     },
   };
 });
@@ -59,13 +70,15 @@ vi.mock('./balanceService.js', () => ({
   recoverAccountSession: (...args: unknown[]) => recoverAccountSessionMock(...args),
 }));
 
+vi.mock('./platformHttpSelfHeal.js', () => ({
+  attemptPlatformHttpSelfHeal: (...args: unknown[]) => attemptPlatformHttpSelfHealMock(...args),
+  notePlatformHttpHealthy: (...args: unknown[]) => notePlatformHttpHealthyMock(...args),
+}));
+
 vi.mock('./routeRefreshWorkflow.js', () => ({
   // The scheduler pass goes through the bounded wrapper; keep delegating to the
   // shared mock so the dedupe assertions below still observe one call per pass.
-  refreshModelsAndRebuildRoutesWithSchedulerBound: async (...args: any[]) => ({
-    completed: true,
-    result: await (refreshModelsAndRebuildRoutesMock as any)(...args),
-  }),
+  refreshModelsAndRebuildRoutesWithSchedulerBound: (...args: any[]) => schedulerBoundMock(...args),
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
 
@@ -87,6 +100,10 @@ describe('checkinScheduler', () => {
     allMock.mockReset();
     refreshAllBalancesMock.mockReset();
     refreshModelsAndRebuildRoutesMock.mockReset();
+    schedulerBoundMock.mockClear();
+    attemptPlatformHttpSelfHealMock.mockClear();
+    notePlatformHttpHealthyMock.mockClear();
+    insertValuesMock.mockClear();
     startModelsDevPriceSyncMock.mockReset();
     stopModelsDevPriceSyncMock.mockReset();
     sendNotificationMock.mockReset();
@@ -251,6 +268,55 @@ describe('checkinScheduler', () => {
     expect(allMock).toHaveBeenCalledTimes(2);
   });
 
+  it('starts a fresh interval pass after a wedged one expires without letting the old pass clear the new lock', async () => {
+    const releases: Array<(results: unknown[]) => void> = [];
+    allMock.mockImplementation(() => new Promise<unknown[]>((resolve) => {
+      releases.push(resolve);
+    }));
+    const scheduler = await import('./checkinScheduler.js');
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    setIntervalSpy.mockClear();
+    selectAllMock.mockReturnValue(intervalAccounts);
+    scheduler.updateCheckinSchedule({ mode: 'interval', intervalHours: 6 });
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    // The installed timer callback intentionally returns void; flush its work
+    // instead of pretending it returns the underlying pass promise.
+    const pollCallback = setIntervalSpy.mock.calls[0]![0] as () => void;
+
+    try {
+      pollCallback();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(selectAllMock).toHaveBeenCalledTimes(1);
+      expect(allMock).toHaveBeenCalledTimes(1);
+      expect(allMock).toHaveBeenCalledWith({ accountIds: [201], scheduleMode: 'interval' });
+
+      // Polls during the first 20min share the wedged pass (fires at 60s..1140s).
+      await vi.advanceTimersByTimeAsync(20 * 60_000 - 60_000);
+      expect(allMock).toHaveBeenCalledTimes(1);
+
+      // Crossing PASS_STALE_AFTER_MS the next poll starts a FRESH pass.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(allMock).toHaveBeenCalledTimes(2);
+
+      // A late completion of the stale pass must not unlock its successor.
+      releases[0]!([]);
+      await vi.advanceTimersByTimeAsync(0);
+      pollCallback();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(allMock).toHaveBeenCalledTimes(2);
+
+      releases[1]!([]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendNotificationMock).toHaveBeenCalledTimes(2);
+      // Self-recovery across the 6h due window is covered by
+      // selectDueIntervalCheckinAccountIds unit tests; this test ends after
+      // proving the stale takeover and the successor lock.
+    } finally {
+      for (const release of releases) release([]);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+  });
+
   it('renders one counts line plus non-success rows grouped by reason', async () => {
     const scheduler = await import('./checkinScheduler.js');
     const notification = scheduler.buildCheckinSummaryNotification([
@@ -262,20 +328,13 @@ describe('checkinScheduler', () => {
 
     expect(notification.title).toBe('签到完成（成功1/失败2）');
     expect(notification.level).toBe('warning');
-    const [p0, p1, p2, p3, p4, ...tableLines] = notification.message.split('\n');
     // Counts + one reason line per non-success site (hard breaks = two trailing
-    // spaces before \n), then a narrow status/site table.
-    expect(p0).toBe('签到汇总:成功 1 / 跳过 1 / 失败 2  ');
-    expect(p1).toBe('失败:咕嘎咕嘎公益站(Invalid URL (POST /api/user/sign_in))  ');
-    expect(p2).toBe('失败:CoeeApi(fetch failed)  ');
-    expect(p3).toBe('跳过:大喵喵API(站点开启了 Turnstile 校验，需要人工签到)');
-    expect(p4).toBe('');
-    expect(tableLines).toEqual([
-      '| 状态 | 站点 |',
-      '|:----|:----|',
-      '| 失败 | 咕嘎咕嘎公益站 |',
-      '| 失败 | CoeeApi |',
-      '| 跳过 | 大喵喵API |',
+    // spaces before \n). No table — it duplicated the same site names.
+    expect(notification.message.split('\n')).toEqual([
+      '签到汇总:成功 1 / 跳过 1 / 失败 2  ',
+      '失败:咕嘎咕嘎公益站(Invalid URL (POST /api/user/sign_in))  ',
+      '失败:CoeeApi(fetch failed)  ',
+      '跳过:大喵喵API(站点开启了 Turnstile 校验，需要人工签到)',
     ]);
     // 成功账号只计数不列名（12 个成功账号曾经把消息刷成一屏）
     expect(notification.message).not.toContain('liWAN LAB');
@@ -291,7 +350,7 @@ describe('checkinScheduler', () => {
     ]);
     expect(clean.title).toBe('签到完成（成功1）');
     expect(clean.level).toBe('info');
-    expect(clean.message).toBe('签到汇总:成功 1 / 跳过 1 / 失败 0  \n跳过:site-b(Turnstile)\n\n| 状态 | 站点 |\n|:----|:----|\n| 跳过 | site-b |');
+    expect(clean.message).toBe('签到汇总:成功 1 / 跳过 1 / 失败 0  \n跳过:site-b(Turnstile)');
 
     // 同名原因归并到一行，站点超过 3 个时折叠
     const manySites = Array.from({ length: 5 }, (_, index) => ({
@@ -302,7 +361,7 @@ describe('checkinScheduler', () => {
     }));
     const collapsed = scheduler.buildCheckinSummaryNotification(manySites);
     expect(collapsed.message).toContain('失败:site-0、site-1、site-2等 5 个站点(boom)');
-    expect(collapsed.message).toContain('| 失败 | 等 5 个站点 |');
+    expect(collapsed.message).not.toContain('|');
   });
 
   it('attempts a session re-login when a model refresh fails with an auth error', async () => {
@@ -319,5 +378,61 @@ describe('checkinScheduler', () => {
     expect(modelCall).toBeDefined();
     await modelCall![1]();
     expect(recoverAccountSessionMock).toHaveBeenCalledWith(17);
+  });
+
+  it('rebuilds the outbound pool when a refresh fails with a connect-class error', async () => {
+    refreshModelsAndRebuildRoutesMock.mockResolvedValue({
+      refresh: [{
+        accountId: 17,
+        status: 'failed',
+        errorCode: 'timeout',
+        errorMessage: 'cookie#1: timeout: The operation was aborted due to timeout',
+      }],
+      rebuild: {},
+    });
+    refreshAllBalancesMock.mockResolvedValue(undefined);
+    const scheduler = await import('./checkinScheduler.js');
+    await scheduler.startScheduler();
+    const modelCall = (scheduleMock.mock.calls as unknown as Array<[string, () => Promise<void>]>)
+      .find((call) => call[0] === '*/30 * * * *');
+    expect(modelCall).toBeDefined();
+    await modelCall![1]();
+
+    expect(attemptPlatformHttpSelfHealMock).toHaveBeenCalledTimes(1);
+    expect(String(attemptPlatformHttpSelfHealMock.mock.calls[0]![0])).toContain('连接失败');
+    expect(insertValuesMock).toHaveBeenCalledTimes(1);
+    expect((insertValuesMock.mock.calls[0]![0] as { title?: string }).title).toBe('上游连接自愈');
+  });
+
+  it('rebuilds the outbound pool when the refresh pass exceeds its scheduler bound', async () => {
+    schedulerBoundMock.mockResolvedValueOnce({ completed: false });
+    refreshAllBalancesMock.mockResolvedValue(undefined);
+    const scheduler = await import('./checkinScheduler.js');
+    await scheduler.startScheduler();
+    const modelCall = (scheduleMock.mock.calls as unknown as Array<[string, () => Promise<void>]>)
+      .find((call) => call[0] === '*/30 * * * *');
+    expect(modelCall).toBeDefined();
+    await modelCall![1]();
+
+    expect(attemptPlatformHttpSelfHealMock).toHaveBeenCalledTimes(1);
+    expect(insertValuesMock).toHaveBeenCalledTimes(1);
+    expect((insertValuesMock.mock.calls[0]![0] as { level?: string }).level).toBe('warning');
+  });
+
+  it('ends the self-heal episode after a clean refresh pass', async () => {
+    refreshModelsAndRebuildRoutesMock.mockResolvedValue({
+      refresh: [{ accountId: 1, status: 'success' }],
+      rebuild: {},
+    });
+    refreshAllBalancesMock.mockResolvedValue(undefined);
+    const scheduler = await import('./checkinScheduler.js');
+    await scheduler.startScheduler();
+    const modelCall = (scheduleMock.mock.calls as unknown as Array<[string, () => Promise<void>]>)
+      .find((call) => call[0] === '*/30 * * * *');
+    expect(modelCall).toBeDefined();
+    await modelCall![1]();
+
+    expect(notePlatformHttpHealthyMock).toHaveBeenCalledTimes(1);
+    expect(attemptPlatformHttpSelfHealMock).not.toHaveBeenCalled();
   });
 });

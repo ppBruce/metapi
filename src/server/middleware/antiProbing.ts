@@ -316,7 +316,10 @@ function shouldCheckPath(path: string): boolean {
 
 // ── Middleware ───────────────────────────────────────────────────────────────
 
-export async function antiProbingMiddleware(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+export async function antiProbingMiddleware(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<FastifyReply | undefined> {
   if (!shouldCheckPath(request.url)) return;
   if (request.method !== 'POST') return;
 
@@ -340,13 +343,18 @@ export async function antiProbingMiddleware(request: FastifyRequest, reply: Fast
   const { resolveAntiProbeMinTextLength } = await import('../services/sensitiveWordDetectionService.js');
   const minTextLength = await resolveAntiProbeMinTextLength();
   if (isProbeRequest(request.body, minTextLength)) {
-    reply.code(400).send({
+    // Return the reply, not a bare `return;`: an async hook that sends and then
+    // resolves to undefined restarts the onSend chain while an async hook is
+    // still pending (ERR_HTTP_HEADERS_SENT + FST_ERR_REP_ALREADY_SENT). The
+    // reply is a thenable that resolves once the response has flushed, so the
+    // caller's `await antiProbingMiddleware(...)` keeps the hook pending and the
+    // single-send guard (`reply.sent`) is true by the time the chain resumes.
+    return reply.code(400).send({
       error: {
         message: '请求已被安全策略拦截：疑似自动化探测或内容过短。如为正常使用，请补充内容后重试。',
         type: 'invalid_request_error',
         code: 'anti_probe_blocked',
       },
     });
-    return;
   }
 }
