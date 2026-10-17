@@ -8,4 +8,4 @@ services:
       labels:
         org.opencontainers.image.source: https://github.com/ppBruce/metapi
         org.opencontainers.image.revision: ${METAPI_BUILD_REVISION:?METAPI_BUILD_REVISION is required}
-        org.opencontainers.image.version: 1.8.5-custom
+        org.opencontainers.image.version: 1.8.9-custom
