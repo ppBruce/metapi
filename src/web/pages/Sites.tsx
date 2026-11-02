@@ -2067,9 +2067,18 @@ export default function Sites() {
                     <MobileField
                       label={tr('状态')}
                       value={(
-                        <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
-                          {site.status === 'disabled' ? tr('禁用') : tr('启用')}
-                        </StatusPill>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleStatus(site)}
+                          disabled={togglingSiteId === site.id}
+                          className="btn-as-badge"
+                          aria-label={`${site.status === 'disabled' ? '启用' : '禁用'}站点 ${site.name}`}
+                          style={{ cursor: togglingSiteId === site.id ? 'not-allowed' : 'pointer', opacity: togglingSiteId === site.id ? 0.6 : 1 }}
+                        >
+                          <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
+                            {togglingSiteId === site.id ? <span className="spinner spinner-sm" style={{ width: 10, height: 10 }} /> : (site.status === 'disabled' ? tr('禁用') : tr('启用'))}
+                          </StatusPill>
+                        </button>
                       )}
                     />
                     <MobileField
@@ -2290,9 +2299,18 @@ export default function Sites() {
                       />
                     </td>
                     <td>
-                      <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
-                        {site.status === 'disabled' ? tr('禁用') : tr('启用')}
-                      </StatusPill>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleStatus(site)}
+                        disabled={togglingSiteId === site.id}
+                        className="btn-as-badge"
+                        aria-label={`${site.status === 'disabled' ? '启用' : '禁用'}站点 ${site.name}`}
+                        style={{ cursor: togglingSiteId === site.id ? 'not-allowed' : 'pointer', opacity: togglingSiteId === site.id ? 0.6 : 1 }}
+                      >
+                        <StatusPill badgeClass={site.status === 'disabled' ? 'badge-muted' : 'badge-success'} style={{ fontSize: 11 }}>
+                          {togglingSiteId === site.id ? <span className="spinner spinner-sm" style={{ width: 10, height: 10 }} /> : (site.status === 'disabled' ? tr('禁用') : tr('启用'))}
+                        </StatusPill>
+                      </button>
                     </td>
                     <td title={site.healthState?.reason || tr('尚未检测')}>
                       <StatusPill
