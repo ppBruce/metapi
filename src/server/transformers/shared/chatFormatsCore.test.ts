@@ -366,11 +366,28 @@ describe('chatFormatsCore inline think parsing', () => {
       finishReason: 'length',
       done: true,
     });
+
+    for (const reason of ['max_completion_tokens', 'max_tokens']) {
+      expect(normalizeUpstreamStreamEvent({
+        type: 'response.incomplete',
+        response: {
+          id: `resp_incomplete_${reason}`,
+          status: 'incomplete',
+          incomplete_details: { reason },
+        },
+      }, context, 'gpt-test')).toEqual({
+        finishReason: 'length',
+        done: true,
+      });
+    }
   });
 
-  it('maps response.failed to a stop finish reason instead of inventing a chat error finish reason', () => {
+  it('keeps response.failed distinguishable from a clean stop at the canonical layer', () => {
     const context = createStreamTransformContext('gpt-test');
 
+    // Canonical value is `error` so the Anthropic/Gemini exits can surface it; the OpenAI
+    // wire projection still yields `stop` because that enum has no error member (covered
+    // in finishReason.test.ts and openai/chat/index.test.ts).
     expect(normalizeUpstreamStreamEvent({
       type: 'response.failed',
       response: {
@@ -378,7 +395,7 @@ describe('chatFormatsCore inline think parsing', () => {
         status: 'failed',
       },
     }, context, 'gpt-test')).toEqual({
-      finishReason: 'stop',
+      finishReason: 'error',
       done: true,
     });
   });
@@ -645,7 +662,8 @@ describe('chatFormatsCore inline think parsing', () => {
       status: 'failed',
       output: [],
     }, 'gpt-test')).toMatchObject({
-      finishReason: 'stop',
+      // Canonical error; the OpenAI wire projection collapses it to `stop` (no enum member).
+      finishReason: 'error',
     });
   });
 });
@@ -694,5 +712,81 @@ describe('convertClaudeRequestToOpenAiBody', () => {
     expect(toolMessage).toBeTruthy();
     expect(Array.isArray(toolMessage?.content)).toBe(true);
     expect((toolMessage?.content as any[])?.some((part: any) => part?.type === 'image_url')).toBe(true);
+  });
+});
+
+describe('chatFormatsCore claude→chat tool conversion', () => {
+  const baseBody = (tools: unknown) => ({
+    model: 'deepseek-v4.1-flash',
+    max_tokens: 64,
+    messages: [{ role: 'user', content: 'hi' }],
+    tools,
+  });
+
+  it('drops provider-executed web search and keeps the client function of the same name', () => {
+    const out = convertClaudeRequestToOpenAiBody(baseBody([
+      { type: 'web_search_20250305', name: 'web_search' },
+      { name: 'web_search', description: 'client search', input_schema: { type: 'object', properties: { q: { type: 'string' } } } },
+      { type: 'function', name: 'terminal', description: 'flat', parameters: { type: 'object' } },
+    ]));
+
+    expect(out.payload.tools).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'web_search',
+          description: 'client search',
+          parameters: { type: 'object', properties: { q: { type: 'string' } } },
+        },
+      },
+      { type: 'function', function: { name: 'terminal', description: 'flat', parameters: { type: 'object' } } },
+    ]);
+  });
+
+  it('omits the tools field when every tool was provider-executed', () => {
+    const out = convertClaudeRequestToOpenAiBody(baseBody([
+      { type: 'web_search_20250305', name: 'web_search' },
+    ]));
+    expect(out.payload.tools).toBeUndefined();
+  });
+
+  it('classifies reasoning-typed content parts as reasoning on the core path', () => {
+    // The chat-side reader (helpers.ts) has always treated {type:'reasoning'} as reasoning;
+    // the core normalizer only knew 'thinking'/'thought', so the same upstream payload that
+    // produced a thinking block for OpenAI clients leaked into the answer text for
+    // Claude/Responses clients.
+    const context = createStreamTransformContext('gpt-test');
+    const event = normalizeUpstreamStreamEvent({
+      id: 'chatcmpl-reasoning-part',
+      model: 'gpt-test',
+      choices: [{
+        index: 0,
+        delta: { content: [{ type: 'reasoning', text: 'internal chain' }] },
+        finish_reason: null,
+      }],
+    }, context, 'gpt-test');
+
+    expect(event.contentDelta).toBeUndefined();
+    expect(event.reasoningDelta).toBe('internal chain');
+  });
+
+  it('honours a declared output_index when replaying tool calls from a completed payload', () => {
+    // The array position drifted from the stream's output_index once the payload omitted
+    // items; the slot table is keyed by output_index, so the call landed in the wrong slot.
+    const context = createStreamTransformContext('gpt-test');
+    const event = normalizeUpstreamStreamEvent({
+      type: 'response.completed',
+      response: {
+        id: 'resp_slot_1',
+        status: 'completed',
+        output: [
+          { type: 'message', id: 'msg_0', content: [{ type: 'output_text', text: 'hi' }] },
+          { type: 'function_call', id: 'fc_1', call_id: 'call_x', name: 'lookup', arguments: '{}', output_index: 3 },
+        ],
+      },
+    }, context, 'gpt-test');
+
+    expect(event.toolCallDeltas?.[0]?.index).toBe(context.responsesToolCallIndexByOutputIndex[3]);
+    expect(context.responsesToolCallIndexByOutputIndex[1]).toBeUndefined();
   });
 });

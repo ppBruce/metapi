@@ -176,6 +176,11 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       parseNumber(env.TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC, TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING),
     ) ?? TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING,
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
+    // /v1/models response cache TTL: the listing re-decides routing for every
+    // exposed model per request, which dominated endpoint latency past ~200
+    // models (Hermes-class 5s listing probes timed out on a healthy server).
+    // 0 disables the cache.
+    modelsSurfaceCacheTtlMs: Math.max(0, Math.trunc(parseNumber(env.MODELS_SURFACE_CACHE_TTL_MS, 30_000))),
     // Fallback when countEligibleChannels fails (static path).
     proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 5))),
     // Soft cap on live multi-channel failover (min(pool, cap)). Default 8 —
@@ -373,7 +378,8 @@ export function buildFastifyOptions(
       },
     },
     // false | true | hop count — avoid unconditionally trusting client-supplied XFF.
-    // Default preserves legacy trust-all (true); TRUST_PROXY=false disables; TRUST_PROXY_HOPS=N constrains.
+    // Default is false: X-Forwarded-For is ignored unless TRUST_PROXY=true is set
+    // explicitly; TRUST_PROXY_HOPS=N then constrains how many hops are trusted.
     //
     // fastify >= 5.12 no longer accepts a bare number here: it types `trustProxy`
     // as boolean | string | string[] | function and compiles a numeric value to

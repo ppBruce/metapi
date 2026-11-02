@@ -1,5 +1,6 @@
 import React from 'react';
 import type { ConversationDraftFile } from '../helpers/modelTesterSession.js';
+import { tr } from '../../i18n.js';
 
 type ConversationCapability = {
   supported: boolean;
@@ -73,13 +74,13 @@ export default function ConversationComposer({
               disabled={sending || customRequestMode || !conversationFileSupported}
               onClick={() => conversationFileInputRef.current?.click()}
             >
-              添加文件
+              {tr('添加文件')}
             </button>
             <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
               {customRequestMode
-                ? '自定义请求模式不会自动上传这些附件；关闭自定义模式后可走标准 /v1/files 链路。'
+                ? tr('自定义请求模式不会自动上传这些附件；关闭自定义模式后可走标准 /v1/files 链路。')
                 : !conversationFileSupported
-                  ? (conversationFileCapability.reason || '当前协议暂不支持会话附件注入。')
+                  ? (conversationFileCapability.reason || tr('当前协议暂不支持会话附件注入。'))
                   : conversationFileHint}
             </span>
           </div>
@@ -87,12 +88,12 @@ export default function ConversationComposer({
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
               {conversationFiles.map((file) => {
                 const statusText = file.status === 'uploading'
-                  ? '上传中'
+                  ? tr('上传中')
                   : file.status === 'uploaded'
-                    ? '已上传'
+                    ? tr('已上传')
                     : file.status === 'error'
-                      ? '失败'
-                      : '待上传';
+                      ? tr('失败')
+                      : tr('待上传');
                 const statusColor = file.status === 'error'
                   ? 'var(--color-danger)'
                   : file.status === 'uploaded'
@@ -126,7 +127,7 @@ export default function ConversationComposer({
                       <button
                         type="button"
                         onClick={() => onRemoveConversationFile(file.localId)}
-                        aria-label={`移除附件 ${file.name || file.localId || '附件'}`}
+                        aria-label={`移除附件 ${file.name || file.localId || tr('附件')}`}
                         style={{
                           border: 'none',
                           background: 'transparent',
@@ -160,8 +161,8 @@ export default function ConversationComposer({
             }
           }}
           placeholder={customRequestMode
-            ? '自定义模式下输入可选。回车发送时将优先使用右侧自定义请求体。'
-            : '输入提示词，或只上传文件后直接发送…（回车发送，Shift+回车换行）'}
+            ? tr('自定义模式下输入可选。回车发送时将优先使用右侧自定义请求体。')
+            : tr('输入提示词，或只上传文件后直接发送…（回车发送，Shift+回车换行）')}
           rows={3}
           style={{ ...inputBaseStyle, resize: 'none', flex: 1 }}
         />
@@ -193,14 +194,14 @@ export default function ConversationComposer({
         {sending ? (
           <>
             <span style={{ fontSize: 18, lineHeight: 1 }}>■</span>
-            <span style={{ fontSize: 11 }}>停止</span>
+            <span style={{ fontSize: 11 }}>{tr('停止')}</span>
           </>
         ) : (
           <>
             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
             </svg>
-            <span style={{ fontSize: 11 }}>发送</span>
+            <span style={{ fontSize: 11 }}>{tr('发送')}</span>
           </>
         )}
       </button>

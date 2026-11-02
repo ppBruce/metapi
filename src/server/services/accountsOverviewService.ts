@@ -2,7 +2,6 @@ import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import {
   getCredentialModeFromExtraConfig,
-  hasOauthProvider,
   type AccountCredentialMode,
 } from './accountExtraConfig.js';
 import {
@@ -67,21 +66,7 @@ function resolveStoredCredentialMode(
 function buildCapabilitiesFromCredentialMode(
   credentialMode: AccountCredentialMode,
   hasSessionToken: boolean,
-  oauthIdentity?:
-    | string
-    | null
-    | Pick<
-        typeof schema.accounts.$inferSelect,
-        'extraConfig' | 'oauthProvider'
-      >,
 ): AccountCapabilities {
-  if (hasOauthProvider(oauthIdentity)) {
-    return {
-      canCheckin: false,
-      canRefreshBalance: false,
-      proxyOnly: true,
-    };
-  }
   const sessionCapable =
     credentialMode === 'session'
       ? hasSessionToken
@@ -102,7 +87,6 @@ function buildCapabilitiesForAccount(
   return buildCapabilitiesFromCredentialMode(
     credentialMode,
     hasSessionTokenValue(account.accessToken),
-    account,
   );
 }
 

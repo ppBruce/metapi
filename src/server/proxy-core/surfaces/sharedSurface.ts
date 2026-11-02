@@ -25,17 +25,15 @@ import type { DownstreamClientContext } from '../downstreamClientContext.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { dispatchRuntimeRequest } from '../../services/runtimeDispatch.js';
 import type { BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
-import { buildUpstreamUrl } from '../orchestration/upstreamRequest.js';
-import { recordOauthQuotaHeadersSnapshot, recordOauthQuotaResetHint } from '../../services/oauth/quota.js';
-import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refreshSingleflight.js';
 import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.js';
-import { recordPerformanceShadowSample } from '../../services/performanceShadow.js';
+import { recordPerformanceShadowSample, recordPerformanceShadowAttempt } from '../../services/performanceShadow.js';
+import { parseUpstreamRetryHint } from '../../services/upstreamRetryAfter.js';
+import { parseLocalFirstByteTimeoutBudgetMs } from '../firstByteTimeout.js';
 import { observeContextOverflowFailure, observeSuccessfulPromptUsage } from '../../services/siteContextCapabilityService.js';
-import { readRuntimeResponseText } from '../executors/types.js';
 import { selectProxyChannelForAttempt } from '../channelSelection.js';
 
 type SelectedChannel = Awaited<ReturnType<typeof tokenRouter.selectChannel>>;
-type SurfaceWarningScope = 'chat' | 'responses';
+type SurfaceWarningScope = 'chat' | 'responses' | 'gemini';
 
 type SurfaceSelectedChannel = {
   channel: { routeId: number | null; id: number };
@@ -62,25 +60,6 @@ type SurfaceFailureResponse = {
 type SurfaceFailureOutcome =
   | { action: 'retry'; excludeSiteId?: number | null; inPlace?: boolean }
   | SurfaceFailureResponse;
-
-type SurfaceOauthRefreshSelectedChannel = {
-  account: {
-    id: number;
-    accessToken?: string | null;
-    extraConfig?: string | null;
-  };
-  tokenValue: string;
-};
-
-type SurfaceOauthRefreshContext<TRequest extends BuiltEndpointRequest> = {
-  request: TRequest;
-  response: Awaited<ReturnType<typeof dispatchRuntimeRequest>>;
-  rawErrText: string;
-  dispatchRecoveryRequest: (
-    request: TRequest,
-    targetUrl?: string,
-  ) => Promise<Awaited<ReturnType<typeof dispatchRuntimeRequest>>>;
-};
 
 type SurfaceSuccessSelectedChannel = SurfaceSelectedChannel & {
   account: Record<string, unknown> & {
@@ -185,18 +164,39 @@ export function clearSurfaceStickyChannel(input: {
   requestedModel?: string | null;
   downstreamApiKeyId?: number | null;
 }): void {
-  // Only drop the session-level sticky binding. Keep the model-level
-  // last-success memory intact: last-success is the "which channel worked
-  // most recently for this model" fallback, and a single failed attempt
-  // (even a fatal one) should not erase it — otherwise the recovery pass
-  // and subsequent hops lose their best-known-good channel. Fatal failures
-  // (401 token death, credential revoke) are already handled by the
-  // tokenRouter failure cooldown so last-success won't keep retrying a
-  // truly dead channel indefinitely.
+  // Only drop the session-level sticky binding; the model-level last-success
+  // memory is a separate hint and is not touched here. Failure paths that
+  // intend to invalidate BOTH hints must call clearSurfaceChannelAffinity()
+  // instead — keeping the two calls apart is how some chat branches ended up
+  // clearing only the sticky binding and leaving a failed channel as the
+  // preferred hop for the same model.
   proxyChannelCoordinator.clearStickyChannel(
     input.stickySessionKey,
     input.selected.channel.id,
   );
+}
+
+/**
+ * Invalidate every routing hint pointing at the channel an attempt just failed
+ * on: the session-level sticky binding and the model-level last-success
+ * memory. `bindSurfaceStickyChannel` writes both on success, so a failure has
+ * to drop both — otherwise the next request for the same model re-enters the
+ * pool anchored to the channel that just died.
+ */
+export function clearSurfaceChannelAffinity(input: {
+  stickySessionKey?: string | null;
+  selected: {
+    channel: { id: number };
+  };
+  requestedModel?: string | null;
+  downstreamApiKeyId?: number | null;
+}): void {
+  clearSurfaceStickyChannel(input);
+  proxyChannelCoordinator.clearLastSuccessChannel({
+    requestedModel: input.requestedModel,
+    downstreamApiKeyId: input.downstreamApiKeyId,
+    channelId: input.selected.channel.id,
+  });
 }
 
 export async function acquireSurfaceChannelLease(input: {
@@ -291,7 +291,9 @@ export async function writeSurfaceProxyLog(input: {
       promptTokens: input.promptTokens ?? null,
       completionTokens: input.completionTokens ?? null,
       totalTokens: input.totalTokens ?? null,
-      estimatedCost: input.estimatedCost ?? 0,
+      // Preserve "unknown" as null: aggregation must not re-price it from
+      // tokens, and 0 is a legitimate free-model value.
+      estimatedCost: input.estimatedCost ?? null,
       billingDetails: input.billingDetails ?? null,
       clientFamily: input.clientContext?.clientKind || null,
       clientAppId: input.clientContext?.clientAppId || null,
@@ -398,53 +400,6 @@ export function createSurfaceDispatchRequest(input: {
       }, channelProxyUrl),
     })
   );
-}
-
-export async function trySurfaceOauthRefreshRecovery<TRequest extends BuiltEndpointRequest>(input: {
-  ctx: SurfaceOauthRefreshContext<TRequest>;
-  selected: SurfaceOauthRefreshSelectedChannel;
-  siteUrl: string;
-  buildRequest: (endpoint: TRequest['endpoint']) => TRequest;
-  captureFailureBody?: boolean;
-  bodyReadOptions?: import('../executors/types.js').ReadRuntimeResponseTextOptions;
-}): Promise<{
-  upstream: Awaited<ReturnType<typeof dispatchRuntimeRequest>>;
-  upstreamPath: string;
-  request?: TRequest;
-  targetUrl?: string;
-} | null> {
-  try {
-    const refreshed = await refreshOauthAccessTokenSingleflight(input.selected.account.id);
-    input.selected.tokenValue = refreshed.accessToken;
-    input.selected.account = {
-      ...input.selected.account,
-      accessToken: refreshed.accessToken,
-      extraConfig: refreshed.extraConfig ?? input.selected.account.extraConfig,
-    };
-
-    const refreshedRequest = input.buildRequest(input.ctx.request.endpoint);
-    const refreshedTargetUrl = buildUpstreamUrl(input.siteUrl, refreshedRequest.path);
-    const refreshedResponse = await input.ctx.dispatchRecoveryRequest(refreshedRequest, refreshedTargetUrl);
-    if (refreshedResponse.ok) {
-      return {
-        upstream: refreshedResponse,
-        upstreamPath: refreshedRequest.path,
-        request: refreshedRequest,
-        targetUrl: refreshedTargetUrl,
-      };
-    }
-
-    input.ctx.request = refreshedRequest;
-    input.ctx.response = refreshedResponse;
-    if (input.captureFailureBody !== false) {
-      const failureBody = await readRuntimeResponseText(refreshedResponse, input.bodyReadOptions).catch(() => '');
-      input.ctx.rawErrText = failureBody.trim() || 'unknown error';
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
 }
 
 export async function recordSurfaceSuccess(input: {
@@ -569,6 +524,19 @@ export async function recordSurfaceSuccess(input: {
     firstByteLatencyMs: input.firstByteLatencyMs,
     completionTokens: resolvedUsage.completionTokens,
   });
+  // Keep the raw attempt too: the EWMA above cannot describe a relay that fans
+  // out to several internal upstreams (mixture distribution), while the window
+  // estimator reads the survival curve built from these attempts.
+  recordPerformanceShadowAttempt({
+    key: {
+      routeId: input.selected.channel.routeId,
+      siteId: input.selected.site.id,
+      modelName: input.modelName,
+      isStream: input.isStream === true,
+    },
+    outcome: 'success',
+    firstByteLatencyMs: input.firstByteLatencyMs,
+  });
   // A successful upstream call proves the credential works; clear any
   // pending token-expiry sightings for this account.
   if (input.selected.account?.id != null) {
@@ -604,15 +572,6 @@ export async function recordSurfaceSuccess(input: {
     billingDetails,
     upstreamPath: input.upstreamPath,
   });
-
-  if (input.upstreamHeaders) {
-    void recordOauthQuotaHeadersSnapshot({
-      accountId: input.selected.account.id,
-      headers: input.upstreamHeaders,
-    }).catch((error) => {
-      console.warn('[proxy/shared] failed to record oauth quota headers', error);
-    });
-  }
 
   return {
     resolvedUsage,
@@ -690,6 +649,36 @@ export function createSurfaceFailureToolkit(input: {
       downstreamApiKeyId: input.downstreamApiKeyId,
       traceId: input.traceId,
     });
+    // Feed the attempt back into the window estimator. A timeout is a CENSORED
+    // observation (`T >= window`), and censoring is exactly what the survival
+    // curve needs — without it the estimator never learns that the current
+    // window is too tight, which is how a site got stuck at 30s while its real
+    // first byte had drifted to 40s at peak load.
+    const key = {
+      routeId: args.selected.channel.routeId,
+      siteId: args.selected.site?.id ?? null,
+      modelName: args.modelRequested,
+      isStream: args.isStream === true,
+    };
+    if (key.siteId != null && key.siteId > 0) {
+      // Only a window WE expired is a censored observation. A peer running this
+      // same code answers with its own sentinel as an HTTP 408 body, which
+      // reaches here as `Upstream returned HTTP 408: first byte timeout (8s)`:
+      // that is the upstream's wall, so it must not feed our curve.
+      const budgetMs = parseLocalFirstByteTimeoutBudgetMs(args.errorMessage);
+      if (budgetMs !== null) {
+        recordPerformanceShadowAttempt({
+          key: { ...key, siteId: key.siteId },
+          outcome: 'timeout',
+          budgetMs,
+        });
+      } else {
+        recordPerformanceShadowAttempt({
+          key: { ...key, siteId: key.siteId },
+          outcome: 'error',
+        });
+      }
+    }
   };
 
   /**
@@ -830,6 +819,8 @@ export function createSurfaceFailureToolkit(input: {
       firstByteLatencyMs?: number | null;
       latencyMs: number;
       retryCount: number;
+      /** The failed response's headers, when the caller still has them. */
+      upstreamHeaders?: { get(name: string): string | null } | null;
     }): Promise<SurfaceFailureOutcome> {
       const rawErrText = args.rawErrText || args.errText;
       const disposition = buildProxyFailureDisposition({
@@ -844,10 +835,12 @@ export function createSurfaceFailureToolkit(input: {
         errorText: rawErrText,
       }));
       if (disposition.incrementFailure) {
+        const retryAfterMs = parseUpstreamRetryHint(args.upstreamHeaders).retryAfterMs;
         await tokenRouter.recordFailure(args.selected.channel.id, {
           status: args.status,
           errorText: rawErrText,
           modelName: args.modelName,
+          ...(retryAfterMs != null ? { retryAfterMs } : {}),
         });
       }
       await log({
@@ -861,12 +854,6 @@ export function createSurfaceFailureToolkit(input: {
         errorMessage: args.errText,
         retryCount: args.retryCount,
       });
-      runBestEffort('record oauth quota reset hint', () => recordOauthQuotaResetHint({
-        accountId: args.selected.account.id,
-        statusCode: args.status,
-        errorText: rawErrText,
-      }));
-
       if (isTokenExpiredError({ status: args.status, message: args.errText })) {
         const siteId = args.selected.site.id ?? 0;
         runBestEffort('report token expired', () => reportTokenExpired({
@@ -918,6 +905,8 @@ export function createSurfaceFailureToolkit(input: {
       completionTokens?: number | null;
       totalTokens?: number | null;
       upstreamPath?: string | null;
+      /** The failed response's headers, when the caller still has them. */
+      upstreamHeaders?: { get(name: string): string | null } | null;
     }): Promise<SurfaceFailureOutcome> {
       const disposition = buildProxyFailureDisposition({
         status: args.failure.status,
@@ -931,10 +920,17 @@ export function createSurfaceFailureToolkit(input: {
         errorText: args.failure.reason,
       }));
       if (disposition.incrementFailure) {
+        // Believe the vendor when it says how long to wait (Retry-After /
+        // ratelimit-reset). Undefined when the caller had no response to read;
+        // the cooldown then stays on the local backoff alone. The field is
+        // omitted rather than set to null so existing call-shape assertions
+        // keep seeing exactly {status, errorText, modelName}.
+        const retryAfterMs = parseUpstreamRetryHint(args.upstreamHeaders).retryAfterMs;
         await tokenRouter.recordFailure(args.selected.channel.id, {
           status: args.failure.status,
           errorText: args.failure.reason,
           modelName: args.modelName,
+          ...(retryAfterMs != null ? { retryAfterMs } : {}),
         });
       }
       const attemptCost = await resolveAttemptUsageCost({

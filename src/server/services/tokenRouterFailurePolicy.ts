@@ -15,13 +15,12 @@ import {
   isUsageLimitRateLimitFailure,
   type SiteRuntimeFailureContext,
 } from './siteFailureClassification.js';
-import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
-import { parseCodexQuotaResetHint } from './oauth/quota.js';
 import {
   clampFailureCooldownMs as clampFailureCooldownMsMath,
   resolveEffectiveFailureCooldownMs as resolveEffectiveFailureCooldownMsMath,
   resolveFailureBackoffSec,
 } from './tokenRouterMath.js';
+import { resolveUpstreamInformedCooldownMs } from './upstreamRetryAfter.js';
 import {
   filterRecentlyFailedCandidates as filterRecentlyFailedCandidatesPure,
   isChannelRecentlyFailed as isChannelRecentlyFailedPure,
@@ -51,6 +50,28 @@ export function resolveEffectiveFailureCooldownMs(failCount?: number | null, wei
   return clampFailureCooldownMsMath(rawBackoffMs * normalizedWeight, maxMs);
 }
 
+/**
+ * Cooldown for a failed channel, extended by the wait the upstream itself asked
+ * for (Retry-After / ratelimit-reset, already parsed into `retryAfterMs`).
+ *
+ * The hint can only lengthen the wait. Retrying earlier than the vendor allows
+ * is a guaranteed second refusal; shortening the backoff because a provider
+ * said "1s" is how a channel that has been failing all afternoon gets hammered
+ * once a second. The configured ceiling still bounds the result.
+ */
+export function resolveChannelCooldownMsWithUpstreamHint(
+  failCount: number | null | undefined,
+  weight: number,
+  retryAfterMs?: number | null,
+): number {
+  const localMs = resolveEffectiveFailureCooldownMs(failCount, weight);
+  return resolveUpstreamInformedCooldownMs(
+    localMs,
+    retryAfterMs,
+    resolveConfiguredFailureCooldownMaxMs(),
+  );
+}
+
 export function resolveFailureCooldownWeight(context: SiteRuntimeFailureContext = {}): {
   weight: number;
   skipCooldown: boolean;
@@ -65,30 +86,13 @@ export function resolveFailureCooldownWeight(context: SiteRuntimeFailureContext 
 
 
 export function resolveShortWindowLimitCooldown(
-  account: typeof schema.accounts.$inferSelect,
+  _account: typeof schema.accounts.$inferSelect,
   context: SiteRuntimeFailureContext = {},
   nowMs = Date.now(),
 ): string | null {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
   if (!isUsageLimitRateLimitFailure({ status, errorText })) return null;
-
-  const resetHint = parseCodexQuotaResetHint(status, errorText, nowMs);
-  if (resetHint) {
-    const hintMs = Date.parse(resetHint.resetAt);
-    if (Number.isFinite(hintMs) && hintMs > nowMs) {
-      return new Date(hintMs).toISOString();
-    }
-  }
-
-  const oauth = getOauthInfoFromAccount(account);
-  const storedResetAt = oauth?.quota?.lastLimitResetAt;
-  if (oauth?.provider === 'codex' && storedResetAt) {
-    const storedMs = Date.parse(storedResetAt);
-    if (Number.isFinite(storedMs) && storedMs > nowMs) {
-      return new Date(storedMs).toISOString();
-    }
-  }
 
   return new Date(nowMs + SHORT_WINDOW_LIMIT_COOLDOWN_MS).toISOString();
 }

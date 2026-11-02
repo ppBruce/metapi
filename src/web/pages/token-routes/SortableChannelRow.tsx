@@ -9,16 +9,7 @@ import {
 } from './tokenBindingPresentation.js';
 import { getChannelDecisionState, getPriorityTagStyle, getProbabilityColor } from './utils.js';
 import { StatusPill } from '../../components/StatusText.js';
-
-function getRouteUnitStrategyLabel(strategy: string | null | undefined): string {
-  return strategy === 'stick_until_unavailable' ? '单个用到不可用再切' : '轮询';
-}
-
-function formatRouteUnitMemberLabel(member: { accountId: number; username: string | null; siteName: string | null }): string {
-  const accountLabel = member.username?.trim() || `account-${member.accountId}`;
-  const siteLabel = member.siteName?.trim();
-  return siteLabel ? `${accountLabel} @ ${siteLabel}` : accountLabel;
-}
+import { tr } from '../../i18n.js';
 
 export function SortableChannelRow({
   channel,
@@ -95,14 +86,6 @@ export function SortableChannelRow({
       accountName: channel.account?.username || `account-${channel.accountId}`,
     },
   );
-  const routeUnit = channel.routeUnit ?? null;
-  const routeUnitName = routeUnit?.name?.trim() || 'OAuth 路由池';
-  const routeUnitStrategyLabel = routeUnit ? getRouteUnitStrategyLabel(routeUnit.strategy) : '';
-  const routeUnitMemberSummary = routeUnit?.members?.length
-    ? routeUnit.members.map((member) => formatRouteUnitMemberLabel(member)).join('、')
-    : null;
-  const routeUnitMemberSummaryText = routeUnitMemberSummary ? `成员：${routeUnitMemberSummary}` : null;
-
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
 
   if (mobile) {
@@ -119,8 +102,8 @@ export function SortableChannelRow({
               marginTop: 2,
               ...dragHandleStyle,
             }}
-            data-tooltip={suppressTooltips ? undefined : (managementLocked ? '该路由当前不可编辑优先级' : '拖拽调整优先级桶')}
-            aria-label="拖拽调整优先级桶"
+            data-tooltip={suppressTooltips ? undefined : (managementLocked ? tr('该路由当前不可编辑优先级') : tr('拖拽调整优先级桶'))}
+            aria-label={tr('拖拽调整优先级桶')}
           >
             <svg width="12" height="12" fill="currentColor" viewBox="0 0 12 12" aria-hidden>
               <circle cx="3" cy="2" r="1" />
@@ -157,7 +140,7 @@ export function SortableChannelRow({
               </span>
 
               <span style={{ fontSize: 11, color: 'var(--color-text-muted)', marginLeft: 'auto' }}>
-                成功/失败 <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>{channel.successCount || 0}</span>
+                {tr('成功/失败')} <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>{channel.successCount || 0}</span>
                 <span style={{ color: 'var(--color-text-muted)', margin: '0 2px' }}>/</span>
                 <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>{channel.failCount || 0}</span>
               </span>
@@ -184,7 +167,7 @@ export function SortableChannelRow({
                 }}
                 data-tooltip={suppressTooltips ? undefined : `当前生效：${tokenBinding.effectiveTokenName}`}
               >
-                当前生效：{tokenBinding.effectiveTokenName}
+                {tr('当前生效：')}{tokenBinding.effectiveTokenName}
               </span>
 
               {channel.cooldownUntil && new Date(channel.cooldownUntil).getTime() > Date.now() ? (
@@ -196,15 +179,15 @@ export function SortableChannelRow({
                     color: 'var(--color-text-primary)',
                     fontWeight: 600,
                   }}
-                  data-tooltip={suppressTooltips ? undefined : '该通道连续失败多次，已被暂时冷却。冷却结束后会自动恢复。可点击"清除路由冷却"提前解除。'}
+                  data-tooltip={suppressTooltips ? undefined : tr('该通道连续失败多次，已被暂时冷却。冷却结束后会自动恢复。可点击"清除路由冷却"提前解除。')}
                 >
-                  冷却中
+                  {tr('冷却中')}
                   {' '}
                   {(() => {
                     const remaining = new Date(channel.cooldownUntil!).getTime() - Date.now();
                     const mins = Math.ceil(remaining / 60_000);
                     if (mins <= 0) return '';
-                    return mins < 60 ? `${mins}分钟` : `${Math.ceil(mins / 60)}小时`;
+                    return mins < 60 ? `${mins}${tr('分钟')}` : `${Math.ceil(mins / 60)}${tr('小时')}`;
                   })()}
                 </span>
               ) : null}
@@ -217,43 +200,14 @@ export function SortableChannelRow({
               {channel.manualOverride ? (
                 <StatusPill tone="warning"
                   style={{ fontSize: 10 }}
-                  data-tooltip={suppressTooltips ? undefined : '该通道已被手动配置，系统不会自动重建覆盖；可点击「恢复默认」清除手动配置（统计保留）'}
-                >
-                  手动配置
-                </StatusPill>
+                  data-tooltip={suppressTooltips ? undefined : tr('该通道已被手动配置，系统不会自动重建覆盖；可点击「恢复默认」清除手动配置（统计保留）')}
+                >{tr('手动配置')}</StatusPill>
               ) : null}
 
-              {routeUnit ? (
-                <>
-                  <span className="badge badge-muted" style={{ fontSize: 10 }}>
-                    OAuth 路由池
-                  </span>
-                  <span className="badge badge-muted" style={{ fontSize: 10 }}>
-                    {routeUnitName}
-                  </span>
-                  <span className="badge badge-muted" style={{ fontSize: 10 }}>
-                    {routeUnit.memberCount} 成员
-                  </span>
-                  <span className="badge badge-muted" style={{ fontSize: 10 }}>
-                    {routeUnitStrategyLabel}
-                  </span>
-                </>
-              ) : null}
             </div>
 
-            {routeUnitMemberSummaryText ? (
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 11, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
-                  成员摘要（{routeUnit?.memberCount || 0} 个成员 · {routeUnitStrategyLabel}）
-                </span>
-                <span style={{ fontSize: 11, color: 'var(--color-text-secondary)', lineHeight: 1.45 }}>
-                  {routeUnitMemberSummaryText}
-                </span>
-              </div>
-            ) : null}
-
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 12, color: 'var(--color-text-primary)', whiteSpace: 'nowrap', fontWeight: 600 }}>选中概率</span>
+              <span style={{ fontSize: 12, color: 'var(--color-text-primary)', whiteSpace: 'nowrap', fontWeight: 600 }}>{tr('选中概率')}</span>
               <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 120 }}>
                 <div
                   data-tooltip={suppressTooltips ? undefined : (decisionState.probability <= 0 ? decisionState.reasonText : undefined)}
@@ -299,7 +253,7 @@ export function SortableChannelRow({
                   onClick={() => setMobileDetailsOpen((current) => !current)}
                   style={{ marginLeft: 'auto' }}
                 >
-                  {mobileDetailsOpen ? '收起配置' : '配置通道'}
+                  {mobileDetailsOpen ? tr('收起配置') : tr('配置通道')}
                 </button>
               )}
             </div>
@@ -324,7 +278,7 @@ export function SortableChannelRow({
                         description: buildFixedTokenOptionDescription(token),
                       })),
                     ]}
-                    placeholder="选择令牌绑定方式"
+                    placeholder={tr('选择令牌绑定方式')}
                   />
                   <div style={{ marginTop: 3, fontSize: 10.5, color: 'var(--color-text-muted)', lineHeight: 1.35 }}>
                     {tokenBinding.helperText}
@@ -337,14 +291,14 @@ export function SortableChannelRow({
                     disabled={isUpdatingToken}
                     className="btn btn-link btn-link-info"
                   >
-                    {isUpdatingToken ? <span className="spinner spinner-sm" /> : '保存'}
+                    {isUpdatingToken ? <span className="spinner spinner-sm" /> : tr('保存')}
                   </button>
 
                   <button
                     onClick={() => onToggleEnabled(channel.enabled === false)}
                     className={`btn btn-link ${channel.enabled === false ? 'btn-link-info' : 'btn-link-warning'}`}
                   >
-                    {channel.enabled === false ? '启用' : '禁用'}
+                    {channel.enabled === false ? tr('启用') : tr('禁用')}
                   </button>
 
                   {onSiteBlockModel && channel.accountId ? (
@@ -352,7 +306,7 @@ export function SortableChannelRow({
                       onClick={onSiteBlockModel}
                       className="btn btn-link btn-link-warning"
                     >
-                      屏蔽模型
+                      {tr('屏蔽模型')}
                     </button>
                   ) : null}
 
@@ -360,18 +314,14 @@ export function SortableChannelRow({
                     <button
                       onClick={onResetChannel}
                       className="btn btn-link"
-                      data-tooltip={suppressTooltips ? undefined : '清除该通道的手动配置，恢复为系统派生的默认状态；累计统计会保留'}
-                    >
-                      恢复默认
-                    </button>
+                      data-tooltip={suppressTooltips ? undefined : tr('清除该通道的手动配置，恢复为系统派生的默认状态；累计统计会保留')}
+                    >{tr('恢复默认')}</button>
                   ) : null}
 
                   <button
                     onClick={onDeleteChannel}
                     className="btn btn-link btn-link-danger"
-                  >
-                    移除
-                  </button>
+                  >{tr('移除')}</button>
                 </div>
               </div>
             )}
@@ -391,8 +341,8 @@ export function SortableChannelRow({
           disabled={isSavingPriority || managementLocked}
           className="btn btn-ghost"
           style={dragHandleStyle}
-          data-tooltip={suppressTooltips ? undefined : (managementLocked ? '该路由当前不可编辑优先级' : '拖拽调整优先级桶')}
-          aria-label="拖拽调整优先级桶"
+          data-tooltip={suppressTooltips ? undefined : (managementLocked ? tr('该路由当前不可编辑优先级') : tr('拖拽调整优先级桶'))}
+          aria-label={tr('拖拽调整优先级桶')}
         >
           <svg width="12" height="12" fill="currentColor" viewBox="0 0 12 12" aria-hidden>
             <circle cx="3" cy="2" r="1" />
@@ -446,7 +396,7 @@ export function SortableChannelRow({
           }}
           data-tooltip={suppressTooltips ? undefined : `当前生效：${tokenBinding.effectiveTokenName}`}
         >
-          当前生效：{tokenBinding.effectiveTokenName}
+          {tr('当前生效：')}{tokenBinding.effectiveTokenName}
         </span>
 
         {channel.cooldownUntil && new Date(channel.cooldownUntil!).getTime() > Date.now() ? (
@@ -459,7 +409,7 @@ export function SortableChannelRow({
               fontWeight: 600,
             }}
           >
-            冷却中
+            {tr('冷却中')}
           </span>
         ) : null}
         {channel.sourceModel ? (
@@ -471,46 +421,16 @@ export function SortableChannelRow({
         {channel.manualOverride ? (
           <StatusPill tone="warning"
             style={{ fontSize: 10 }}
-            data-tooltip={suppressTooltips ? undefined : '该通道已被手动配置，系统不会自动重建覆盖；可点击「恢复默认」清除手动配置（统计保留）'}
-          >
-            手动配置
-          </StatusPill>
+            data-tooltip={suppressTooltips ? undefined : tr('该通道已被手动配置，系统不会自动重建覆盖；可点击「恢复默认」清除手动配置（统计保留）')}
+          >{tr('手动配置')}</StatusPill>
         ) : null}
 
         {channel.enabled === false ? (
-          <span className="badge badge-muted" style={{ fontSize: 10 }}>已禁用</span>
-        ) : null}
-
-        {routeUnit ? (
-          <>
-            <span className="badge badge-muted" style={{ fontSize: 10 }}>
-              OAuth 路由池
-            </span>
-            <span className="badge badge-muted" style={{ fontSize: 10 }}>
-              {routeUnitName}
-            </span>
-            <span className="badge badge-muted" style={{ fontSize: 10 }}>
-              {routeUnit.memberCount} 成员
-            </span>
-            <span className="badge badge-muted" style={{ fontSize: 10 }}>
-              {routeUnitStrategyLabel}
-            </span>
-          </>
-        ) : null}
-
-        {routeUnitMemberSummaryText ? (
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, width: '100%', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
-              成员摘要（{routeUnit?.memberCount || 0} 个成员 · {routeUnitStrategyLabel}）
-            </span>
-            <span style={{ fontSize: 11, color: 'var(--color-text-secondary)', lineHeight: 1.45 }}>
-              {routeUnitMemberSummaryText}
-            </span>
-          </div>
+          <span className="badge badge-muted" style={{ fontSize: 10 }}>{tr('已禁用')}</span>
         ) : null}
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', marginTop: mobile ? 0 : 1, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12, color: 'var(--color-text-primary)', whiteSpace: 'nowrap', fontWeight: 600 }}>选中概率</span>
+          <span style={{ fontSize: 12, color: 'var(--color-text-primary)', whiteSpace: 'nowrap', fontWeight: 600 }}>{tr('选中概率')}</span>
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 120 }}>
             <div
               data-tooltip={suppressTooltips ? undefined : (decisionState.probability <= 0 ? decisionState.reasonText : undefined)}
@@ -549,7 +469,7 @@ export function SortableChannelRow({
             </span>
           </div>
 
-          <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>成功/失败</span>
+          <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{tr('成功/失败')}</span>
           <span style={{ fontSize: 11 }}>
             <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>{channel.successCount || 0}</span>
             <span style={{ color: 'var(--color-text-muted)', margin: '0 2px' }}>/</span>
@@ -579,7 +499,7 @@ export function SortableChannelRow({
                     description: buildFixedTokenOptionDescription(token),
                   })),
                 ]}
-                placeholder="选择令牌绑定方式"
+                placeholder={tr('选择令牌绑定方式')}
               />
               <div style={{ marginTop: 3, fontSize: 10.5, color: 'var(--color-text-muted)', lineHeight: 1.35 }}>
                 {tokenBinding.helperText}
@@ -590,16 +510,16 @@ export function SortableChannelRow({
               disabled={isUpdatingToken}
               className="btn btn-link btn-link-info"
             >
-              {isUpdatingToken ? <span className="spinner spinner-sm" /> : '保存'}
+              {isUpdatingToken ? <span className="spinner spinner-sm" /> : tr('保存')}
             </button>
           </div>
 
           <button
             onClick={() => onToggleEnabled(channel.enabled === false)}
             className={`btn btn-link ${channel.enabled === false ? 'btn-link-info' : 'btn-link-warning'}`}
-            data-tooltip={suppressTooltips ? undefined : (channel.enabled === false ? '启用此通道' : '禁用此通道')}
+            data-tooltip={suppressTooltips ? undefined : (channel.enabled === false ? tr('启用此通道') : tr('禁用此通道'))}
           >
-            {channel.enabled === false ? '启用' : '禁用'}
+            {channel.enabled === false ? tr('启用') : tr('禁用')}
           </button>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
@@ -607,28 +527,24 @@ export function SortableChannelRow({
               <button
                 onClick={onResetChannel}
                 className="btn btn-link"
-                data-tooltip={suppressTooltips ? undefined : '清除该通道的手动配置，恢复为系统派生的默认状态；累计统计会保留'}
-              >
-                恢复默认
-              </button>
+                data-tooltip={suppressTooltips ? undefined : tr('清除该通道的手动配置，恢复为系统派生的默认状态；累计统计会保留')}
+              >{tr('恢复默认')}</button>
             ) : null}
 
             {onSiteBlockModel && channel.accountId ? (
               <button
                 onClick={onSiteBlockModel}
                 className="btn btn-link btn-link-warning"
-                data-tooltip={suppressTooltips ? undefined : `将此模型加入该账号（站点「${channel.site?.name || '未知'}」）的禁用列表，rebuild 后该账号的此模型通道将不再生成，同站点其他账号不受影响`}
+                data-tooltip={suppressTooltips ? undefined : `将此模型加入该账号（站点「${channel.site?.name || tr('未知')}」）的禁用列表，rebuild 后该账号的此模型通道将不再生成，同站点其他账号不受影响`}
               >
-                屏蔽模型
+                {tr('屏蔽模型')}
               </button>
             ) : null}
 
             <button
               onClick={onDeleteChannel}
               className="btn btn-link btn-link-danger"
-            >
-              移除
-            </button>
+            >{tr('移除')}</button>
           </div>
         </>
       ) : null}

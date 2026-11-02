@@ -126,21 +126,12 @@ vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldInPlaceRetryEmptyContentOnce: () => false,
 }));
 
-vi.mock('../../services/oauth/quota.js', () => ({
-  recordOauthQuotaHeadersSnapshot: (...args: unknown[]) => recordOauthQuotaHeadersSnapshotMock(...args),
-  recordOauthQuotaResetHint: (...args: unknown[]) => recordOauthQuotaResetHintMock(...args),
-}));
-
 vi.mock('../../services/proxyUsageFallbackService.js', () => ({
   resolveProxyUsageWithSelfLogFallback: (...args: unknown[]) => resolveProxyUsageWithSelfLogFallbackMock(...args),
 }));
 
 vi.mock('../../services/proxyBilling.js', () => ({
   resolveProxyLogBilling: (...args: unknown[]) => resolveProxyLogBillingMock(...args),
-}));
-
-vi.mock('../../services/oauth/refreshSingleflight.js', () => ({
-  refreshOauthAccessTokenSingleflight: (...args: unknown[]) => refreshOauthAccessTokenSingleflightMock(...args),
 }));
 
 describe('selectSurfaceChannelForAttempt', () => {
@@ -676,7 +667,6 @@ describe('selectSurfaceChannelForAttempt', () => {
     insertProxyLogMock.mockResolvedValue(undefined);
     shouldRetryProxyRequestMock.mockReturnValue(true);
     isTokenExpiredErrorMock.mockReturnValue(false);
-    recordOauthQuotaResetHintMock.mockResolvedValue(null);
 
     const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
     const toolkit = createSurfaceFailureToolkit({
@@ -709,11 +699,6 @@ describe('selectSurfaceChannelForAttempt', () => {
       errorText: '{"error":"quota exceeded"}',
       modelName: 'upstream-model',
     });
-    expect(recordOauthQuotaResetHintMock).toHaveBeenCalledWith({
-      accountId: 33,
-      statusCode: 429,
-      errorText: '{"error":"quota exceeded"}',
-    });
     expect(reportProxyAllFailedMock).not.toHaveBeenCalled();
     expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
       channelId: 11,
@@ -735,7 +720,6 @@ describe('selectSurfaceChannelForAttempt', () => {
     insertProxyLogMock.mockResolvedValue(undefined);
     shouldRetryProxyRequestMock.mockReturnValue(false);
     isTokenExpiredErrorMock.mockReturnValue(false);
-    recordOauthQuotaResetHintMock.mockResolvedValue(null);
     resolveProxyLogBillingMock.mockResolvedValue({
       estimatedCost: 0.042,
       billingDetails: { source: 'estimate' },
@@ -802,7 +786,9 @@ describe('selectSurfaceChannelForAttempt', () => {
     expect(resolveProxyLogBillingMock).not.toHaveBeenCalled();
     expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
       status: 'failed',
-      estimatedCost: 0,
+      // Unknown cost stays NULL: 0 is a legitimate "known free" value and the
+      // usage aggregator must not re-price an unknown row from its tokens.
+      estimatedCost: null,
     }));
   });
 
@@ -812,7 +798,6 @@ describe('selectSurfaceChannelForAttempt', () => {
     insertProxyLogMock.mockResolvedValue(undefined);
     shouldRetryProxyRequestMock.mockReturnValue(true);
     isTokenExpiredErrorMock.mockReturnValue(false);
-    recordOauthQuotaResetHintMock.mockRejectedValue(new Error('hint failed'));
 
     const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
     const toolkit = createSurfaceFailureToolkit({
@@ -846,7 +831,6 @@ describe('selectSurfaceChannelForAttempt', () => {
     insertProxyLogMock.mockResolvedValue(undefined);
     shouldRetryProxyRequestMock.mockReturnValue(false);
     isTokenExpiredErrorMock.mockReturnValue(true);
-    recordOauthQuotaResetHintMock.mockResolvedValue(null);
 
     const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
     const toolkit = createSurfaceFailureToolkit({
@@ -904,7 +888,6 @@ describe('selectSurfaceChannelForAttempt', () => {
     insertProxyLogMock.mockResolvedValue(undefined);
     shouldRetryProxyRequestMock.mockReturnValue(false);
     isTokenExpiredErrorMock.mockReturnValue(true);
-    recordOauthQuotaResetHintMock.mockResolvedValue(null);
     reportTokenExpiredMock.mockRejectedValue(new Error('token alert failed'));
 
     const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
@@ -999,7 +982,6 @@ describe('selectSurfaceChannelForAttempt', () => {
       attemptedChannels: 3,
       configuredAttempts: 3,
     });
-    expect(recordOauthQuotaResetHintMock).not.toHaveBeenCalled();
   });
 
   it('returns a terminal 502 for exhausted network failures through the shared failure toolkit', async () => {
@@ -1060,7 +1042,6 @@ describe('selectSurfaceChannelForAttempt', () => {
     insertProxyLogMock.mockResolvedValue(undefined);
     shouldRetryProxyRequestMock.mockReturnValue(true);
     isTokenExpiredErrorMock.mockReturnValue(false);
-    recordOauthQuotaResetHintMock.mockResolvedValue(null);
 
     const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
     const toolkit = createSurfaceFailureToolkit({
@@ -1102,7 +1083,6 @@ describe('selectSurfaceChannelForAttempt', () => {
     insertProxyLogMock.mockResolvedValue(undefined);
     shouldRetryProxyRequestMock.mockReturnValue(true);
     isTokenExpiredErrorMock.mockReturnValue(false);
-    recordOauthQuotaResetHintMock.mockResolvedValue(null);
 
     const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
     const toolkit = createSurfaceFailureToolkit({
@@ -1168,128 +1148,6 @@ describe('selectSurfaceChannelForAttempt', () => {
       errorText: 'stream exploded',
       modelName: 'upstream-model',
     });
-  });
-
-  it('refreshes oauth tokens through the shared recover helper and retries the rebuilt request', async () => {
-    const refreshedResponse = {
-      ok: true,
-      status: 200,
-      text: vi.fn(),
-    };
-    const selected = {
-      account: {
-        id: 33,
-        accessToken: 'old-access-token',
-        extraConfig: '{"oauth":{"refreshToken":"refresh"}}',
-      },
-      tokenValue: 'old-access-token',
-    };
-    const ctx = {
-      request: {
-        endpoint: 'responses' as const,
-        path: '/v1/responses',
-        headers: { authorization: 'Bearer old-access-token' },
-        body: { model: 'gpt-5.2' },
-      },
-      response: {
-        ok: false,
-        status: 401,
-        text: vi.fn(),
-      } as any,
-      rawErrText: 'expired token',
-      dispatchRecoveryRequest: vi.fn(),
-    };
-    refreshOauthAccessTokenSingleflightMock.mockResolvedValue({
-      accessToken: 'new-access-token',
-      extraConfig: '{"oauth":{"refreshToken":"refresh-next"}}',
-    });
-    const dispatchRecoveryRequest = vi.fn().mockResolvedValue(refreshedResponse);
-    ctx.dispatchRecoveryRequest = dispatchRecoveryRequest;
-
-    const { trySurfaceOauthRefreshRecovery } = await import('./sharedSurface.js');
-    const result = await trySurfaceOauthRefreshRecovery({
-      ctx,
-      selected,
-      siteUrl: 'https://upstream.example.com',
-      buildRequest: () => ({
-        endpoint: 'responses',
-        path: '/v1/responses',
-        headers: { authorization: `Bearer ${selected.tokenValue}` },
-        body: { model: 'gpt-5.2' },
-      }),
-    });
-
-    expect(refreshOauthAccessTokenSingleflightMock).toHaveBeenCalledWith(33);
-    expect(selected.tokenValue).toBe('new-access-token');
-    expect(selected.account.accessToken).toBe('new-access-token');
-    expect(selected.account.extraConfig).toBe('{"oauth":{"refreshToken":"refresh-next"}}');
-    expect(dispatchRecoveryRequest).toHaveBeenCalledWith(expect.objectContaining({
-      headers: { authorization: 'Bearer new-access-token' },
-    }), 'https://upstream.example.com/v1/responses');
-    expect(result).toEqual({
-      request: {
-        endpoint: 'responses',
-        path: '/v1/responses',
-        headers: { authorization: 'Bearer new-access-token' },
-        body: { model: 'gpt-5.2' },
-      },
-      targetUrl: 'https://upstream.example.com/v1/responses',
-      upstream: refreshedResponse,
-      upstreamPath: '/v1/responses',
-    });
-  });
-
-  it('updates the recover context with the refreshed failure response when oauth refresh retry still fails', async () => {
-    const refreshedResponse = {
-      ok: false,
-      status: 403,
-      text: vi.fn().mockResolvedValue('account mismatch'),
-    };
-    const ctx = {
-      request: {
-        endpoint: 'responses' as const,
-        path: '/v1/responses',
-        headers: { authorization: 'Bearer old-access-token' },
-        body: { model: 'gpt-5.2' },
-      },
-      response: {
-        ok: false,
-        status: 401,
-        text: vi.fn(),
-      } as unknown as UndiciResponse,
-      rawErrText: 'expired token',
-      dispatchRecoveryRequest: vi.fn().mockResolvedValue(refreshedResponse),
-    };
-    const selected = {
-      account: {
-        id: 33,
-        accessToken: 'old-access-token',
-        extraConfig: '{"oauth":{"refreshToken":"refresh"}}',
-      },
-      tokenValue: 'old-access-token',
-    };
-    refreshOauthAccessTokenSingleflightMock.mockResolvedValue({
-      accessToken: 'new-access-token',
-      extraConfig: '{"oauth":{"refreshToken":"refresh-next"}}',
-    });
-
-    const { trySurfaceOauthRefreshRecovery } = await import('./sharedSurface.js');
-    const result = await trySurfaceOauthRefreshRecovery({
-      ctx,
-      selected,
-      siteUrl: 'https://upstream.example.com',
-      buildRequest: () => ({
-        endpoint: 'responses',
-        path: '/v1/responses',
-        headers: { authorization: `Bearer ${selected.tokenValue}` },
-        body: { model: 'gpt-5.2' },
-      }),
-    });
-
-    expect(result).toBeNull();
-    expect(ctx.request.headers).toEqual({ authorization: 'Bearer new-access-token' });
-    expect(ctx.response).toBe(refreshedResponse);
-    expect(ctx.rawErrText).toBe('account mismatch');
   });
 
   it('records shared success bookkeeping with usage fallback, billing, and success logging', async () => {
@@ -1472,62 +1330,6 @@ describe('selectSurfaceChannelForAttempt', () => {
     }));
   });
 
-  it('captures codex quota headers from successful upstream responses as best-effort bookkeeping', async () => {
-    resolveProxyUsageWithSelfLogFallbackMock.mockResolvedValue({
-      promptTokens: 10,
-      completionTokens: 5,
-      totalTokens: 15,
-      recoveredFromSelfLog: false,
-      estimatedCostFromQuota: 0,
-      selfLogBillingMeta: null,
-      usageSource: 'upstream',
-    });
-    resolveProxyLogBillingMock.mockResolvedValue({
-      estimatedCost: 0.12,
-      billingDetails: null,
-    });
-    recordOauthQuotaHeadersSnapshotMock.mockResolvedValue(null);
-    const logSuccess = vi.fn().mockResolvedValue(undefined);
-
-    const { recordSurfaceSuccess } = await import('./sharedSurface.js');
-    await recordSurfaceSuccess({
-      selected: {
-        channel: { id: 11, routeId: 22 },
-        account: { id: 33, username: 'oauth-user' },
-        site: { id: 44, url: 'https://upstream.example.com', platform: 'new-api', name: 'Codex OAuth' },
-        tokenValue: 'live-token',
-        tokenName: 'default',
-        actualModel: 'upstream-model',
-      },
-      requestedModel: 'gpt-5.2',
-      modelName: 'upstream-model',
-      parsedUsage: {
-        promptTokens: 10,
-        completionTokens: 5,
-        totalTokens: 15,
-        cacheReadTokens: 0,
-        cacheCreationTokens: 0,
-        promptTokensIncludeCache: null,
-      },
-      requestStartedAtMs: 1000,
-      latencyMs: 250,
-      retryCount: 0,
-      upstreamPath: '/v1/responses',
-      upstreamHeaders: new Headers({
-        'x-codex-primary-used-percent': '61',
-        'x-codex-secondary-used-percent': '13',
-      }),
-      logSuccess,
-    });
-
-    await vi.waitFor(() => {
-      expect(recordOauthQuotaHeadersSnapshotMock).toHaveBeenCalledWith({
-        accountId: 33,
-        headers: expect.any(Headers),
-      });
-    });
-  });
-
   it('treats success metrics as best-effort when requested', async () => {
     resolveProxyUsageWithSelfLogFallbackMock.mockRejectedValueOnce(new Error('billing failed'));
     const logSuccess = vi.fn().mockResolvedValue(undefined);
@@ -1609,6 +1411,26 @@ describe('clearSurfaceStickyChannel', () => {
     // …but last-success must survive so the recovery pass / next hop can
     // still fall back to the channel that most recently worked for this model.
     expect(clearLastSuccessChannelMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('clearSurfaceChannelAffinity', () => {
+  it('drops the session sticky binding and the model-level last-success hint together', async () => {
+    const { clearSurfaceChannelAffinity } = await import('./sharedSurface.js');
+
+    clearSurfaceChannelAffinity({
+      stickySessionKey: 'session-1',
+      selected: { channel: { id: 55 } },
+      requestedModel: 'gpt-5.2',
+      downstreamApiKeyId: 7,
+    });
+
+    expect(clearStickyChannelMock).toHaveBeenCalledWith('session-1', 55);
+    expect(clearLastSuccessChannelMock).toHaveBeenCalledWith({
+      requestedModel: 'gpt-5.2',
+      downstreamApiKeyId: 7,
+      channelId: 55,
+    });
   });
 });
 

@@ -7,7 +7,7 @@ import {
   normalizeOpenAiChatFinalToNormalized,
 } from './responseBridge.js';
 import { openAiChatStream } from './streamBridge.js';
-import { config } from '../../../config.js';
+import { config, resolveProxyStreamIdleTimeoutMs } from '../../../config.js';
 
 type StreamReader = {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
@@ -20,6 +20,8 @@ type ChatProxyStreamSessionInput = {
   modelName: string;
   successfulUpstreamPath: string;
   onParsedPayload?: (payload: unknown) => void;
+  /** Frames that could not be parsed as JSON; dropped rather than forwarded. */
+  onDroppedFrame?: (eventBlock: ParsedSseEvent) => void;
   writeLines: (lines: string[]) => void;
   writeRaw: (chunk: string) => void;
 };
@@ -194,30 +196,6 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     pendingWrites.push(...lines);
   };
 
-  const emitRaw = (chunk: string, options?: { meaningful?: boolean; force?: boolean }) => {
-    if (!chunk) return;
-    if (input.downstreamFormat !== 'openai') {
-      input.writeRaw(chunk);
-      return;
-    }
-    if (forwardedDownstreamOutput) {
-      input.writeRaw(chunk);
-      return;
-    }
-    if (options?.force) {
-      pendingWrites.length = 0;
-      forwardedDownstreamOutput = true;
-      input.writeRaw(chunk);
-      return;
-    }
-    if (options?.meaningful) {
-      forwardedDownstreamOutput = true;
-      flushPendingWrites();
-      input.writeRaw(chunk);
-      return;
-    }
-    pendingWrites.push(chunk);
-  };
 
   const shouldFailEmptyChatCompletion = (): boolean => {
     if (!config.proxyEmptyContentFailEnabled) return false;
@@ -233,9 +211,17 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     finalized = true;
 
     if (shouldFailEmptyChatCompletion()) {
-      const message = hasReasoningChatOutput()
-        ? 'Upstream returned empty content (reasoning only)'
-        : 'Upstream returned empty content';
+      // Reasoning-only + finish_reason=length means the thinking chain ate the
+      // whole max_tokens budget: the channel is healthy and the fix is a larger
+      // output budget (or a smaller reasoning effort), not a different channel.
+      // Keep it distinct from a relay that answers with nothing at all.
+      const hitOutputBudget = hasReasoningChatOutput() && [...chatAggregateState?.choices.values() ?? []]
+        .some((choice) => choice.finishReason === 'length');
+      const message = hitOutputBudget
+        ? 'Upstream reasoning exhausted the output budget (finish_reason=length)'
+        : (hasReasoningChatOutput()
+          ? 'Upstream returned empty content (reasoning only)'
+          : 'Upstream returned empty content');
       markFailed({
         error: {
           message,
@@ -252,8 +238,12 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     // For native Anthropic streams, EOF without message_stop is not a clean
     // completion. Forward the partial stream as-is instead of fabricating an
     // end_turn/message_stop pair that makes clients think the run finished.
+    // Exception: the upstream already reported a stop_reason and the terminal pair is only
+    // held back for the trailing usage chunk (OpenAI-compatible relays send usage after
+    // finish_reason), so a pending finish still has to be flushed here.
     if (input.downstreamFormat === 'claude' && !claudeContext.doneSent) {
-      return;
+      const hasPendingFinish = typeof (claudeContext as { pendingFinishReason?: unknown }).pendingFinishReason === 'string';
+      if (!hasPendingFinish) return;
     }
 
     if (
@@ -340,15 +330,13 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       return input.downstreamFormat === 'claude' && claudeContext.doneSent;
     }
 
-    if (input.downstreamFormat === 'openai') {
-      emitRaw(`data: ${eventBlock.data}\n\n`, { meaningful: true });
-      return false;
-    }
-
-    input.writeLines(anthropicMessagesTransformer.serializeStreamEvent({
-      contentDelta: eventBlock.data,
-    }, streamContext, claudeContext));
-    return claudeContext.doneSent;
+    // Unparseable frame: a keep-alive, a provider-specific non-JSON line, or the tail of a
+    // response cut mid-JSON. Forwarding it verbatim hands the client `data: {"id":"x","cho`
+    // and it throws; turning it into a text delta injects raw JSON into the answer — the
+    // exact "答案里冒出 JSON" symptom when an upstream truncates a stream. Drop it and let
+    // finalize() decide the terminal state from what was actually delivered.
+    input.onDroppedFrame?.(eventBlock);
+    return false;
   };
 
   return {
@@ -398,6 +386,13 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         pullEvents: (buffer) => downstreamTransformer.pullSseEvents(buffer),
         handleEvent: handleEventBlock,
         onEof: finalize,
+        idleTimeoutMs: resolveProxyStreamIdleTimeoutMs(),
+        onFirstByteTimeout: (elapsedMs) => {
+          // Nothing in the per-site first-byte estimator reaches this read loop, so the
+          // configured ceiling is the only bound: surface it when it fires, otherwise an
+          // upstream that opens a stream and goes quiet looks like a clean early EOF.
+          console.warn(`[proxy-stream/chat] no first byte within ${elapsedMs}ms for model ${input.modelName ?? 'unknown'}`);
+        },
       });
       await lifecycle.run();
       return terminalResult;

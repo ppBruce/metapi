@@ -116,7 +116,7 @@ async function createSiteAndClickModalChoice(
     await flushMicrotasks();
 
     const targetButton = choice === 'session'
-      ? findClickableButtonByText(root, createdSite.platform === 'codex' ? '添加 OAuth 连接' : '添加账号（用户名密码登录）')
+      ? findClickableButtonByText(root, createdSite.platform === 'codex' ? '添加 Session 凭据' : '添加账号（用户名密码登录）')
       : choice === 'apikey'
         ? findClickableButtonByText(root, '添加 API Key')
         : findClickableButtonByText(root, '稍后配置');
@@ -165,11 +165,12 @@ describe('Sites create redirect', () => {
     expect(rendered).not.toContain('/accounts?');
   });
 
-  it('shows modal after creating a codex site and navigates to OAuth when user chooses session', async () => {
+  it('shows modal after creating a codex site and stays on the site page when user chooses session', async () => {
     const rendered = await createSiteAndClickModalChoice({ id: 24, name: 'Demo Site', platform: 'codex' }, 'session');
 
-    expect(rendered).toContain('/oauth?');
-    expect(rendered).toContain('provider=codex');
+    // The OAuth console is gone; session connections are configured on the site page.
+    expect(rendered).not.toContain('/oauth');
+    expect(rendered).toContain('/sites/24?');
     expect(rendered).toContain('create=1');
     expect(rendered).toContain('siteId=24');
   });

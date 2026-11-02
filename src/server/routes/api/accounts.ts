@@ -1,14 +1,10 @@
 import { FastifyInstance } from 'fastify';
-import { db, schema, runtimeDbDialect } from '../../db/index.js';
+import { db, schema } from '../../db/index.js';
 import { parsePositiveIntParam } from '../../shared/routeParams.js';
 import { insertAndGetById } from '../../db/insertHelpers.js';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { parseSiteDisabledModelsPayload } from '../../contracts/siteRoutePayloads.js';
-import { invalidateSiteProxyCache } from '../../services/siteProxy.js';
-import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
-import { rebuildTokenRoutesFromAvailability } from '../../services/modelService.js';
-import { clearModelsMarketplaceCache } from './stats.js';
 import { refreshBalance } from '../../services/balanceService.js';
+import { appendSessionTokenRebindHint } from '../../services/alertRules.js';
 import { getAdapter } from '../../services/platforms/index.js';
 import {
   convergeAccountMutation,
@@ -18,25 +14,12 @@ import {
   getCredentialModeFromExtraConfig,
   getProxyUrlFromExtraConfig,
   guessPlatformUserIdFromUsername,
-  hasOauthProvider,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
-  normalizeCredentialMode as normalizeCredentialModeInput,
   resolvePlatformUserId,
-  type AccountCredentialMode,
 } from '../../services/accountExtraConfig.js';
 import { encryptAccountPassword } from '../../services/accountCredentialService.js';
 import { applyAccountUpdateWorkflow } from '../../services/accountUpdateWorkflow.js';
-import { startBackgroundTask } from '../../services/backgroundTaskService.js';
-import {
-  buildRuntimeHealthForAccount,
-  setAccountRuntimeHealth,
-  type RuntimeHealthState,
-} from '../../services/accountHealthService.js';
-import {
-  appendSessionTokenRebindHint,
-  isTokenExpiredError,
-} from '../../services/alertRules.js';
 import {
   withAccountProxyOverride,
   withSiteRecordProxyRequestInit,
@@ -44,13 +27,10 @@ import {
 import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { getAccountsSnapshot } from '../../services/accountsOverviewService.js';
 import {
-  type AccountCreatePayload,
   normalizeExtraConfigInput,
   parseAccountBatchPayload,
   parseAccountCreatePayload,
-  parseAccountHealthRefreshPayload,
   parseAccountLoginPayload,
-  parseAccountManualModelsPayload,
   parseAccountRebindSessionPayload,
   parseAccountUpdatePayload,
   parseAccountVerifyTokenPayload,
@@ -64,32 +44,29 @@ import {
   parseBatchApiKeys,
 } from '../../services/apiKeyBatch.js';
 import { createManualAccount } from '../../services/manualAccountCreationService.js';
-
-type AccountWithSiteRow = {
-  accounts: typeof schema.accounts.$inferSelect;
-  sites: typeof schema.sites.$inferSelect;
-};
-
-type AccountHealthRefreshResult = {
-  accountId: number;
-  username: string | null;
-  siteName: string;
-  status: 'success' | 'failed' | 'skipped';
-  state: RuntimeHealthState;
-  message: string;
-};
-
-type AccountCapabilities = {
-  canCheckin: boolean;
-  canRefreshBalance: boolean;
-  proxyOnly: boolean;
-};
-
-type VerifyFailureReason =
-  | 'needs-user-id'
-  | 'invalid-user-id'
-  | 'shield-blocked'
-  | null;
+import {
+  ACCOUNT_VERIFY_TIMEOUT_MS,
+  buildAccountVerifyTimeoutMessage,
+  buildCapabilitiesForAccount,
+  hasSessionTokenValue,
+  isVerificationTimeoutError,
+  normalizeBatchIds,
+  normalizeLoginFailure,
+  normalizeManagedRefreshToken,
+  normalizeManagedTokenExpiresAt,
+  normalizePinnedFlag,
+  normalizeSortOrder,
+  parseBooleanFlag,
+  resolveRequestedCreateTokens,
+  resolveRequestedCredentialMode,
+  resolveStoredCredentialMode,
+  resolveUserIdFailureReason,
+  withTimeout,
+  buildCapabilitiesFromCredentialMode,
+  type VerifyFailureReason,
+} from './accountsPure.js';
+import { registerAccountModelRoutes } from './accountsModelsRoutes.js';
+import { registerAccountHealthRoutes } from './accountsHealthRoutes.js';
 
 const limitAccountLogin = createRateLimitGuard({
   bucket: 'accounts-login',
@@ -103,129 +80,6 @@ const limitAccountVerifyToken = createRateLimitGuard({
   windowMs: 60_000,
 });
 
-function parseBooleanFlag(raw?: string): boolean {
-  if (!raw) return false;
-  const normalized = raw.trim().toLowerCase();
-  return normalized === '1' || normalized === 'true' || normalized === 'yes';
-}
-
-function hasSessionTokenValue(value: string | null | undefined): boolean {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
-function resolveRequestedCredentialMode(input: unknown): AccountCredentialMode {
-  return normalizeCredentialModeInput(input) || 'auto';
-}
-
-function resolveStoredCredentialMode(
-  account: typeof schema.accounts.$inferSelect,
-): AccountCredentialMode {
-  const fromConfig = getCredentialModeFromExtraConfig(account.extraConfig);
-  if (fromConfig && fromConfig !== 'auto') return fromConfig;
-  return hasSessionTokenValue(account.accessToken) ? 'session' : 'apikey';
-}
-
-function buildCapabilitiesFromCredentialMode(
-  credentialMode: AccountCredentialMode,
-  hasSessionToken: boolean,
-  oauthIdentity?:
-    | string
-    | null
-    | Pick<
-        typeof schema.accounts.$inferSelect,
-        'extraConfig' | 'oauthProvider'
-      >,
-): AccountCapabilities {
-  if (hasOauthProvider(oauthIdentity)) {
-    return {
-      canCheckin: false,
-      canRefreshBalance: false,
-      proxyOnly: true,
-    };
-  }
-  const sessionCapable =
-    credentialMode === 'session'
-      ? hasSessionToken
-      : credentialMode === 'apikey'
-        ? false
-        : hasSessionToken;
-  return {
-    canCheckin: sessionCapable,
-    canRefreshBalance: sessionCapable,
-    proxyOnly: !sessionCapable,
-  };
-}
-
-function buildCapabilitiesForAccount(
-  account: typeof schema.accounts.$inferSelect,
-): AccountCapabilities {
-  const credentialMode = resolveStoredCredentialMode(account);
-  return buildCapabilitiesFromCredentialMode(
-    credentialMode,
-    hasSessionTokenValue(account.accessToken),
-    account,
-  );
-}
-
-function normalizeBatchIds(input: unknown): number[] {
-  if (!Array.isArray(input)) return [];
-  return input
-    .map((item) => Number.parseInt(String(item), 10))
-    .filter((id) => Number.isFinite(id) && id > 0);
-}
-
-function normalizePinnedFlag(input: unknown): boolean | null {
-  if (input === undefined || input === null) return null;
-  if (typeof input === 'boolean') return input;
-  if (typeof input === 'number') return input !== 0;
-  if (typeof input === 'string') {
-    const normalized = input.trim().toLowerCase();
-    if (normalized === 'true' || normalized === '1') return true;
-    if (normalized === 'false' || normalized === '0') return false;
-  }
-  return null;
-}
-
-function resolveRequestedCreateTokens(
-  body: AccountCreatePayload,
-  credentialMode: AccountCredentialMode,
-): string[] {
-  if (credentialMode !== 'apikey') {
-    const single = String(body.accessToken || '').trim();
-    return single ? [single] : [];
-  }
-
-  const batchTokens = parseBatchApiKeys(body.accessTokens);
-  if (batchTokens.length > 0) return batchTokens;
-  const tokens = parseBatchApiKeys(body.accessToken || body.apiToken);
-  // Some platforms (e.g. opencode) need no API key at all — let the request
-  // through with an empty token so the caller can skip model fetch.
-  return tokens.length > 0 ? tokens : [''];
-}
-
-function normalizeSortOrder(input: unknown): number | null {
-  if (input === undefined || input === null || input === '') return null;
-  const parsed = Number.parseInt(String(input), 10);
-  if (!Number.isFinite(parsed)) return null;
-  return Math.max(0, parsed);
-}
-
-function normalizeManagedRefreshToken(input: unknown): string | undefined {
-  if (typeof input !== 'string') return undefined;
-  const trimmed = input.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function normalizeManagedTokenExpiresAt(input: unknown): number | undefined {
-  if (typeof input === 'number' && Number.isFinite(input) && input > 0)
-    return Math.trunc(input);
-  if (typeof input === 'string') {
-    const parsed = Number.parseInt(input.trim(), 10);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-  return undefined;
-}
-
 async function getNextAccountSortOrder(): Promise<number> {
   const row = await db
     .select({ maxSortOrder: sql<number>`max(${schema.accounts.sortOrder})` })
@@ -235,97 +89,7 @@ async function getNextAccountSortOrder(): Promise<number> {
   return Number.isFinite(currentMax) ? Math.max(0, currentMax + 1) : 0;
 }
 
-type LoginFailureInfo = {
-  message: string;
-  shieldBlocked: boolean;
-};
-
-const ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS = 10_000;
-const ACCOUNT_VERIFY_TIMEOUT_MS = 10_000;
 const ACCOUNT_VERIFY_DIAG_TIMEOUT_MS = 2_500;
-
-function normalizeLoginFailure(
-  message: string | null | undefined,
-): LoginFailureInfo {
-  const raw = (message || '').trim();
-  const lowered = raw.toLowerCase();
-  const looksLikeHtmlJsonParseError =
-    lowered.includes('unexpected token') &&
-    lowered.includes('not valid json') &&
-    (lowered.includes('<html') || lowered.includes('<script'));
-  const looksLikeShieldChallenge =
-    lowered.includes('acw_sc__v2') ||
-    lowered.includes('var arg1') ||
-    lowered.includes('captcha') ||
-    lowered.includes('challenge') ||
-    lowered.includes('cloudflare tunnel error');
-
-  if (looksLikeHtmlJsonParseError || looksLikeShieldChallenge) {
-    return {
-      shieldBlocked: true,
-      message:
-        'This site is shielded by anti-bot challenge. Account/password login is blocked. Create an API key on the target site and import that key.',
-    };
-  }
-
-  return {
-    shieldBlocked: false,
-    message: raw || 'login failed',
-  };
-}
-
-function summarizeAccountHealthRefresh(results: AccountHealthRefreshResult[]) {
-  return {
-    total: results.length,
-    healthy: results.filter((item) => item.state === 'healthy').length,
-    unhealthy: results.filter((item) => item.state === 'unhealthy').length,
-    degraded: results.filter((item) => item.state === 'degraded').length,
-    disabled: results.filter((item) => item.state === 'disabled').length,
-    unknown: results.filter((item) => item.state === 'unknown').length,
-    success: results.filter((item) => item.status === 'success').length,
-    failed: results.filter((item) => item.status === 'failed').length,
-    skipped: results.filter((item) => item.status === 'skipped').length,
-  };
-}
-
-async function withTimeout<T>(
-  fn: () => Promise<T>,
-  timeoutMs: number,
-  timeoutMessage: string,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      fn(),
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-function isVerificationTimeoutError(error: unknown): boolean {
-  const name =
-    typeof error === 'object' && error && 'name' in error
-      ? String((error as { name?: unknown }).name || '')
-      : '';
-  const message =
-    typeof error === 'object' && error && 'message' in error
-      ? String((error as { message?: unknown }).message || '')
-      : String(error || '');
-  const lowered = `${name} ${message}`.toLowerCase();
-  return (
-    lowered.includes('timeout') ||
-    lowered.includes('timed out') ||
-    lowered.includes('abort')
-  );
-}
-
-function buildAccountVerifyTimeoutMessage(): string {
-  return `Token verification timed out (${Math.max(1, Math.round(ACCOUNT_VERIFY_TIMEOUT_MS / 1000))}s)`;
-}
 
 async function getModelsWithSiteApiEndpointPool(
   site: typeof schema.sites.$inferSelect,
@@ -346,145 +110,6 @@ async function getModelsWithSiteApiEndpointPool(
       timeoutMessage,
     );
   });
-}
-
-function resolveUserIdFailureReason(
-  message: string,
-  hasProvidedUserId: boolean,
-): VerifyFailureReason {
-  const lowered = String(message || '')
-    .trim()
-    .toLowerCase();
-  if (!lowered) return null;
-
-  if (
-    lowered.includes('mismatch') ||
-    lowered.includes('not match') ||
-    lowered.includes('invalid user id') ||
-    lowered.includes('wrong user id')
-  ) {
-    return 'invalid-user-id';
-  }
-
-  if (
-    lowered.includes('missing new-api-user') ||
-    lowered.includes('new-api-user required') ||
-    lowered.includes('requires user id') ||
-    lowered.includes('missing user id')
-  ) {
-    return 'needs-user-id';
-  }
-
-  if (lowered.includes('new-api-user') || lowered.includes('user id')) {
-    return hasProvidedUserId ? 'invalid-user-id' : 'needs-user-id';
-  }
-
-  return null;
-}
-
-async function refreshRuntimeHealthForRow(
-  row: AccountWithSiteRow,
-): Promise<AccountHealthRefreshResult> {
-  const accountId = row.accounts.id;
-  const username = row.accounts.username;
-  const siteName = row.sites.name;
-  const capabilities = buildCapabilitiesForAccount(row.accounts);
-
-  if (
-    (row.accounts.status || 'active') === 'disabled' ||
-    (row.sites.status || 'active') === 'disabled'
-  ) {
-    // Disabled accounts or sites are skipped without stamping their runtime
-    // health snapshot, so the last genuine health observation prevails and
-    // the disabled account is excluded from site aggregation.
-    return {
-      accountId,
-      username,
-      siteName,
-      status: 'skipped',
-      state: 'disabled',
-      message: '账号或站点已禁用',
-    };
-  }
-
-  if (capabilities.proxyOnly) {
-    return {
-      accountId,
-      username,
-      siteName,
-      status: 'skipped',
-      state: 'unknown',
-      message: '仅代理账号不支持会话健康检查',
-    };
-  }
-
-  try {
-    await withTimeout(
-      () => refreshBalance(accountId),
-      ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS,
-      `站点健康检查超时（${Math.max(1, Math.round(ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS / 1000))}s）`,
-    );
-    const refreshedAccount = await db
-      .select()
-      .from(schema.accounts)
-      .where(eq(schema.accounts.id, accountId))
-      .get();
-    const runtimeHealth = buildRuntimeHealthForAccount({
-      accountStatus: refreshedAccount?.status || row.accounts.status,
-      siteStatus: row.sites.status,
-      extraConfig: refreshedAccount?.extraConfig ?? row.accounts.extraConfig,
-      sessionCapable: capabilities.canRefreshBalance,
-    });
-
-    return {
-      accountId,
-      username,
-      siteName,
-      status: runtimeHealth.state === 'unhealthy' ? 'failed' : 'success',
-      state: runtimeHealth.state,
-      message: runtimeHealth.reason,
-    };
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const message = String(errorMessage || '健康检查失败');
-    const unhealthy = isTokenExpiredError({ message });
-    const state = unhealthy ? 'unhealthy' : 'degraded';
-    setAccountRuntimeHealth(accountId, {
-      state,
-      reason: message,
-      source: 'health-refresh',
-    });
-    return {
-      accountId,
-      username,
-      siteName,
-      status: 'failed',
-      state,
-      message,
-    };
-  }
-}
-
-async function executeRefreshAccountRuntimeHealth(accountId?: number) {
-  const rows = await db
-    .select()
-    .from(schema.accounts)
-    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-    .all();
-
-  const targetRows = Number.isFinite(accountId as number)
-    ? rows.filter((row: any) => row.accounts.id === accountId)
-    : rows;
-
-  const results: AccountHealthRefreshResult[] = [];
-  for (const row of targetRows) {
-    results.push(await refreshRuntimeHealthForRow(row));
-  }
-
-  return {
-    summary: summarizeAccountHealthRefresh(results),
-    results,
-  };
 }
 
 export async function accountsRoutes(app: FastifyInstance) {
@@ -1267,7 +892,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         credentialMode: 'session',
         capabilities: latest
           ? buildCapabilitiesForAccount(latest)
-          : buildCapabilitiesFromCredentialMode('session', true, null),
+          : buildCapabilitiesFromCredentialMode('session', true),
         apiTokenFound: !!nextApiToken,
       };
     },
@@ -1740,72 +1365,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post<{ Body: unknown }>(
-    '/api/accounts/health/refresh',
-    async (request, reply) => {
-      const parsedBody = parseAccountHealthRefreshPayload(request.body);
-      if (!parsedBody.success) {
-        return reply
-          .code(400)
-          .send({ success: false, message: parsedBody.error });
-      }
-
-      const accountId = parsedBody.data.accountId;
-      const wait = parsedBody.data.wait === true;
-
-      if (wait) {
-        const result = await executeRefreshAccountRuntimeHealth(accountId);
-        if (accountId && result.summary.total === 0) {
-          return reply
-            .code(404)
-            .send({ success: false, message: '账号不存在' });
-        }
-        return {
-          success: true,
-          ...result,
-        };
-      }
-
-      const taskTitle = accountId
-        ? `刷新账号运行健康状态 #${accountId}`
-        : '刷新全部账号运行健康状态';
-      const dedupeKey = accountId
-        ? `refresh-account-runtime-health-${accountId}`
-        : 'refresh-all-account-runtime-health';
-
-      const { task, reused } = startBackgroundTask(
-        {
-          type: 'status',
-          title: taskTitle,
-          dedupeKey,
-          notifyOnFailure: true,
-          successMessage: (currentTask) => {
-            const summary = (
-              currentTask.result as {
-                summary?: ReturnType<typeof summarizeAccountHealthRefresh>;
-              }
-            )?.summary;
-            if (!summary) return `${taskTitle}已完成`;
-            return `${taskTitle}完成：健康 ${summary.healthy}，异常 ${summary.unhealthy}，禁用 ${summary.disabled}`;
-          },
-          failureMessage: (currentTask) =>
-            `${taskTitle}失败：${currentTask.error || 'unknown error'}`,
-        },
-        async () => executeRefreshAccountRuntimeHealth(accountId),
-      );
-
-      return reply.code(202).send({
-        success: true,
-        queued: true,
-        reused,
-        jobId: task.id,
-        status: task.status,
-        message: reused
-          ? '账号运行健康状态刷新进行中，请稍后查看账号列表'
-          : '已开始刷新账号运行健康状态，请稍后查看账号列表',
-      });
-    },
-  );
+  registerAccountHealthRoutes(app);
 
   // Refresh balance for an account
   app.post<{ Params: { id: string } }>(
@@ -1830,322 +1390,5 @@ export async function accountsRoutes(app: FastifyInstance) {
     },
   );
 
-  // Get model list for an account (available models + disabled status at site level)
-  app.get<{ Params: { id: string } }>(
-    '/api/accounts/:id/models',
-    async (request, reply) => {
-      const accountId = parseInt(request.params.id, 10);
-      if (!Number.isFinite(accountId) || accountId <= 0) {
-        return reply.code(400).send({ message: '账号 ID 无效' });
-      }
-
-      const account = await db
-        .select()
-        .from(schema.accounts)
-        .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-        .where(eq(schema.accounts.id, accountId))
-        .get();
-
-      if (!account) {
-        return reply.code(404).send({ message: '账号不存在' });
-      }
-
-      const siteId = account.accounts.siteId;
-
-      // Get available models for this account
-      const modelRows = await db
-        .select({
-          modelName: schema.modelAvailability.modelName,
-          available: schema.modelAvailability.available,
-          latencyMs: schema.modelAvailability.latencyMs,
-          isManual: schema.modelAvailability.isManual,
-        })
-        .from(schema.modelAvailability)
-        .where(eq(schema.modelAvailability.accountId, accountId))
-        .all();
-
-      // Disabled models are keyed per account: only this key's own rows apply.
-      const disabledRows = await db
-        .select({ modelName: schema.siteDisabledModels.modelName })
-        .from(schema.siteDisabledModels)
-        .where(and(
-          eq(schema.siteDisabledModels.siteId, siteId),
-          eq(schema.siteDisabledModels.accountId, accountId),
-        ))
-        .all();
-
-      const disabledSet = new Set<string>(disabledRows.map((r) => String(r.modelName)));
-
-      // Merge this key's disabled models into the list even when availability
-      // no longer reports them, so they stay reachable and can be re-enabled.
-      const rowsByName = new Map<string, { latencyMs: unknown; isManual: boolean }>();
-      for (const r of modelRows) {
-        if (!r.available) continue;
-        rowsByName.set(r.modelName, { latencyMs: r.latencyMs, isManual: !!r.isManual });
-      }
-      for (const modelName of disabledSet) {
-        if (!rowsByName.has(modelName)) rowsByName.set(modelName, { latencyMs: null, isManual: false });
-      }
-
-      const models = Array.from(rowsByName.entries())
-        .map(([name, info]) => ({
-          name,
-          latencyMs: info.latencyMs,
-          disabled: disabledSet.has(name),
-          isManual: info.isManual,
-        }))
-        .sort((a: any, b: any) => a.name.localeCompare(b.name));
-
-      return {
-        siteId,
-        siteName: account.sites.name,
-        models,
-        totalCount: models.length,
-        disabledCount: models.filter((m: any) => m.disabled).length,
-      };
-    },
-  );
-
-  // Replace the disabled models of one key. Site-wide rows are untouched, and
-  // other keys of the same site keep their own sets.
-  app.put<{ Params: { id: string }; Body: unknown }>(
-    '/api/accounts/:id/models/disabled',
-    async (request, reply) => {
-      const accountId = parseInt(request.params.id, 10);
-      if (!Number.isFinite(accountId) || accountId <= 0) {
-        return reply.code(400).send({ message: '账号 ID 无效' });
-      }
-
-      const parsedBody = parseSiteDisabledModelsPayload(request.body);
-      if (!parsedBody.success) {
-        return reply.code(400).send({ error: parsedBody.error });
-      }
-
-      const account = await db
-        .select()
-        .from(schema.accounts)
-        .where(eq(schema.accounts.id, accountId))
-        .get();
-
-      if (!account) {
-        return reply.code(404).send({ message: '账号不存在' });
-      }
-
-      const siteId = account.siteId;
-      const uniqueModels = Array.from(new Set(
-        (parsedBody.data.models as unknown[])
-          .filter((m): m is string => typeof m === 'string')
-          .map((m) => m.trim())
-          .filter((m) => m.length > 0),
-      ));
-
-      await db.transaction(async (tx: any) => {
-        await tx.delete(schema.siteDisabledModels)
-          .where(and(
-            eq(schema.siteDisabledModels.siteId, siteId),
-            eq(schema.siteDisabledModels.accountId, accountId),
-          ))
-          .run();
-
-        if (uniqueModels.length > 0) {
-          await tx.insert(schema.siteDisabledModels).values(
-            uniqueModels.map((modelName) => ({ siteId, accountId, modelName })),
-          ).run();
-        }
-      });
-
-      invalidateSiteProxyCache();
-      invalidateTokenRouterCache();
-      clearModelsMarketplaceCache();
-      // Drop channels/routes for this key's now-disabled models immediately.
-      rebuildTokenRoutesFromAvailability().catch((err) => {
-        console.warn('[accounts] rebuild routes after per-key disabled-models update failed', err);
-      });
-
-      return { accountId, siteId, models: uniqueModels };
-    },
-  );
-
-  // Remove manually added models from an account
-  app.delete<{ Params: { id: string }; Body: unknown }>(
-    '/api/accounts/:id/models/manual',
-    async (request, reply) => {
-      const parsedBody = parseAccountManualModelsPayload(request.body);
-      if (!parsedBody.success) {
-        return reply.code(400).send({ message: parsedBody.error });
-      }
-
-      const accountId = parseInt(request.params.id, 10);
-      if (!Number.isFinite(accountId) || accountId <= 0) {
-        return reply.code(400).send({ message: '账号 ID 无效' });
-      }
-
-      const { models } = parsedBody.data;
-      if (!Array.isArray(models) || models.length === 0) {
-        return reply.code(400).send({ message: '模型列表不能为空' });
-      }
-
-      const normalizedModels = Array.from(
-        new Set(
-          models.map((m) => String(m).trim()).filter((m) => m.length > 0),
-        ),
-      );
-      if (normalizedModels.length === 0) {
-        return reply.code(400).send({ message: '模型列表不能为空' });
-      }
-
-      const account = await db
-        .select()
-        .from(schema.accounts)
-        .where(eq(schema.accounts.id, accountId))
-        .get();
-
-      if (!account) {
-        return reply.code(404).send({ message: '账号不存在' });
-      }
-
-      try {
-        await db.transaction(async (tx: any) => {
-          for (const modelName of normalizedModels) {
-            await tx
-              .delete(schema.modelAvailability)
-              .where(
-                and(
-                  eq(schema.modelAvailability.accountId, accountId),
-                  eq(schema.modelAvailability.modelName, modelName),
-                  eq(schema.modelAvailability.isManual, true),
-                ),
-              )
-              .run();
-          }
-        });
-        await rebuildRoutesBestEffort();
-
-        return { success: true };
-      } catch (err) {
-        const errMessage = err instanceof Error ? err.message : String(err);
-        return reply
-          .code(500)
-          .send({ success: false, message: errMessage || '删除失败' });
-      }
-    },
-  );
-
-  // Add models manually to an account
-  app.post<{ Params: { id: string }; Body: unknown }>(
-    '/api/accounts/:id/models/manual',
-    async (request, reply) => {
-      const parsedBody = parseAccountManualModelsPayload(request.body);
-      if (!parsedBody.success) {
-        return reply.code(400).send({ message: parsedBody.error });
-      }
-
-      const accountId = parseInt(request.params.id, 10);
-      if (!Number.isFinite(accountId) || accountId <= 0) {
-        return reply.code(400).send({ message: '账号 ID 无效' });
-      }
-
-      const { models } = parsedBody.data;
-      if (!Array.isArray(models) || models.length === 0) {
-        return reply.code(400).send({ message: '模型列表不能为空' });
-      }
-
-      const normalizedModels = Array.from(
-        new Set(
-          models.map((m) => String(m).trim()).filter((m) => m.length > 0),
-        ),
-      );
-      if (normalizedModels.length === 0) {
-        return reply.code(400).send({ message: '模型列表不能为空' });
-      }
-
-      const account = await db
-        .select()
-        .from(schema.accounts)
-        .where(eq(schema.accounts.id, accountId))
-        .get();
-
-      if (!account) {
-        return reply.code(404).send({ message: '账号不存在' });
-      }
-
-      try {
-        await db.transaction(async (tx: any) => {
-          const checkedAt = new Date().toISOString();
-          for (const modelName of normalizedModels) {
-            if (runtimeDbDialect === 'mysql') {
-              const existing = await tx
-                .select()
-                .from(schema.modelAvailability)
-                .where(
-                  and(
-                    eq(schema.modelAvailability.accountId, accountId),
-                    eq(schema.modelAvailability.modelName, modelName),
-                  ),
-                )
-                .get();
-
-              if (existing) {
-                await tx
-                  .update(schema.modelAvailability)
-                  .set({
-                    available: true,
-                    latencyMs: null,
-                    isManual: true,
-                    checkedAt,
-                  })
-                  .where(eq(schema.modelAvailability.id, existing.id))
-                  .run();
-              } else {
-                await tx
-                  .insert(schema.modelAvailability)
-                  .values({
-                    accountId,
-                    modelName,
-                    available: true,
-                    isManual: true,
-                    latencyMs: null,
-                    checkedAt,
-                  })
-                  .run();
-              }
-            } else {
-              // SQLite / PostgreSQL path
-              await (
-                tx.insert(schema.modelAvailability).values({
-                  accountId,
-                  modelName,
-                  available: true,
-                  isManual: true,
-                  latencyMs: null,
-                  checkedAt,
-                }) as any
-              )
-                .onConflictDoUpdate({
-                  target: [
-                    schema.modelAvailability.accountId,
-                    schema.modelAvailability.modelName,
-                  ],
-                  set: {
-                    available: true,
-                    isManual: true,
-                    latencyMs: null,
-                    checkedAt,
-                  },
-                })
-                .run();
-            }
-          }
-        });
-        await rebuildRoutesBestEffort();
-
-        return { success: true };
-      } catch (err) {
-        const errMessage = err instanceof Error ? err.message : String(err);
-        return reply
-          .code(500)
-          .send({ success: false, message: errMessage || '保存失败' });
-      }
-    },
-  );
+  registerAccountModelRoutes(app);
 }

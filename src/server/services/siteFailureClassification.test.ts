@@ -369,3 +369,91 @@ describe('siteFailureClassification', () => {
     expect(noteFailoverFailureAndShouldStop(state, 0, 'fetch failed')).toBe(true);
   });
 });
+
+describe('timeout penalty and channel affinity', () => {
+  it('treats a first-byte timeout as a latency observation, not a 5xx', () => {
+    expect(resolveSiteRuntimeFailurePenalty({
+      status: 408,
+      errorText: 'first byte timeout (8s)',
+    })).toBe(0.4);
+    // A real gateway failure keeps the hard-5xx weight.
+    expect(resolveSiteRuntimeFailurePenalty({
+      status: 502,
+      errorText: 'bad gateway',
+    })).toBe(2.5);
+  });
+
+  it('keeps the sticky binding on a timeout while still failing over', () => {
+    const timeout = buildProxyFailureDisposition({
+      status: 408,
+      errorText: 'first byte timeout (8s)',
+    });
+    expect(timeout.class).toBe('timeout');
+    expect(timeout.retryAction).toBe('failover_channel');
+    expect(timeout.clearSticky).toBe(false);
+
+    // Other channel-scoped failures still drop the affinity.
+    expect(buildProxyFailureDisposition({ status: 502, errorText: 'bad gateway' }).clearSticky).toBe(true);
+  });
+});
+
+describe('a 5xx body that quotes the request is an origin failure, not a client one', () => {
+  it('classifies 500 + "cannot parse" as a retryable upstream failure', () => {
+    const failure = classifyProxyFailure({
+      status: 500,
+      errorText: 'upstream returned malformed response, cannot parse JSON',
+    });
+    expect(failure.class).toBe('transient_upstream');
+    expect(failure.retryChannel).toBe(true);
+    expect(failure.cooldownScope).toBe('channel');
+  });
+
+  it('still treats the same text at 4xx as request validation', () => {
+    const failure = classifyProxyFailure({
+      status: 400,
+      errorText: 'missing required field: messages',
+    });
+    expect(failure.class).toBe('request_validation');
+    expect(failure.retryChannel).toBe(false);
+  });
+
+  it('lets a 5xx count toward the site breaker again', () => {
+    expect(isTransientSiteRuntimeFailure({
+      status: 500,
+      errorText: 'malformed response, cannot parse JSON',
+    })).toBe(true);
+    expect(resolveSiteRuntimeFailurePenalty({
+      status: 500,
+      errorText: 'malformed response, cannot parse JSON',
+    })).toBeGreaterThan(1);
+  });
+
+  it('keeps 4xx validation out of the breaker and lightly penalised', () => {
+    expect(isValidationRuntimeFailure({ status: 422, errorText: 'validation failed' })).toBe(true);
+    expect(isTransientSiteRuntimeFailure({ status: 422, errorText: 'validation failed' })).toBe(false);
+    expect(resolveSiteRuntimeFailurePenalty({ status: 422, errorText: 'validation failed' })).toBe(0.25);
+  });
+});
+
+describe('transport failures count toward the site breaker', () => {
+  it('treats a dead DNS or refused connection as site-transient', () => {
+    // Regression: SITE_TRANSIENT_FAILURE_PATTERNS does not contain these spellings, so a
+    // host that was broken for every model never advanced the breaker streak.
+    for (const text of ['fetch failed', 'getaddrinfo ENOTFOUND upstream.example',
+      'connect ECONNREFUSED 10.0.0.1:443', 'tls handshake failure']) {
+      expect(isTransientSiteRuntimeFailure({ status: 0, errorText: text })).toBe(true);
+    }
+  });
+
+  it('penalises an unreachable host harder than a mid-flight reset', () => {
+    expect(resolveSiteRuntimeFailurePenalty({ status: 0, errorText: 'fetch failed' })).toBe(2.5);
+    expect(resolveSiteRuntimeFailurePenalty({
+      status: 0,
+      errorText: 'getaddrinfo ENOTFOUND upstream.example',
+    })).toBe(3);
+  });
+
+  it('leaves a client-side validation error untouched', () => {
+    expect(isTransientSiteRuntimeFailure({ status: 422, errorText: 'validation failed' })).toBe(false);
+  });
+});

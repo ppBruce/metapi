@@ -238,8 +238,10 @@ function normalizePricingModels(rawModels: unknown[]): Map<string, PricingModel>
     if (!modelName) continue;
 
     const quotaType = toPositiveInt((raw as any).quota_type);
-    const modelRatio = toNumber((raw as any).model_ratio, 1);
-    const completionRatio = toNumber((raw as any).completion_ratio, 1);
+    // Keep an explicit 0: free models/groups bill at 0× and must not be
+    // inflated to 1× (the fallback path already preserves 0 the same way).
+    const modelRatio = normalizeRatio((raw as any).model_ratio, 1);
+    const completionRatio = normalizeRatio((raw as any).completion_ratio, 1);
     const cacheRatio = normalizeRatio(
       (raw as any).cache_ratio ?? (raw as any).cacheRatio,
       1,
@@ -266,13 +268,21 @@ function normalizePricingModels(rawModels: unknown[]): Map<string, PricingModel>
 
     // NewAPI tiered_expr billing (billing_mode, billing_expr)
     const billingMode = (raw as any).billing_mode ?? null;
-    const billingExpr = billingMode === 'tiered_expr' ? ((raw as any).billing_expr ?? null) : null;
+    const rawBillingExpr = (raw as any).billing_expr;
+    // An empty/whitespace expression is not a pricing contract — treat it as
+    // absent so the catalog falls back to ratio pricing instead of compiling
+    // an empty string on every evaluation.
+    const billingExpr = billingMode === 'tiered_expr'
+      && typeof rawBillingExpr === 'string'
+      && rawBillingExpr.trim().length > 0
+      ? rawBillingExpr.trim()
+      : null;
 
     models.set(modelName, {
       modelName,
       quotaType,
-      modelRatio: modelRatio > 0 ? modelRatio : 1,
-      completionRatio: completionRatio > 0 ? completionRatio : 1,
+      modelRatio,
+      completionRatio,
       cacheRatio,
       cacheCreationRatio,
       modelPrice: normalizeModelPrice((raw as any).model_price),
@@ -384,6 +394,35 @@ async function fetchCommonPricing(baseUrl: string, token?: string, _sitePlatform
 
 function getCacheKey(input: EstimateProxyCostInput): string {
   return `${input.site.id}:${input.account.id}`;
+}
+
+/**
+ * Drop cached price catalogs for a site and/or account. The cache key carries
+ * only (siteId, accountId), so after editing a site URL/platform or rotating
+ * credentials the old catalog would otherwise keep pricing requests for up to
+ * the TTL (10 min, or 1 h while stale-while-revalidate keeps serving it).
+ */
+export function invalidateModelPricingCache(
+  filter: { siteId?: number | null; accountId?: number | null } = {},
+): void {
+  const { siteId, accountId } = filter;
+  if (siteId == null && accountId == null) {
+    pricingCache.clear();
+    routingReferenceCostCache.clear();
+    return;
+  }
+  const matches = (key: string): boolean => {
+    const [rawSiteId, rawAccountId] = key.split(':');
+    if (siteId != null && Number(rawSiteId) !== Number(siteId)) return false;
+    if (accountId != null && Number(rawAccountId) !== Number(accountId)) return false;
+    return true;
+  };
+  for (const key of Array.from(pricingCache.keys())) {
+    if (matches(key)) pricingCache.delete(key);
+  }
+  for (const key of Array.from(routingReferenceCostCache.keys())) {
+    if (matches(key)) routingReferenceCostCache.delete(key);
+  }
 }
 
 function normalizeModelKey(modelName: string): string {
@@ -522,23 +561,50 @@ export function getCachedModelRoutingReferenceCost(input: {
     return null;
   }
 
-  const model = cached.models.get(normalizeModelKey(input.modelName));
+  const model = resolveModelInMap(cached.models, input.modelName);
   if (!model) return null;
 
   // Bill the routing reference at the token's bound group ratio, mirroring
   // real billing. A 0× free group must yield a (near-)zero reference cost —
   // never test the ratio truthiness, check key presence.
-  const cost = calculateModelUsageCost(
-    model,
-    ROUTING_REFERENCE_USAGE,
-    cached.groupRatio,
-    input.tokenGroup ?? null,
-  );
-  if (!Number.isFinite(cost) || cost <= 0) {
+  let cost: number;
+  try {
+    cost = calculateModelUsageCost(
+      model,
+      ROUTING_REFERENCE_USAGE,
+      cached.groupRatio,
+      input.tokenGroup ?? null,
+    );
+  } catch (error) {
+    // A single upstream model with an expression this build cannot evaluate
+    // (unknown variable, syntax below our grammar) must not take down the whole
+    // caller: this is a reference cost used for routing/balance estimates, not
+    // settlement. Callers already treat null as "no price known" and fall back.
+    console.warn(
+      `[modelPricingService] routing reference cost unavailable for ${input.modelName} (site ${input.siteId}):`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return null;
+  }
+  // Keep an exact 0 (free group) as a valid reference cost; only a negative
+  // or non-finite value counts as "no price".
+  if (!Number.isFinite(cost) || cost < 0) {
     return null;
   }
 
   return cost;
+}
+
+/** Case-insensitive model lookup: catalog keys keep their original casing
+ * (GPT-4o, Claude-3.5-Sonnet), so a lowercased key alone must not be trusted. */
+function resolveModelInMap(models: Map<string, PricingModel>, modelName: string): PricingModel | null {
+  const exact = models.get(modelName);
+  if (exact) return exact;
+  const normalized = normalizeModelKey(modelName);
+  for (const [name, model] of models.entries()) {
+    if (normalizeModelKey(name) === normalized) return model;
+  }
+  return null;
 }
 
 function resolveModel(modelName: string, data: PricingData): PricingModel | null {
@@ -770,10 +836,13 @@ interface TieredBillingParams {
   cr: number;   // cache read tokens
   cc: number;   // cache creation tokens
   cc1h: number; // one-hour cache creation tokens
+  cc12h: number; // twelve-hour cache creation tokens (OpenAI long-lived)
   img: number;  // image input tokens
+  img_cr: number; // image cache read tokens (split out of cr/img by NewAPI)
   img_o: number; // image output tokens
   ai: number;   // audio input tokens
   ao: number;   // audio output tokens
+  imageCount: number; // billing quantity for per-image prices (upstream default 1)
 }
 
 interface TieredBillingResult {
@@ -785,7 +854,12 @@ function evaluateTieredExpr(expr: string, params: TieredBillingParams): TieredBi
   // Evaluated in a `node:vm` realm, not with `new Function`: the expression is
   // third-party input from the upstream `/api/pricing` response, and `new
   // Function` would run it with `process`/`require`/`fetch` in scope.
-  const { cost, tier } = evaluateTieredExprInSandbox(expr, params);
+  // The sandbox speaks the upstream names (snake_case `image_count`), so map the
+  // internal camelCase field explicitly — spreading params would silently drop it.
+  const { cost, tier } = evaluateTieredExprInSandbox(expr, {
+    ...params,
+    image_count: params.imageCount,
+  });
   return { cost, tier };
 }
 
@@ -803,10 +877,13 @@ function buildTieredParams(usage: {
     cr: usage.cacheReadTokens ?? 0,
     cc: usage.cacheCreationTokens ?? 0,
     cc1h: 0,
+    cc12h: 0,
     img: 0,
+    img_cr: 0,
     img_o: 0,
     ai: 0,
     ao: 0,
+    imageCount: 1,
   };
 }
 
@@ -857,10 +934,13 @@ function deriveTieredReferencePricing(
       cr: values.cr ?? 0,
       cc: values.cc ?? 0,
       cc1h: values.cc1h ?? 0,
+      cc12h: values.cc12h ?? 0,
       img: values.img ?? 0,
+      img_cr: values.img_cr ?? 0,
       img_o: values.img_o ?? 0,
       ai: values.ai ?? 0,
       ao: values.ao ?? 0,
+      imageCount: values.imageCount ?? 1,
     }).cost;
     return {
       inputPerMillion: roundCost((evaluate({ p: 1_000_000 }) * multiplier) / 1_000_000),

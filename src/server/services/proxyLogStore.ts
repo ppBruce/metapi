@@ -14,6 +14,8 @@ import {
 import { canonicalizeModelName } from '../shared/modelCanonicalization.js';
 import { emitProxyLogCreated } from './proxyLogEventBus.js';
 import { getCurrentReasoningEffort } from './reasoningEffort.js';
+import { isHardConnectivityFailure } from './routeConnectivityLookup.js';
+import { emptyConnectivityHealth, recordConnectivityAttempt, shouldMarkDisconnected } from './routeConnectivityPolicy.js';
 
 export type ProxyLogInsertInput = {
   routeId?: number | null;
@@ -444,12 +446,47 @@ export function isMissingProxyLogTokenIdColumnError(error: unknown): boolean {
 }
 
 
-async function updateModelConnectivityFromProxyLog(input: ProxyLogInsertInput): Promise<void> {
+/**
+ * Serialize the read-modify-write per (account, model). Concurrent proxy
+ * requests for the same model used to race — each read the same window and
+ * overwrote the other's update, so failure evidence was systematically lost
+ * and a hard-broken channel could keep its connectivity bonus forever.
+ */
+const connectivityUpdateChains = new Map<string, Promise<void>>();
+
+function updateModelConnectivityFromProxyLog(input: ProxyLogInsertInput): void {
   const accountId = Number(input.accountId);
   if (!Number.isFinite(accountId) || accountId <= 0) return;
 
   const status = String(input.status || '').toLowerCase();
   if (status !== 'success' && status !== 'failed') return;
+  if (status === 'failed' && !isHardConnectivityFailure(status, input.httpStatus)) return;
+
+  const modelName = String(input.modelActual || input.modelRequested || '').trim();
+  if (!modelName) return;
+
+  const key = `${accountId}\u0000${modelName}`;
+  const previous = connectivityUpdateChains.get(key) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(() => applyModelConnectivityUpdate(input))
+    .catch(() => undefined)
+    .finally(() => {
+      if (connectivityUpdateChains.get(key) === next) connectivityUpdateChains.delete(key);
+    });
+  connectivityUpdateChains.set(key, next);
+}
+
+async function applyModelConnectivityUpdate(input: ProxyLogInsertInput): Promise<void> {
+  const accountId = Number(input.accountId);
+  if (!Number.isFinite(accountId) || accountId <= 0) return;
+
+  const status = String(input.status || '').toLowerCase();
+  if (status !== 'success' && status !== 'failed') return;
+
+  // Only transport-level failures say anything about reachability; 4xx/429 are
+  // request-shape or policy rejections already handled by the channel cooldown.
+  if (status === 'failed' && !isHardConnectivityFailure(status, input.httpStatus)) return;
 
   const modelName = String(input.modelActual || input.modelRequested || '').trim();
   if (!modelName) return;
@@ -461,7 +498,14 @@ async function updateModelConnectivityFromProxyLog(input: ProxyLogInsertInput): 
   const checkedAt = input.createdAt || new Date().toISOString();
 
   try {
-    const existing = await db.select({ id: schema.modelAvailability.id })
+    const existing = await db.select({
+      id: schema.modelAvailability.id,
+      connectivity: schema.modelAvailability.connectivity,
+      consecutiveHardFailures: schema.modelAvailability.consecutiveHardFailures,
+      consecutiveSuccesses: schema.modelAvailability.consecutiveSuccesses,
+      hardFailureBits: schema.modelAvailability.hardFailureBits,
+      hardFailureSamples: schema.modelAvailability.hardFailureSamples,
+    })
       .from(schema.modelAvailability)
       .where(and(
         eq(schema.modelAvailability.accountId, accountId),
@@ -470,9 +514,24 @@ async function updateModelConnectivityFromProxyLog(input: ProxyLogInsertInput): 
       .get();
 
     if (existing?.id) {
+      const nextHealth = recordConnectivityAttempt({
+        consecutiveHardFailures: existing.consecutiveHardFailures ?? 0,
+        consecutiveSuccesses: existing.consecutiveSuccesses ?? 0,
+        hardFailureBits: existing.hardFailureBits ?? 0,
+        hardFailureSamples: existing.hardFailureSamples ?? 0,
+      }, available ? 'success' : 'hard_failure');
+      // A success is positive proof. A hard failure only flips the flag once the
+      // streak/window policy says the channel is actually unreachable; a single
+      // hiccup must not take a healthy channel out for the whole TTL.
+      const nextConnectivity = available
+        ? true
+        : (shouldMarkDisconnected(nextHealth)
+          ? false
+          : (existing.connectivity === false ? false : (existing.connectivity ?? null)));
       await db.update(schema.modelAvailability)
         .set({
-          connectivity: available,
+          connectivity: nextConnectivity,
+          ...nextHealth,
           ...(latencyMs != null ? { latencyMs } : {}),
           checkedAt,
         })
@@ -490,6 +549,7 @@ async function updateModelConnectivityFromProxyLog(input: ProxyLogInsertInput): 
         connectivity: true,
         latencyMs,
         checkedAt,
+        ...recordConnectivityAttempt(emptyConnectivityHealth(), 'success'),
       }).run();
     }
   } catch {
@@ -517,7 +577,7 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
     promptTokens: input.promptTokens ?? null,
     completionTokens: input.completionTokens ?? null,
     totalTokens: input.totalTokens ?? null,
-    estimatedCost: input.estimatedCost ?? 0,
+    estimatedCost: input.estimatedCost ?? null,
     errorMessage: input.errorMessage ?? null,
     retryCount: input.retryCount ?? 0,
     createdAt: input.createdAt ?? null,

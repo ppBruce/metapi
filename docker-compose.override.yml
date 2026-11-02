@@ -8,4 +8,7 @@ services:
       labels:
         org.opencontainers.image.source: https://github.com/ppBruce/metapi
         org.opencontainers.image.revision: ${METAPI_BUILD_REVISION:?METAPI_BUILD_REVISION is required}
-        org.opencontainers.image.version: 1.8.9-custom
+        org.opencontainers.image.version: 1.9.5-custom
+    # 2026-10-29：eMudhra CA 事件已终结，实测镜像自带信任库不含 emSign ECC Root CA - G3，
+    # 移除 CA bind mount，回到镜像原始信任库。
+    # 原文件：/root/rubbish/2026-10-29-ca-retire/metapi__docker-compose.override.yml.orig

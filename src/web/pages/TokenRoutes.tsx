@@ -41,6 +41,7 @@ import {
   isExactModelPattern,
   isRouteExactModel,
   isRouteGroup,
+  routeKindRank,
   matchesModelPattern,
   normalizeRouteMode,
   resolveRouteTitle,
@@ -57,6 +58,7 @@ import ManualRoutePanel from './token-routes/ManualRoutePanel.js';
 import RouteCard from './token-routes/RouteCard.js';
 import AddChannelModal from './token-routes/AddChannelModal.js';
 import TokenRouteConfirmModal, { type TokenRouteConfirmState } from './token-routes/TokenRouteConfirmModal.js';
+import RouteCompareModal from './token-routes/RouteCompareModal.js';
 import { StatusText, StatusPill } from '../components/StatusText.js';
 import PaginationControls from '../components/PaginationControls.js';
 import { useClientPagination } from '../components/useClientPagination.js';
@@ -70,7 +72,7 @@ const EMPTY_ROUTE_CANDIDATE_VIEW: RouteCandidateView = {
 const EMPTY_MISSING_ITEMS: MissingTokenRouteSiteActionItem[] = [];
 const EMPTY_MISSING_GROUP_ITEMS: MissingTokenGroupRouteSiteActionItem[] = [];
 const ROUTE_ICON_OPTIONS: RouteIconOption[] = [
-  { value: '', label: '自动品牌图标', description: '按模型匹配规则自动识别品牌', iconText: '✦' },
+  { value: '', label: tr('自动品牌图标'), description: tr('按模型匹配规则自动识别品牌'), iconText: '✦' },
 ];
 
 type RouteEditorForm = {
@@ -197,6 +199,7 @@ export default function TokenRoutes() {
   const [filterCollapsed, setFilterCollapsed] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
   const [showZeroChannelRoutes, setShowZeroChannelRoutes] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   const [sortBy, setSortBy] = useState<RouteSortBy>('channelCount');
   const [sortDir, setSortDir] = useState<RouteSortDir>('desc');
 
@@ -361,7 +364,7 @@ export default function TokenRoutes() {
           };
           const task = taskResponse?.task;
           if (!task) {
-            throw new Error('路由选中概率任务不存在');
+            throw new Error(tr('路由选中概率任务不存在'));
           }
 
           const status = String(task.status || '').trim();
@@ -376,16 +379,16 @@ export default function TokenRoutes() {
 
           setLoadingDecision(false);
           if (status === 'succeeded') {
-            toastRef.current.success('路由选择概率已刷新');
+            toastRef.current.success(tr('路由选择概率已刷新'));
           } else {
-            toastRef.current.error(String(task.message || task.error || '刷新路由选择概率失败'));
+            toastRef.current.error(String(task.message || task.error || tr('刷新路由选择概率失败')));
           }
           return;
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           if (!mountedRef.current || decisionRefreshWatchSeqRef.current !== watchSeq) return;
           setLoadingDecision(false);
-          toastRef.current.error(errorMessage || '刷新路由选择概率失败');
+          toastRef.current.error(errorMessage || tr('刷新路由选择概率失败'));
           return;
         }
       }
@@ -429,7 +432,7 @@ export default function TokenRoutes() {
         // Selection snapshots are maintained by the server scheduler (startup + every 5 min).
         // Entering this page is read-only and must not trigger expensive route recomputation.
       } catch {
-        toast.error('加载路由配置失败');
+        toast.error(tr('加载路由配置失败'));
       }
       setInitialLoading(false);
       // Preload candidates in background after first paint
@@ -447,7 +450,7 @@ export default function TokenRoutes() {
       setRebuilding(true);
       const res = await api.rebuildRoutes(true);
       if (res?.queued) {
-        toast.info(res.message || '已开始重建路由，请稍后查看日志');
+        toast.info(res.message || tr('已开始重建路由，请稍后查看日志'));
         invalidateChannels();
         await load();
         return;
@@ -466,7 +469,7 @@ export default function TokenRoutes() {
       }
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '重建路由失败');
+      toast.error(eMessage || tr('重建路由失败'));
     } finally {
       setRebuilding(false);
     }
@@ -492,14 +495,14 @@ export default function TokenRoutes() {
       };
       const taskId = String(response?.jobId || '').trim();
       if (!taskId) {
-        throw new Error('刷新任务未返回 taskId');
+        throw new Error(tr('刷新任务未返回 taskId'));
       }
 
-      toast.info(response?.message || '已开始后台刷新路由选中概率，可稍后返回查看');
+      toast.info(response?.message || tr('已开始后台刷新路由选中概率，可稍后返回查看'));
       monitorRouteDecisionRefreshTask(taskId);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      toast.error(errorMessage || '刷新路由选择概率失败');
+      toast.error(errorMessage || tr('刷新路由选择概率失败'));
     }
   };
 
@@ -513,13 +516,28 @@ export default function TokenRoutes() {
     [routeSummaries, showZeroChannelRoutes, zeroChannelPlaceholderRoutes],
   );
 
+  // Name collision the dialog must show and the save button must respect.
+  // Exact (case-insensitive) match: the API compares canonicalized aliases and
+  // returns 409, so this is a fast local guard, not the source of truth.
+  const groupNameConflict = useMemo(() => {
+    const target = form.displayName.trim().toLowerCase();
+    if (normalizeRouteMode(form.routeMode) !== 'explicit_group' || !target) return null;
+    return routeSummaries.find((route) => (
+      normalizeRouteMode(route.routeMode) === 'explicit_group'
+      && route.enabled
+      && (route.sourceRouteIds || []).length > 0
+      && route.id !== editingRouteId
+      && (((route.displayName || '').trim() || (route.modelPattern || '').trim()).toLowerCase() === target)
+    )) ?? null;
+  }, [editingRouteId, form.displayName, form.routeMode, routeSummaries]);
+
   const canSaveRoute = useMemo(() => {
     if (saving) return false;
     if (form.routeMode === 'explicit_group') {
-      return !!form.displayName.trim() && form.sourceRouteIds.length > 0;
+      return !!form.displayName.trim() && form.sourceRouteIds.length > 0 && !groupNameConflict;
     }
     return !!form.modelPattern.trim() && !getModelPatternError(form.modelPattern);
-  }, [form.displayName, form.modelPattern, form.routeMode, form.sourceRouteIds.length, saving]);
+  }, [form.displayName, form.modelPattern, form.routeMode, form.sourceRouteIds.length, groupNameConflict, saving]);
 
   const previewModelSamples = useMemo(() => {
     if (!showManual) return [];
@@ -555,11 +573,11 @@ export default function TokenRoutes() {
     const routeMode = normalizeRouteMode(form.routeMode);
     if (routeMode === 'explicit_group') {
       if (!trimmedDisplayName) {
-        toast.error('请填写对外模型名');
+        toast.error(tr('请填写对外模型名'));
         return;
       }
       if (form.sourceRouteIds.length === 0) {
-        toast.error('请至少选择一个来源模型');
+        toast.error(tr('请至少选择一个来源模型'));
         return;
       }
     } else {
@@ -628,11 +646,11 @@ export default function TokenRoutes() {
   const handleDeleteRoute = async (routeId: number) => {
     try {
       await api.deleteRoute(routeId);
-      toast.success('路由已删除');
+      toast.success(tr('路由已删除'));
       await load();
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '删除路由失败');
+      toast.error(eMessage || tr('删除路由失败'));
     }
   };
 
@@ -643,13 +661,13 @@ export default function TokenRoutes() {
     );
     try {
       await api.updateRoute(route.id, { enabled: newEnabled });
-      toast.success(newEnabled ? '路由已启用' : '路由已禁用');
+      toast.success(newEnabled ? tr('路由已启用') : tr('路由已禁用'));
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
       setRouteSummaries((prev) =>
         prev.map((item) => (item.id === route.id ? { ...item, enabled: route.enabled } : item)),
       );
-      toast.error(eMessage || '切换路由状态失败');
+      toast.error(eMessage || tr('切换路由状态失败'));
     }
   };
 
@@ -823,8 +841,10 @@ export default function TokenRoutes() {
 
   const sortedRoutes = useMemo(() => (
     [...listVisibleRoutes].sort((a, b) => {
-      const groupCmp = Number(isRouteGroup(b)) - Number(isRouteGroup(a));
-      if (groupCmp !== 0) return groupCmp;
+      // Category order is fixed (wildcard → group → single model) regardless of
+      // sort direction; the chosen key only orders rows inside a category.
+      const kindCmp = routeKindRank(a) - routeKindRank(b);
+      if (kindCmp !== 0) return kindCmp;
 
       if (sortBy === 'channelCount') {
         const countCmp = a.channelCount - b.channelCount;
@@ -955,10 +975,10 @@ export default function TokenRoutes() {
   const handleBatchUpdateRoutes = async (action: 'enable' | 'disable') => {
     const ids = Array.from(selectedRouteIds).filter((id) => selectableRouteIds.has(id));
     if (ids.length === 0) {
-      toast.info('请先选择要操作的路由');
+      toast.info(tr('请先选择要操作的路由'));
       return;
     }
-    const actionLabel = action === 'disable' ? '禁用' : '启用';
+    const actionLabel = action === 'disable' ? tr('禁用') : tr('启用');
     const confirmed = window.confirm(`确认批量${actionLabel} ${ids.length} 条路由？`);
     if (!confirmed) return;
 
@@ -1073,55 +1093,49 @@ export default function TokenRoutes() {
     const dismissed = localStorage.getItem(dismissedKey) === 'true';
     if (!dismissed) {
       const result = await requestConfirmation({
-        title: '确认移除通道',
+        title: tr('确认移除通道'),
         description: (
-          <>
-            移除的通道会在定时模型刷新时被自动重建恢复，但<strong>它的累计统计（成功/失败、成本、冷却）会丢失</strong>，
-            重建出来的是全新的一条。<br />
-            想恢复系统默认配置、又保留统计，请用<strong>「恢复默认」</strong>；只是临时停用则用<strong>禁用开关</strong>。
+          <>{tr('移除的通道会在定时模型刷新时被自动重建恢复，但')}<strong>{tr('它的累计统计（成功/失败、成本、冷却）会丢失')}</strong>{tr('， 重建出来的是全新的一条。')}<br />{tr('想恢复系统默认配置、又保留统计，请用')}<strong>{tr('「恢复默认」')}</strong>{tr('；只是临时停用则用')}<strong>{tr('禁用开关')}</strong>。
           </>
         ),
-        confirmText: '确认移除',
+        confirmText: tr('确认移除'),
         tone: 'danger',
-        dismissLabel: '以后不再提示',
+        dismissLabel: tr('以后不再提示'),
       });
       if (!result.confirmed) return;
       if (result.dismissChecked) localStorage.setItem(dismissedKey, 'true');
     }
     try {
       await api.deleteChannel(channelId);
-      toast.success('通道已移除');
+      toast.success(tr('通道已移除'));
       await loadChannels(routeId, true);
       setRouteSummaries((prev) =>
         prev.map((r) => r.id === routeId ? { ...r, channelCount: Math.max(0, r.channelCount - 1) } : r),
       );
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '移除通道失败');
+      toast.error(eMessage || tr('移除通道失败'));
     }
   };
 
   const handleResetChannel = async (channelId: number, routeId: number) => {
     const confirmed = await requestConfirmation({
-      title: '确认恢复默认',
+      title: tr('确认恢复默认'),
       description: (
-        <>
-          将清除该通道的手动配置（优先级、权重、启用状态、来源模型、绑定令牌、请求改写规则），
-          交回系统按当前账号与模型重新派生。<br />
-          <strong>累计统计（成功/失败、成本、延迟、冷却）会保留</strong>，通道也不会被移除。
-        </>
+        <>{tr('将清除该通道的手动配置（优先级、权重、启用状态、来源模型、绑定令牌、请求改写规则）， 交回系统按当前账号与模型重新派生。')}<br />
+          <strong>{tr('累计统计（成功/失败、成本、延迟、冷却）会保留')}</strong>{tr('，通道也不会被移除。')}</>
       ),
-      confirmText: '恢复默认',
+      confirmText: tr('恢复默认'),
       tone: 'warning',
     });
     if (!confirmed.confirmed) return;
     try {
       await api.resetChannel(channelId);
-      toast.success('已恢复为系统默认配置');
+      toast.success(tr('已恢复为系统默认配置'));
       await loadChannels(routeId, true);
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '恢复默认失败');
+      toast.error(eMessage || tr('恢复默认失败'));
     }
   };
 
@@ -1130,11 +1144,11 @@ export default function TokenRoutes() {
     setUpdatingChannel((prev) => ({ ...prev, [channelId]: true }));
     try {
       await api.updateChannel(channelId, { enabled });
-      toast.success(enabled ? '通道已启用' : '通道已禁用');
+      toast.success(enabled ? tr('通道已启用') : tr('通道已禁用'));
       await loadChannels(routeId, true);
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '更新通道状态失败');
+      toast.error(eMessage || tr('更新通道状态失败'));
     } finally {
       setUpdatingChannel((prev) => ({ ...prev, [channelId]: false }));
     }
@@ -1145,18 +1159,18 @@ export default function TokenRoutes() {
     const tokenOptions = getRouteCandidateView(routeId).tokenOptionsByAccountId[accountId] || [];
 
     if (tokenId && tokenOptions.length > 0 && !tokenOptions.some((token) => token.id === tokenId)) {
-      toast.error('该令牌不支持当前模型');
+      toast.error(tr('该令牌不支持当前模型'));
       return;
     }
 
     setUpdatingChannel((prev) => ({ ...prev, [channelId]: true }));
     try {
       await api.updateChannel(channelId, { tokenId: tokenId || null });
-      toast.success('通道令牌已更新');
+      toast.success(tr('通道令牌已更新'));
       await loadChannels(routeId, true);
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '更新令牌失败');
+      toast.error(eMessage || tr('更新令牌失败'));
     } finally {
       setUpdatingChannel((prev) => ({ ...prev, [channelId]: false }));
     }
@@ -1240,7 +1254,7 @@ export default function TokenRoutes() {
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
       setChannels(routeId, previousChannels);
-      toast.error(eMessage || '保存通道优先级失败，已回滚');
+      toast.error(eMessage || tr('保存通道优先级失败，已回滚'));
     } finally {
       setSavingPriorityByRoute((prev) => ({ ...prev, [routeId]: false }));
     }
@@ -1250,27 +1264,24 @@ export default function TokenRoutes() {
     const channels = channelsByRouteId[routeId] || [];
     const channel = channels.find((c) => c.id === channelId);
     if (!channel?.accountId || !channel?.site?.id) {
-      toast.error('找不到通道对应的账号信息');
+      toast.error(tr('找不到通道对应的账号信息'));
       return;
     }
     const route = routeSummaries.find((r) => r.id === routeId);
     const modelName = channel.sourceModel || (route && isExactModelPattern(route.modelPattern) ? route.modelPattern : '') || '';
     if (!modelName) {
-      toast.error('该通道没有精确模型名，无法屏蔽（通配符路由请在账号的模型列表里手动禁用）');
+      toast.error(tr('该通道没有精确模型名，无法屏蔽（通配符路由请在账号的模型列表里手动禁用）'));
       return;
     }
-    const siteName = channel.site.name || '未知站点';
+    const siteName = channel.site.name || tr('未知站点');
     const accountId = channel.accountId;
     const accountLabel = channel.account?.username || `account-${accountId}`;
     const result = await requestConfirmation({
-      title: '确认屏蔽模型',
+      title: tr('确认屏蔽模型'),
       description: (
-        <>
-          将模型「<strong>{modelName}</strong>」加入账号「<strong>{accountLabel}</strong>」（站点 {siteName}）的禁用列表。<br />
-          执行后将自动触发路由重建，该账号下此模型的通道将不再生成，同一站点的其他账号不受影响。
-        </>
+        <>{tr('将模型「')}<strong>{modelName}</strong>{tr('」加入账号「')}<strong>{accountLabel}</strong>」（{tr('站点')} {siteName}）的禁用列表。<br />{tr('执行后将自动触发路由重建，该账号下此模型的通道将不再生成，同一站点的其他账号不受影响。')}</>
       ),
-      confirmText: '确认屏蔽',
+      confirmText: tr('确认屏蔽'),
       tone: 'warning',
     });
     if (!result.confirmed) return;
@@ -1291,7 +1302,7 @@ export default function TokenRoutes() {
       await load();
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '屏蔽模型失败');
+      toast.error(eMessage || tr('屏蔽模型失败'));
     }
   };
 
@@ -1300,7 +1311,7 @@ export default function TokenRoutes() {
     setClearingCooldownByRoute((prev) => ({ ...prev, [routeId]: true }));
     try {
       await api.clearRouteCooldown(routeId);
-      toast.success('路由冷却已清除');
+      toast.success(tr('路由冷却已清除'));
 
       try {
         await loadChannels(routeId, true);
@@ -1321,11 +1332,11 @@ export default function TokenRoutes() {
           }
         }
       } catch {
-        toast.error('已清除，但刷新失败');
+        toast.error(tr('已清除，但刷新失败'));
       }
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '清除路由冷却失败');
+      toast.error(eMessage || tr('清除路由冷却失败'));
     } finally {
       setClearingCooldownByRoute((prev) => ({ ...prev, [routeId]: false }));
     }
@@ -1390,7 +1401,7 @@ export default function TokenRoutes() {
         try {
           await loadChannels(routeId);
         } catch {
-          toast.error('加载通道失败');
+          toast.error(tr('加载通道失败'));
         }
       }
     }
@@ -1664,7 +1675,7 @@ export default function TokenRoutes() {
             {loadingRecentSelections ? (
               <><span className="spinner spinner-sm" /> {tr('加载中...')}</>
             ) : (
-              tr(showRecentSelections ? '收起最近选路' : '最近选路')
+              tr(showRecentSelections ? tr('收起最近选路') : tr('最近选路'))
             )}
           </button>
           <button
@@ -1712,6 +1723,15 @@ export default function TokenRoutes() {
           >
             {showZeroChannelRoutes ? tr('隐藏 0 通道路由') : tr('显示 0 通道路由')}
           </button>
+
+          <button
+            type="button"
+            onClick={() => setCompareOpen(true)}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '7px 12px' }}
+          >
+            {tr('路由比对')}
+          </button>
         </div>
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', flexShrink: 0, maxWidth: '100%' }}>
@@ -1724,7 +1744,7 @@ export default function TokenRoutes() {
                 type="button"
                 className="badge"
                 onClick={() => setEnabledFilter(enabledFilter === 'cooling' ? 'all' : 'cooling')}
-                title="点击筛选/取消筛选冷却中的路由"
+                title={tr('点击筛选/取消筛选冷却中的路由')}
                 style={{
                   fontSize: 12,
                   fontWeight: 600,
@@ -1840,6 +1860,8 @@ export default function TokenRoutes() {
         previewModelSamples={previewModelSamples}
         exactSourceRouteOptions={exactSourceRouteOptions}
         sourceEndpointTypesByRouteId={sourceEndpointTypesByRouteId}
+        knownRoutes={routeSummaries}
+        onEditGroup={(route) => handleEditRoute(route)}
         onSave={handleAddRoute}
         onCancel={handleCancelEditRoute}
       />
@@ -2012,14 +2034,14 @@ export default function TokenRoutes() {
                     </>
                   )}
                 >
-                  <MobileField label="模型" value={route.modelPattern} stacked />
-                  <MobileField label="通道" value={route.channelCount} />
-                  <MobileField label="状态" value={isReadOnlyRoute ? tr('未生成') : (route.enabled ? tr('启用') : tr('禁用'))} />
+                  <MobileField label={tr('模型')} value={route.modelPattern} stacked />
+                  <MobileField label={tr('通道')} value={route.channelCount} />
+                  <MobileField label={tr('状态')} value={isReadOnlyRoute ? tr('未生成') : (route.enabled ? tr('启用') : tr('禁用'))} />
                   {explicitGroupRoute && (
-                    <MobileField label="模式" value={tr('群组聚合')} />
+                    <MobileField label={tr('模式')} value={tr('群组聚合')} />
                   )}
                   {!exactRoute && !explicitGroupRoute && (
-                    <MobileField label="模式" value={tr('通配符路由')} />
+                    <MobileField label={tr('模式')} value={tr('通配符路由')} />
                   )}
                 </MobileCard>
                 {isExpanded && (
@@ -2202,11 +2224,11 @@ export default function TokenRoutes() {
                 d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
               />
             </svg>
-            <div className="empty-state-title">{routeSummaries.length === 0 ? '暂无路由' : '没有匹配的路由'}</div>
+            <div className="empty-state-title">{routeSummaries.length === 0 ? tr('暂无路由') : tr('没有匹配的路由')}</div>
             <div className="empty-state-desc">
               {routeSummaries.length === 0
-                ? '点击"自动重建"可按当前模型可用性生成路由。'
-                : '请调整品牌筛选、搜索词或排序条件。'}
+                ? tr('点击"自动重建"可按当前模型可用性生成路由。')
+                : tr('请调整品牌筛选、搜索词或排序条件。')}
             </div>
           </div>
         </div>
@@ -2231,6 +2253,12 @@ export default function TokenRoutes() {
         state={confirmState}
         onCancel={() => resolveConfirmation(false)}
         onConfirm={(dismissChecked) => resolveConfirmation(true, dismissChecked)}
+      />
+
+      <RouteCompareModal
+        open={compareOpen}
+        onClose={() => setCompareOpen(false)}
+        routes={routeSummaries}
       />
     </div>
   );

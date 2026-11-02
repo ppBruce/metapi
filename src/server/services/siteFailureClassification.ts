@@ -18,6 +18,13 @@ export type SiteRuntimeFailureContext = {
   status?: number | null;
   errorText?: string | null;
   modelName?: string | null;
+  /**
+   * Wait the upstream itself asked for in this response (Retry-After or a
+   * ratelimit-reset header), already parsed and clamped. Optional: callers
+   * that never see the response headers leave it unset, and the cooldown then
+   * falls back to the local backoff alone.
+   */
+  retryAfterMs?: number | null;
 };
 
 /** Timeout / first-byte patterns shared by retry and site health. */
@@ -35,7 +42,7 @@ export const RETRYABLE_TIMEOUT_PATTERNS: RegExp[] = [
  * routing-health classification read the same definition.
  */
 export function isEmptyContentFailureText(upstreamErrorText?: string | null): boolean {
-  return /empty content/i.test(upstreamErrorText || '');
+  return /empty content|exhausted the output budget/i.test(upstreamErrorText || '');
 }
 
 /**
@@ -236,6 +243,9 @@ export const NETWORK_HOST_UNREACHABLE_PATTERNS: RegExp[] = [
   /enotfound|eai_again/i,
   /econnrefused|ehostunreach|enetunreach|enetdown|ehostdown/i,
   /cert_|unable_to_verify|certificate|self.signed|err_tls|ssl_|eproto/i,
+  // Seen in production when a host behind a CDN has a broken certificate chain:
+  // "tlsv1 alert internal error". Not covered by the cert_/ssl_ spellings above.
+  /tlsv1|tls\s+handshake/i,
   /und_err_connect_timeout/i,
 ];
 
@@ -295,6 +305,13 @@ export function isSensitiveWordsFailure(context: SiteRuntimeFailureContext = {})
 }
 
 export function isValidationRuntimeFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  // A 5xx body frequently quotes the request while describing the ORIGIN's failure
+  // ("malformed response, cannot parse JSON" from a flaky relay). Classifying that as a
+  // client-side validation error made the request terminal — no channel retry, no
+  // failover, and a 0.25 health penalty on a site that is actually broken — so the same
+  // origin was chosen again on the very next request. 4xx keeps the old behaviour.
+  const status = typeof context.status === 'number' ? context.status : 0;
+  if (status >= 500) return false;
   return matchesAnyPattern(SITE_VALIDATION_FAILURE_PATTERNS, context.errorText);
 }
 
@@ -340,6 +357,15 @@ export function resolveSiteRuntimeFailurePenalty(context: SiteRuntimeFailureCont
     return 0.25;
   }
 
+  if (isHostUnreachableNetworkFailure({ status, errorText })) {
+    // Unroutable / TLS-broken host: no channel on that site can work, so outrank a hard 5xx.
+    return 3;
+  }
+
+  if (isNetworkTransportFailure({ status, errorText })) {
+    return 2.5;
+  }
+
   // Dead endpoint pool is a site-wide outage signal: score like a hard 5xx so
   // three quick hits open the short breaker and stop burning failover budget.
   if (
@@ -360,6 +386,16 @@ export function resolveSiteRuntimeFailurePenalty(context: SiteRuntimeFailureCont
   // but stay below hard 5xx so genuine gateway outages still outrank them.
   if (isWafBlockedRuntimeFailure({ status, errorText })) {
     return 2.4;
+  }
+
+  // A timeout is a latency observation, not proof that the channel is dead:
+  // the answer may simply have arrived a second after our window expired.
+  // Charging it the same 2.5 as a hard 5xx made one slow answer outweigh a
+  // genuinely faster site in the routing score. Repeated timeouts still
+  // escalate through the transient-failure streak below, so a channel that is
+  // truly stuck still opens its breaker.
+  if (isTimeoutFailure({ status, errorText })) {
+    return 0.4;
   }
 
   if (status >= 500 || matchesAnyPattern(SITE_TRANSIENT_FAILURE_PATTERNS, errorText)) {
@@ -409,6 +445,17 @@ export function isTransientSiteRuntimeFailure(context: SiteRuntimeFailureContext
     return true;
   }
   if (matchesAnyPattern(SITE_TRANSIENT_FAILURE_PATTERNS, errorText)) {
+    return true;
+  }
+  // Transport-level failures (DNS, TLS, connection refused) are site-wide: the host is
+  // unreachable for every model on it. Without this branch the pattern list above misses
+  // `fetch failed` / `ENOTFOUND`, so a site with a dead DNS never accumulated a streak and
+  // its breaker never opened — each channel burned its own attempt rediscovering the host.
+  if (isNetworkTransportFailure({ status, errorText })) {
+    return true;
+  }
+  // TLS / routing failures live in the host-unreachable list, not the transport one.
+  if (isHostUnreachableNetworkFailure({ status, errorText })) {
     return true;
   }
   return status >= 500 || status === 429;
@@ -886,7 +933,14 @@ export function buildProxyFailureDisposition(
       : (decision.retryChannel ? 'failover_channel' : 'terminal'));
   const incrementFailure = decision.cooldownScope !== 'none'
     || (status === 0 && retryAction === 'failover_channel');
-  const clearSticky = incrementFailure && retryAction !== 'cascade_endpoint';
+  // A single timeout must not drop the conversation's channel affinity. The
+  // request still fails over to another channel for THIS attempt, but the
+  // session's sticky binding survives; otherwise one slow answer permanently
+  // drifts the conversation onto whichever site happened to answer next,
+  // losing whatever prompt cache the original channel held.
+  const clearSticky = incrementFailure
+    && retryAction !== 'cascade_endpoint'
+    && decision.class !== 'timeout';
   const clearLastSuccess = decision.class === 'credential_invalid'
     || (retryAction === 'failover_channel' && incrementFailure);
   return {

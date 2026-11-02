@@ -11,6 +11,7 @@ import {
 } from './chartShared.js';
 import { SegmentedToggle } from './SegmentedToggle.js';
 import ChartLoadingState from './ChartLoadingState.js';
+import { tr } from '../../i18n.js';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -28,8 +29,8 @@ interface SiteTrendData {
 type Metric = 'spend' | 'calls';
 
 const METRIC_OPTIONS: { key: Metric; label: string }[] = [
-  { key: 'spend', label: '消耗趋势' },
-  { key: 'calls', label: '调用趋势' },
+  { key: 'spend', label: tr('消耗趋势') },
+  { key: 'calls', label: tr('调用趋势') },
 ];
 
 const METRIC_STORAGE_KEY = 'metapi:site-trend-metric';
@@ -191,8 +192,8 @@ export default function SiteTrendChart({ active = true }: SiteTrendChartProps) {
           <MetricToggle metric={metric} onChange={setMetric} />
         </div>
         <div className="empty-state" style={{ padding: 48 }}>
-          <div className="empty-state-title">暂无趋势数据</div>
-          <div className="empty-state-desc">数据加载后将自动展示趋势图表</div>
+          <div className="empty-state-title">{tr('暂无趋势数据')}</div>
+          <div className="empty-state-desc">{tr('数据加载后将自动展示趋势图表')}</div>
         </div>
       </div>
     );
@@ -330,29 +331,29 @@ export default function SiteTrendChart({ active = true }: SiteTrendChartProps) {
               d="M7 14l4-4 3 3 5-6"
             />
           </svg>
-          站点趋势
+          {tr('站点趋势')}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', marginLeft: 'auto' }}>
           <MetricToggle metric={metric} onChange={setMetric} />
           <SegmentedToggle
             options={[
-              { key: '1', label: '1天' },
-              { key: '3', label: '3天' },
-              { key: '7', label: '7天' },
+              { key: '1', label: tr('1天') },
+              { key: '3', label: tr('3天') },
+              { key: '7', label: tr('7天') },
             ]}
             value={String(trendDays)}
             onChange={(key) => setTrendDays(Number(key))}
           />
           {focusedSite && (
             <div style={focusChipStyle}>
-              <span>当前查看：</span>
+              <span>{tr('当前查看：')}</span>
               <strong style={{ color: 'var(--color-text-primary)' }}>{focusedSite}</strong>
               <button
                 type="button"
                 onClick={() => setFocusedSite(null)}
                 style={focusClearBtnStyle}
               >
-                显示全部
+                {tr('显示全部')}
               </button>
             </div>
           )}

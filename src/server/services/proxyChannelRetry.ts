@@ -102,22 +102,54 @@ export function canRetryProxyChannelWithBudget(
 /**
  * First-byte timeout for channel attempt N.
  *
- * - All attempts (first + failover probes) use the FULL configured timeout.
- *   Slow-but-alive relay sites legitimately take 30-60s to emit the first
- *   byte (MiMo/glm relays etc.); halving the timeout for failover probes
- *   killed exactly those sites — the request that fails over onto a slow
- *   site would time out at full/2 even though the site is fine. Dead
- *   channels are already rejected quickly via connection errors and
- *   immediate 4xx/5xx, so a shorter first-byte timeout is not needed to
- *   prune them.
+ * - Base window = the configured ceiling (`PROXY_FIRST_BYTE_TIMEOUT_SEC`).
+ * - Adaptive window: when the site has a trusted recent first-byte EWMA, use
+ *   `5 x EWMA` clamped to [30s, ceiling]. Scaling from each site's own history
+ *   replaces the old fixed "fast if <=6s" gate: production 7-day site means
+ *   span 4.6-33.5s, so the fixed gate almost never matched (it was effectively
+ *   dead code). The 5x multiplier keeps ~99.5% of successful streaming
+ *   requests (measured over 9.7k successes / 7 days) while cutting stalled
+ *   attempts well before the 90s ceiling.
  * - full<=0 (disabled): returns 0 so explicit opt-out is respected
  *   end-to-end.
  */
-export function resolveProxyChannelFirstByteTimeoutMs(_retryCount: number): number {
+export function resolveProxyChannelFirstByteTimeoutMs(
+  _retryCount: number,
+  observedTtftMs?: number | null,
+): number {
   const fullMs = Math.max(0, Math.trunc((config.proxyFirstByteTimeoutSec || 0) * 1000));
   if (fullMs <= 0) return 0;
+  // Adaptive try: scale from the site's own recent first-byte EWMA. The old
+  // fixed gate (EWMA <= 6s -> 30s) was degenerate: max(30s, 3 x EWMA) can
+  // never exceed 30s for EWMA <= 6s, and almost no real site met the gate.
+  if (typeof observedTtftMs === 'number' && Number.isFinite(observedTtftMs)
+    && observedTtftMs > 0) {
+    const adaptiveMs = Math.trunc(observedTtftMs * PROXY_FIRST_BYTE_ADAPTIVE_MULTIPLIER);
+    return Math.min(fullMs, Math.max(PROXY_FIRST_BYTE_ADAPTIVE_FLOOR_MS, adaptiveMs));
+  }
   return fullMs;
 }
+
+/** Multiplier applied to a site's own first-byte EWMA. */
+export const PROXY_FIRST_BYTE_ADAPTIVE_MULTIPLIER = 5;
+/** Never shrink the first-byte window below this, even for very fast sites. */
+export const PROXY_FIRST_BYTE_ADAPTIVE_FLOOR_MS = 30_000;
+/**
+ * Floor for the survival-curve estimator.
+ *
+ * Raised from 5s to 8s after production evidence that 5s sat inside the normal
+ * first-byte distribution of reasoning models: Antigravity's gemini-3.8-flash
+ * succeeds at 5.0-6.7s, so a 5-6.5s window censored half of its attempts, and
+ * every censored attempt was then read as "waiting is not worth it". A floor
+ * below the healthy mode of a site is not a cost optimisation, it is an outage.
+ */
+export const PROXY_FIRST_BYTE_WINDOW_FLOOR_MS = 8_000;
+/** Consecutive TIMEOUT failures tolerated before abandoning channel failover.
+ *  Timeouts are the failure class that failover helps most; the 2-strike rule
+ *  used for credential/model errors killed healthy candidates at peak load. */
+export const PROXY_TIMEOUT_FAILOVER_STREAK_STOP_DEFAULT = 4;
+/** Samples required before a site's TTFT profile is trusted. */
+export const PROXY_FIRST_BYTE_ADAPTIVE_MIN_SAMPLES = 5;
 
 /**
  * Derived failover budget when env does not pin an explicit value:
@@ -159,5 +191,10 @@ export function noteFailoverFailureAndShouldStop(
   } else {
     state.lowValueStreak = 0;
   }
-  return state.lowValueStreak >= Math.max(1, Math.trunc(stopAfter));
+  // Timeouts get a looser limit: a slow relay at peak load is exactly the case
+  // channel failover fixes, so two of them must not end the request.
+  const limit = decision.class === 'timeout'
+    ? Math.max(1, Math.trunc(PROXY_TIMEOUT_FAILOVER_STREAK_STOP_DEFAULT))
+    : Math.max(1, Math.trunc(stopAfter));
+  return state.lowValueStreak >= limit;
 }

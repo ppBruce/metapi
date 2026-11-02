@@ -3,6 +3,8 @@ import {
 } from './reasoningTransport.js';
 import { toOpenAiChatFileBlock } from './inputFile.js';
 import { asTrimmedString } from '../../shared/trimString.js';
+import { createToolCallIndexState, resolveToolCallIndex } from './toolCallIndex.js';
+import { normalizeFinishReason, toAnthropicStopReason, toOpenAiFinishReason } from './finishReason.js';
 import {
 
   consumeThinkTaggedText,
@@ -30,6 +32,15 @@ export type StreamTransformContext = {
   nextResponsesToolCallIndex: number;
   responsesTextByIndex: Record<number, string>;
   responsesReasoningByIndex: Record<number, string>;
+  /**
+   * Anthropic content-block index -> tool slot. Anthropic numbers every block (thinking=0,
+   * text=1, tool_use=2), so the raw block index is NOT a tool ordinal; using it directly
+   * handed clients a sparse tool_calls array. Only populated for tool_use blocks.
+   */
+  anthropicToolSlotByBlockIndex: Record<number, number>;
+  /** Gemini streams each call whole; key it by id (else name+args) so a repeat is a no-op. */
+  geminiToolSlotByKey: Record<string, number>;
+  nextGeminiToolSlot: number;
   thinkTagParser: ThinkTagParserState;
 };
 
@@ -61,6 +72,13 @@ export type NormalizedStreamEvent = {
   }>;
   finishReason?: string | null;
   done?: boolean;
+  /**
+   * Token accounting reported by the upstream chunk, normalized to OpenAI chat naming
+   * (`prompt_tokens` / `completion_tokens`). OpenAI-compatible relays send this in a
+   * trailing chunk whose `choices` array is empty, so it must never be dropped: downstream
+   * Anthropic/Responses surfaces have no other place to read real usage from.
+   */
+  usagePayload?: Record<string, unknown>;
 };
 
 export type NormalizedFinalResponse = {
@@ -167,6 +185,16 @@ function extractTextAndReasoning(value: unknown): { content: string; reasoning: 
         reasoningParts.push(item.thinking);
         continue;
       }
+      // Same rule as the chat-side reader: a part explicitly typed reasoning/thinking is
+      // reasoning, never answer text, whatever field carries the string.
+      if ((type === 'reasoning' || type === 'thinking') && typeof item.text === 'string') {
+        reasoningParts.push(item.text);
+        continue;
+      }
+      if ((type === 'reasoning' || type === 'thinking') && typeof item.reasoning === 'string') {
+        reasoningParts.push(item.reasoning);
+        continue;
+      }
       if (type === 'thinking_delta' && typeof item.text === 'string') {
         reasoningParts.push(item.text);
         continue;
@@ -224,49 +252,76 @@ function extractStreamingTextAndReasoning(
   };
 }
 
+/**
+ * Map an Anthropic content-block index to a dense tool slot.
+ *
+ * Anthropic numbers every block, not every tool: `thinking=0, text=1, tool_use=2`. Passing
+ * that index straight through as the OpenAI `tool_calls[].index` handed clients a sparse
+ * array (one element at position 2), which every client-side consumer then indexed wrongly.
+ * Only `tool_use` blocks get a slot, and they get them in opening order.
+ */
+function anthropicToolSlotForBlockIndex(
+  context: StreamTransformContext,
+  blockIndex: number,
+): number {
+  const known = context.anthropicToolSlotByBlockIndex[blockIndex];
+  if (typeof known === 'number') return known;
+  const slot = Object.keys(context.anthropicToolSlotByBlockIndex).length;
+  context.anthropicToolSlotByBlockIndex[blockIndex] = slot;
+  return slot;
+}
+
+/**
+ * Collect Gemini `functionCall` parts from one streamed candidate into tool-call deltas.
+ *
+ * Gemini sends the complete `args` object in a single part, so each first sighting of a
+ * call becomes one delta with the whole argument JSON; a repeat of the same call (same id,
+ * or same name+args when the upstream omits ids) is skipped so the downstream accumulator
+ * cannot append a snapshot twice.
+ */
+function collectGeminiFunctionCallsForStream(
+  candidate: unknown,
+  context: StreamTransformContext,
+): NonNullable<NormalizedStreamEvent['toolCallDeltas']> {
+  if (!isRecord(candidate)) return [];
+  const parts = (candidate as any).content?.parts;
+  if (!Array.isArray(parts)) return [];
+
+  const deltas: NonNullable<NormalizedStreamEvent['toolCallDeltas']> = [];
+  for (const part of parts) {
+    if (!isRecord(part) || !isRecord((part as any).functionCall)) continue;
+    const functionCall = (part as any).functionCall as Record<string, unknown>;
+    const name = asTrimmedString(functionCall.name);
+    const id = asTrimmedString(functionCall.id);
+    const argumentsText = stringifyUnknownValue(functionCall.args);
+    const key = id ? `id:${id}` : `sig:${name}:${argumentsText}`;
+
+    const known = context.geminiToolSlotByKey[key];
+    if (typeof known === 'number') continue; // repeated snapshot, already emitted
+
+    const slot = context.nextGeminiToolSlot;
+    context.nextGeminiToolSlot += 1;
+    context.geminiToolSlotByKey[key] = slot;
+
+    deltas.push({
+      index: slot,
+      ...(id ? { id } : {}),
+      ...(name ? { name } : {}),
+      ...(argumentsText ? { argumentsDelta: argumentsText } : {}),
+    });
+  }
+  return deltas;
+}
+
 export function normalizeStopReason(raw: unknown): string | null {
-  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
-  if (!value) return null;
-
-  if (value === 'failed' || value === 'error') {
-    return 'error';
-  }
-
-  if (
-    value === 'end_turn'
-    || value === 'stop'
-    || value === 'end'
-    || value === 'eos'
-    || value === 'finished'
-    || value === 'completed'
-    || value === 'stop_sequence'
-  ) {
-    return 'stop';
-  }
-
-  if (
-    value === 'incomplete'
-    || value === 'max_tokens'
-    || value === 'length'
-    || value === 'max_output_tokens'
-    || value === 'max_tokens_exceeded'
-    || value.includes('max')
-  ) {
-    return 'length';
-  }
-
-  if (value === 'tool_use' || value === 'tool_calls' || value.includes('tool')) {
-    return 'tool_calls';
-  }
-
-  return null;
+  // Single source of truth: shared/finishReason.ts. Exact matching only — the previous
+  // `includes('max')` / `includes('tool')` heuristics mis-read `nomatch` as tool_calls and
+  // dropped `content_filter` entirely (a safety stop looked like a clean finish).
+  return normalizeFinishReason(raw);
 }
 
 export function toClaudeStopReason(finishReason: string | null | undefined): string {
-  const value = normalizeStopReason(finishReason);
-  if (value === 'length') return 'max_tokens';
-  if (value === 'tool_calls') return 'tool_use';
-  return 'end_turn';
+  return toAnthropicStopReason(finishReason);
 }
 
 export function createStreamTransformContext(modelName: string): StreamTransformContext {
@@ -282,6 +337,9 @@ export function createStreamTransformContext(modelName: string): StreamTransform
     nextResponsesToolCallIndex: 0,
     responsesTextByIndex: {},
     responsesReasoningByIndex: {},
+    anthropicToolSlotByBlockIndex: {},
+    geminiToolSlotByKey: {},
+    nextGeminiToolSlot: 0,
     thinkTagParser: createThinkTagParserState(),
   };
 }
@@ -425,10 +483,13 @@ function responsesStatusToChatFinishReason(
         ? asTrimmedString(incompleteDetails.reason).toLowerCase()
         : ''
     );
-    return reason === 'max_output_tokens' ? 'length' : 'stop';
+    if (reason === 'content_filter') return 'content_filter';
+    return ['max_output_tokens', 'max_completion_tokens', 'max_tokens'].includes(reason) ? 'length' : 'stop';
   }
-  if (normalizedStatus === 'failed') {
-    return 'stop';
+  if (normalizedStatus === 'failed' || normalizedStatus === 'cancelled' || normalizedStatus === 'canceled') {
+    // A failed response is not a clean end: keep the canonical error so the Anthropic and
+    // Gemini exits can surface it instead of reporting end_turn.
+    return 'error';
   }
   return hasToolCalls ? 'tool_calls' : 'stop';
 }
@@ -625,11 +686,17 @@ function collectIndexedToolCallsFromResponsesPayload(
           ? item.input
           : stringifyUnknownValue(item.arguments ?? item.input))
     );
+    // Prefer the item's own position when the payload declares one: the array position
+    // drifts from the stream's output_index as soon as the completed payload omits or
+    // reorders items, and the slot table is keyed by output_index.
+    const declaredOutputIndex = typeof item.output_index === 'number' && Number.isFinite(item.output_index)
+      ? Math.max(0, Math.trunc(item.output_index))
+      : undefined;
     toolCalls.push({
       id,
       name,
       arguments: argumentsText,
-      outputIndex: index,
+      outputIndex: declaredOutputIndex ?? index,
     });
   }
 
@@ -912,32 +979,48 @@ function pickPositiveInteger(value: unknown): number | undefined {
 function convertClaudeToolsToOpenAiChat(rawTools: unknown): unknown {
   if (!Array.isArray(rawTools)) return rawTools;
 
-  return rawTools.map((item) => {
-    if (!isRecord(item)) return item;
+  const converted = rawTools.flatMap((item): unknown[] => {
+    if (!isRecord(item)) return [item];
 
     const type = asTrimmedString(item.type).toLowerCase();
     const name = asTrimmedString(item.name);
-    if (
+    const isFunctionTool = type === 'function' || type === 'custom';
+    // Provider-executed web search ({"type":"web_search_20250305"}) has no Chat
+    // Completions equivalent. Forwarding it as {"type":"web_search"} makes strict
+    // upstreams reject the whole request ("Input should be 'function'"), so drop
+    // it instead. A client-defined *function* named web_search is not a server
+    // tool and must be preserved.
+    const isServerWebSearch = !isFunctionTool && (
       type === 'web_search'
       || type === 'web_search_20250305'
       || type === 'google_search'
-      || name === 'web_search'
-      || name === 'google_search'
-    ) {
-      return {
-        ...item,
-        type: 'web_search',
-        name: 'web_search',
-      };
+      || (!type && !item.input_schema && (name === 'web_search' || name === 'google_search'))
+    );
+    if (isServerWebSearch) return [];
+
+    if (isFunctionTool) {
+      // Flat function tools are normalized into the nested chat shape; an entry
+      // that already carries `function` is passed through untouched.
+      if (type === 'function' && !isRecord(item.function) && name) {
+        return [{
+          type: 'function',
+          function: {
+            name,
+            ...(asTrimmedString(item.description)
+              ? { description: asTrimmedString(item.description) }
+              : {}),
+            parameters: isRecord(item.parameters) ? item.parameters : { type: 'object' },
+          },
+        }];
+      }
+      return [item];
     }
 
-    if (type === 'function' || type === 'custom' || type === 'image_generation') {
-      return item;
-    }
+    if (type === 'image_generation') return [item];
 
-    if (!name) return item;
+    if (!name) return [item];
 
-    return {
+    return [{
       type: 'function',
       function: {
         name,
@@ -948,8 +1031,10 @@ function convertClaudeToolsToOpenAiChat(rawTools: unknown): unknown {
           ? item.input_schema
           : (isRecord(item.parameters) ? item.parameters : { type: 'object' }),
       },
-    };
+    }];
   });
+
+  return converted;
 }
 
 function convertClaudeToolChoiceToOpenAiChat(rawToolChoice: unknown): unknown {
@@ -1205,7 +1290,15 @@ export function convertClaudeRequestToOpenAiBody(body: Record<string, unknown>):
   if (reasoningRequest.reasoningEffort) payload.reasoning_effort = reasoningRequest.reasoningEffort;
   if (reasoningRequest.reasoningBudget !== undefined) payload.reasoning_budget = reasoningRequest.reasoningBudget;
 
-  if (body.tools !== undefined) payload.tools = convertClaudeToolsToOpenAiChat(body.tools);
+  if (body.tools !== undefined) {
+    const convertedTools = convertClaudeToolsToOpenAiChat(body.tools);
+    // Provider-executed tools (web_search) are dropped because Chat Completions
+    // has no equivalent; do not send an empty array in that case — strict
+    // upstreams reject `tools: []`.
+    if (!Array.isArray(convertedTools) || convertedTools.length > 0) {
+      payload.tools = convertedTools;
+    }
+  }
   if (body.tool_choice !== undefined) payload.tool_choice = convertClaudeToolChoiceToOpenAiChat(body.tool_choice);
 
   const promptCacheKey = asTrimmedString(body.prompt_cache_key);
@@ -1393,6 +1486,49 @@ export function normalizeUpstreamFinalResponse(
   };
 }
 
+export function extractUpstreamUsagePayload(payload: Record<string, unknown>): Record<string, unknown> | undefined {
+  const usage = isRecord(payload.usage)
+    ? payload.usage
+    : (isRecord((payload as any).token_usage) ? (payload as any).token_usage : null);
+  if (!usage) return undefined;
+
+  const toCount = (value: unknown): number | undefined => {
+    const n = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(n) ? Math.max(0, Math.round(n)) : undefined;
+  };
+
+  const promptTokens = toCount(usage.prompt_tokens ?? usage.input_tokens);
+  const completionTokens = toCount(usage.completion_tokens ?? usage.output_tokens);
+  const totalTokens = toCount(usage.total_tokens)
+    ?? (promptTokens !== undefined && completionTokens !== undefined
+      ? promptTokens + completionTokens
+      : undefined);
+
+  const mapped: Record<string, unknown> = {};
+  if (promptTokens !== undefined) mapped.prompt_tokens = promptTokens;
+  if (completionTokens !== undefined) mapped.completion_tokens = completionTokens;
+  if (totalTokens !== undefined) mapped.total_tokens = totalTokens;
+
+  const promptDetails = isRecord(usage.prompt_tokens_details)
+    ? usage.prompt_tokens_details
+    : (isRecord(usage.input_tokens_details) ? usage.input_tokens_details : null);
+  if (promptDetails) mapped.prompt_tokens_details = { ...promptDetails };
+
+  const cacheReadTokens = toCount(
+    usage.cache_read_input_tokens
+    ?? usage.prompt_cache_hit_tokens
+    ?? (promptDetails ? promptDetails.cached_tokens : undefined),
+  );
+  if (cacheReadTokens !== undefined) mapped.cache_read_input_tokens = cacheReadTokens;
+
+  const cacheCreationTokens = toCount(
+    usage.cache_creation_input_tokens ?? usage.claude_cache_creation_5_m_tokens,
+  );
+  if (cacheCreationTokens !== undefined) mapped.cache_creation_input_tokens = cacheCreationTokens;
+
+  return Object.keys(mapped).length > 0 ? mapped : undefined;
+}
+
 export function normalizeUpstreamStreamEvent(
   payload: unknown,
   context: StreamTransformContext,
@@ -1400,7 +1536,13 @@ export function normalizeUpstreamStreamEvent(
 ): NormalizedStreamEvent {
   if (!isRecord(payload)) return {};
 
+  const usagePayload = extractUpstreamUsagePayload(payload);
+
   if (Array.isArray(payload.choices)) {
+    // Per-payload: fragments of one call never span two calls, and a chunk that omits all
+    // indices starts its first call at slot 0. Keeping this local also means the two
+    // normalizers that read one payload can never double-advance a shared counter.
+    const indexState = createToolCallIndexState();
     if (isNonEmptyString(payload.id)) context.id = payload.id;
     if (isNonEmptyString(payload.model)) context.model = payload.model;
     context.created = ensureIntegerTimestamp(payload.created, context.created);
@@ -1437,14 +1579,9 @@ export function normalizeUpstreamStreamEvent(
       ? ((delta as any).tool_calls as unknown[])
       : [];
     const toolCallDeltas = rawToolCalls
-      .map((item, itemIndex) => {
+      .map((item) => {
         if (!isRecord(item)) return null;
         const functionPart = isRecord(item.function) ? item.function : {};
-        const index = (
-          typeof item.index === 'number' && Number.isFinite(item.index)
-            ? Math.max(0, Math.trunc(item.index))
-            : itemIndex
-        );
         const id = typeof item.id === 'string' && item.id.trim().length > 0
           ? item.id
           : undefined;
@@ -1457,7 +1594,14 @@ export function normalizeUpstreamStreamEvent(
 
         if (!id && !name && argumentsDelta === undefined) return null;
         return {
-          index,
+          // Same rule as the stream path: a missing index means "this call's next fragment",
+          // never "a new parallel call at the array position" (see resolveToolCallIndex).
+          index: resolveToolCallIndex(
+            typeof item.index === 'number' && Number.isFinite(item.index) ? item.index : undefined,
+            id,
+            name,
+            indexState,
+          ),
           id,
           name,
           argumentsDelta,
@@ -1472,6 +1616,7 @@ export function normalizeUpstreamStreamEvent(
       reasoningSignature,
       toolCallDeltas: toolCallDeltas.length > 0 ? toolCallDeltas : undefined,
       finishReason: normalizeStopReason(choice?.finish_reason),
+      ...(usagePayload ? { usagePayload } : {}),
     };
   }
 
@@ -1741,6 +1886,7 @@ export function normalizeUpstreamStreamEvent(
     );
     const contentBlock = isRecord(payload.content_block) ? payload.content_block : {};
     if (contentBlock.type === 'tool_use') {
+      const toolSlot = anthropicToolSlotForBlockIndex(context, index);
       const id = typeof contentBlock.id === 'string' && contentBlock.id.trim().length > 0
         ? contentBlock.id
         : undefined;
@@ -1762,7 +1908,7 @@ export function normalizeUpstreamStreamEvent(
 
       return {
         toolCallDeltas: [{
-          index,
+          index: toolSlot,
           id,
           name,
           argumentsDelta,
@@ -1783,7 +1929,7 @@ export function normalizeUpstreamStreamEvent(
     const parsed = extractStreamingTextAndReasoning(delta, context.thinkTagParser);
 
     if (deltaType === 'input_json_delta') {
-      const index = (
+      const blockIndex = (
         typeof (payload as any).index === 'number' && Number.isFinite((payload as any).index)
           ? Math.max(0, Math.trunc((payload as any).index))
           : 0
@@ -1793,7 +1939,7 @@ export function normalizeUpstreamStreamEvent(
         : undefined;
       return {
         toolCallDeltas: [{
-          index,
+          index: anthropicToolSlotForBlockIndex(context, blockIndex),
           argumentsDelta: partialJson,
         }],
       };
@@ -1835,9 +1981,15 @@ export function normalizeUpstreamStreamEvent(
       context.model = fallbackModel;
     }
 
+    // Gemini delivers a functionCall whole (not as argument fragments), and until now this
+    // streaming branch dropped it entirely: only the non-streaming collector picked calls
+    // up. Emit it once per call — a repeated identical frame is a no-op, not a second
+    // append, because the payload is a snapshot rather than a delta.
+    const streamedToolCalls = collectGeminiFunctionCallsForStream(candidate, context);
     return {
       contentDelta: parsed.content || undefined,
       reasoningDelta: parsed.reasoning || undefined,
+      ...(streamedToolCalls.length > 0 ? { toolCallDeltas: streamedToolCalls } : {}),
       finishReason: normalizeStopReason((candidate as any).finishReason || (payload as any).finishReason),
     };
   }
@@ -1936,7 +2088,7 @@ function buildOpenAiStreamChunk(
     return null;
   }
 
-  return {
+  const chunk: Record<string, unknown> = {
     id: context.id,
     object: 'chat.completion.chunk',
     created: context.created,
@@ -1944,9 +2096,14 @@ function buildOpenAiStreamChunk(
     choices: [{
       index: 0,
       delta,
-      finish_reason: finishReason,
+      // Wire boundary: null stays null (mid-stream chunk), a terminal value is projected
+      // into the OpenAI enum, which has no "error" member.
+      finish_reason: finishReason == null ? null : toOpenAiFinishReason(finishReason),
     }],
   };
+  const usage = mergeUsageForChunkPayload(event);
+  if (usage) chunk.usage = usage;
+  return chunk;
 }
 
 function mergeUsageForChunkPayload(event: NormalizedStreamEvent): Record<string, unknown> | null {
@@ -1988,34 +2145,15 @@ function ensureClaudeStartEvents(
       content: [],
       stop_reason: null,
       stop_sequence: null,
-      usage: {
-        input_tokens: 0,
-        output_tokens: 0,
-      },
+      // No counters on purpose: a peer reading 0 would log "upstream
+      // accounted" and lose the distinction from a real zero-token call.
+      usage: {},
     },
   };
 
   return [serializeSse('message_start', payload)];
 }
 
-function ensureClaudeTextBlockStart(
-  claudeContext: ClaudeDownstreamContext,
-): string[] {
-  if (claudeContext.contentBlockStarted && claudeContext.textBlockIndex !== null) return [];
-  const contentIndex = claudeContext.nextContentBlockIndex;
-  claudeContext.nextContentBlockIndex += 1;
-  claudeContext.contentBlockStarted = true;
-  claudeContext.textBlockIndex = contentIndex;
-
-  return [serializeSse('content_block_start', {
-    type: 'content_block_start',
-    index: contentIndex,
-    content_block: {
-      type: 'text',
-      text: '',
-    },
-  })];
-}
 
 function closeClaudeTextBlock(
   claudeContext: ClaudeDownstreamContext,
@@ -2031,59 +2169,7 @@ function closeClaudeTextBlock(
   })];
 }
 
-function normalizeToolContentIndex(raw: unknown): number {
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    return Math.max(0, Math.trunc(raw));
-  }
-  return 0;
-}
 
-function ensureClaudeToolBlockStart(
-  claudeContext: ClaudeDownstreamContext,
-  toolDelta: NonNullable<NormalizedStreamEvent['toolCallDeltas']>[number],
-): { events: string[]; contentIndex: number } {
-  const toolSlot = normalizeToolContentIndex(toolDelta.index);
-  let state = claudeContext.toolBlocks[toolSlot];
-  if (!state) {
-    const fallbackId = `toolu_meta_${toolSlot}`;
-    const fallbackName = `tool_${toolSlot}`;
-    state = {
-      contentIndex: claudeContext.nextContentBlockIndex,
-      id: toolDelta.id || fallbackId,
-      name: toolDelta.name || fallbackName,
-      open: false,
-    };
-    claudeContext.nextContentBlockIndex += 1;
-    claudeContext.toolBlocks[toolSlot] = state;
-  } else {
-    if (toolDelta.id && state.id !== toolDelta.id) {
-      state.id = toolDelta.id;
-    }
-    if (toolDelta.name && state.name !== toolDelta.name) {
-      state.name = toolDelta.name;
-    }
-  }
-
-  const events: string[] = [];
-  if (!state.open) {
-    state.open = true;
-    events.push(serializeSse('content_block_start', {
-      type: 'content_block_start',
-      index: state.contentIndex,
-      content_block: {
-        type: 'tool_use',
-        id: state.id,
-        name: state.name,
-        input: {},
-      },
-    }));
-  }
-
-  return {
-    events,
-    contentIndex: state.contentIndex,
-  };
-}
 
 function closeClaudeToolBlocks(
   claudeContext: ClaudeDownstreamContext,
@@ -2137,60 +2223,17 @@ export function serializeNormalizedStreamEvent(
   downstreamFormat: DownstreamFormat,
   event: NormalizedStreamEvent,
   context: StreamTransformContext,
-  claudeContext: ClaudeDownstreamContext,
+  _claudeContext: ClaudeDownstreamContext,
 ): string[] {
-  if (downstreamFormat === 'openai') {
-    const chunk = buildOpenAiStreamChunk(context, event);
-    return chunk ? [serializeSse('', chunk)] : [];
+  if (downstreamFormat !== 'openai') {
+    // Claude downstreams are NOT served from here: anthropic/messages/streamBridge owns
+    // that serializer (thinking blocks, signature ordering, block indices). This branch used
+    // to merge reasoning into the text block, i.e. a second, divergent Claude writer with no
+    // production caller. Fail closed instead of emitting answer text that looks right.
+    return [];
   }
-
-  const events: string[] = [];
-  if (event.role === 'assistant' || event.contentDelta || event.reasoningDelta) {
-    events.push(...ensureClaudeStartEvents(context, claudeContext));
-  }
-
-  const mergedText = joinNonEmpty([
-    event.reasoningDelta || '',
-    event.contentDelta || '',
-  ]);
-
-  if (Array.isArray(event.toolCallDeltas) && event.toolCallDeltas.length > 0) {
-    events.push(...closeClaudeTextBlock(claudeContext));
-    for (const toolDelta of event.toolCallDeltas) {
-      const toolBlock = ensureClaudeToolBlockStart(claudeContext, toolDelta);
-      events.push(...toolBlock.events);
-
-      if (toolDelta.argumentsDelta !== undefined && toolDelta.argumentsDelta.length > 0) {
-        events.push(serializeSse('content_block_delta', {
-          type: 'content_block_delta',
-          index: toolBlock.contentIndex,
-          delta: {
-            type: 'input_json_delta',
-            partial_json: toolDelta.argumentsDelta,
-          },
-        }));
-      }
-    }
-  }
-
-  if (mergedText) {
-    events.push(...closeClaudeToolBlocks(claudeContext));
-    events.push(...ensureClaudeTextBlockStart(claudeContext));
-    events.push(serializeSse('content_block_delta', {
-      type: 'content_block_delta',
-      index: claudeContext.textBlockIndex ?? 0,
-      delta: {
-        type: 'text_delta',
-        text: mergedText,
-      },
-    }));
-  }
-
-  if (event.done || event.finishReason) {
-    events.push(...buildClaudeDoneEvents(context, claudeContext, event.finishReason));
-  }
-
-  return events;
+  const chunk = buildOpenAiStreamChunk(context, event);
+  return chunk ? [serializeSse('', chunk)] : [];
 }
 
 export function serializeStreamDone(
@@ -2317,7 +2360,7 @@ export function serializeFinalResponse(
     choices: [{
       index: 0,
       message,
-      finish_reason: finishReason,
+      finish_reason: finishReason == null ? null : toOpenAiFinishReason(finishReason),
     }],
     usage: {
       prompt_tokens: usage.promptTokens,
@@ -2373,7 +2416,7 @@ export function buildSyntheticOpenAiChunks(normalized: NormalizedFinalResponse):
     choices: [{
       index: 0,
       delta: {},
-      finish_reason: finishReason,
+      finish_reason: finishReason == null ? null : toOpenAiFinishReason(finishReason),
     }],
   };
 

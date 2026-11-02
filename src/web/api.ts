@@ -27,6 +27,7 @@ import type {
 import type {
   BackupImportPayload,
 } from '../server/contracts/settingsRoutePayloads.js';
+import { tr } from './i18n.js';
 
 type BufferLike = {
   from(data: ArrayBuffer): { toString(encoding: 'base64'): string };
@@ -555,178 +556,6 @@ export type ProxyDebugTracesResponse = {
   items: ProxyDebugTraceListItem[];
 };
 
-export type OAuthProviderInfo = {
-  provider: string;
-  label: string;
-  platform: string;
-  enabled: boolean;
-  loginType: 'oauth';
-  requiresProjectId: boolean;
-  supportsDirectAccountRouting: boolean;
-  supportsCloudValidation: boolean;
-  supportsNativeProxy: boolean;
-  /** 代理链路是否可直通（false = 非标准协议/需专用客户端头） */
-  proxySupported?: boolean;
-  siteUrl: string;
-};
-
-export type OAuthProvidersResponse = {
-  providers: OAuthProviderInfo[];
-  defaults?: {
-  };
-};
-
-export type OAuthRouteUnitStrategy = 'round_robin' | 'stick_until_unavailable';
-
-export type OAuthRouteUnitSummary = {
-  id?: number;
-  routeUnitId?: number;
-  name: string;
-  strategy: OAuthRouteUnitStrategy;
-  memberCount: number;
-};
-
-export type OAuthRouteParticipation =
-  | {
-      kind: 'single';
-    }
-  | ({
-      kind: 'route_unit';
-    } & OAuthRouteUnitSummary);
-
-export type OAuthStartInstructions = {
-  redirectUri: string;
-  callbackPort: number;
-  callbackPath: string;
-  manualCallbackDelayMs: number;
-  sshTunnelCommand?: string;
-  sshTunnelKeyCommand?: string;
-};
-
-export type OAuthStartResponse = {
-  provider: string;
-  state: string;
-  authorizationUrl: string;
-  instructions: OAuthStartInstructions;
-  /** 设备码授权（device-code flow，如 KiloCode）：展示 verification URI + user code 后轮询 */
-  deviceFlow?: {
-    userCode: string;
-    verificationUri: string;
-    expiresIn: number;
-    interval: number;
-  };
-};
-
-export type OAuthSessionInfo = {
-  provider: string;
-  state: string;
-  status: 'pending' | 'success' | 'error';
-  accountId?: number;
-  siteId?: number;
-  error?: string;
-};
-
-export type OAuthQuotaWindowInfo = {
-  supported: boolean;
-  limit?: number | null;
-  used?: number | null;
-  remaining?: number | null;
-  resetAt?: string | null;
-  message?: string | null;
-};
-
-export type OAuthQuotaInfo = {
-  status: 'supported' | 'unsupported' | 'error';
-  source: 'official' | 'reverse_engineered';
-  lastSyncAt?: string | null;
-  lastError?: string | null;
-  providerMessage?: string | null;
-  subscription?: {
-    planType?: string | null;
-    activeStart?: string | null;
-    activeUntil?: string | null;
-  } | null;
-  windows: {
-    fiveHour: OAuthQuotaWindowInfo;
-    sevenDay: OAuthQuotaWindowInfo;
-  };
-  entries?: OAuthQuotaEntryInfo[];
-  lastLimitResetAt?: string | null;
-};
-
-export type OAuthQuotaEntryInfo = {
-  key: string;
-  label: string;
-  kind: 'window' | 'bucket' | 'credits';
-  used?: number | null;
-  limit?: number | null;
-  remaining?: number | null;
-  remainingPercent?: number | null;
-  unit?: string | null;
-  resetAt?: string | null;
-  unlimited?: boolean;
-};
-
-export type OAuthConnectionInfo = {
-  accountId: number;
-  siteId: number;
-  provider: string;
-  username?: string | null;
-  email?: string | null;
-  accountKey?: string | null;
-  planType?: string | null;
-  projectId?: string | null;
-  modelCount: number;
-  modelsPreview: string[];
-  status: 'healthy' | 'abnormal';
-  quota?: OAuthQuotaInfo | null;
-  routeChannelCount?: number;
-  lastModelSyncAt?: string | null;
-  lastModelSyncError?: string | null;
-  proxyUrl?: string | null;
-  routeUnit?: OAuthRouteUnitSummary | null;
-  routeParticipation?: OAuthRouteParticipation | null;
-  site?: { id: number; name: string; url: string; platform: string; globalWeight?: number | null } | null;
-};
-
-export type OAuthConnectionsResponse = {
-  items: OAuthConnectionInfo[];
-  total: number;
-  limit: number;
-  offset: number;
-};
-
-export type OAuthQuotaBatchRefreshResponse = {
-  success: boolean;
-  refreshed: number;
-  failed: number;
-  items: Array<{
-    accountId: number;
-    success: boolean;
-    quota?: OAuthQuotaInfo;
-    error?: string;
-  }>;
-};
-
-export type OAuthImportResponse = {
-  success: boolean;
-  imported: number;
-  skipped: number;
-  failed: number;
-  items: Array<{
-    name: string;
-    status: 'imported' | 'skipped' | 'failed';
-    accountId?: number;
-    provider?: string;
-    message?: string;
-  }>;
-};
-
-export type OAuthRouteUnitMutationResponse = {
-  success: boolean;
-  routeUnit?: OAuthRouteUnitSummary;
-};
-
 export type DownstreamApiKeyTrendBucket = {
   startUtc: string | null;
   totalRequests: number;
@@ -768,10 +597,14 @@ export const api = {
       ),
     }),
   // Per-key disabled models: only this account's rows are replaced.
-  updateAccountDisabledModels: (accountId: number, models: string[]) =>
+  updateAccountDisabledModels: (
+    accountId: number,
+    models: string[],
+    newModelPolicy?: 'auto' | 'disable',
+  ) =>
     request(`/api/accounts/${accountId}/models/disabled`, {
       method: 'PUT',
-      body: JSON.stringify({ models }),
+      body: JSON.stringify(newModelPolicy ? { models, newModelPolicy } : { models }),
     }),
   getSiteAvailableModels: (siteId: number) =>
     request(`/api/sites/${siteId}/available-models`),
@@ -1166,95 +999,6 @@ export const api = {
       body: JSON.stringify({ query, limit: 20 }),
     }),
 
-  // OAuth
-  getOAuthProviders: () =>
-    request('/api/oauth/providers') as Promise<OAuthProvidersResponse>,
-  startOAuthProvider: (
-    provider: string,
-    data?: {
-      accountId?: number;
-      projectId?: string;
-      proxyUrl?: string | null;
-    },
-  ) =>
-    request(`/api/oauth/providers/${encodeURIComponent(provider)}/start`, {
-      method: 'POST',
-      body: JSON.stringify(data || {}),
-    }) as Promise<OAuthStartResponse>,
-  getOAuthSession: (state: string) =>
-    request(
-      `/api/oauth/sessions/${encodeURIComponent(state)}`,
-    ) as Promise<OAuthSessionInfo>,
-  submitOAuthManualCallback: (state: string, callbackUrl: string) =>
-    request(
-      `/api/oauth/sessions/${encodeURIComponent(state)}/manual-callback`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ callbackUrl }),
-      },
-    ) as Promise<{ success: true }>,
-  getOAuthConnections: (params?: { limit?: number; offset?: number }) =>
-    request(
-      `/api/oauth/connections${buildQueryString(params)}`,
-    ) as Promise<OAuthConnectionsResponse>,
-  refreshOAuthConnectionQuota: (accountId: number) =>
-    request(`/api/oauth/connections/${accountId}/quota/refresh`, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    }) as Promise<{ success: true; quota: OAuthQuotaInfo }>,
-  refreshOAuthConnectionQuotaBatch: (accountIds: number[]) =>
-    request('/api/oauth/connections/quota/refresh-batch', {
-      method: 'POST',
-      body: JSON.stringify({ accountIds }),
-    }) as Promise<OAuthQuotaBatchRefreshResponse>,
-  updateOAuthConnectionProxy: (
-    accountId: number,
-    data: { proxyUrl?: string | null },
-  ) =>
-    request(`/api/oauth/connections/${accountId}/proxy`, {
-      method: 'PATCH',
-      body: JSON.stringify(data || {}),
-    }) as Promise<{ success: true }>,
-  rebindOAuthConnection: (
-    accountId: number,
-    data?: { proxyUrl?: string | null },
-  ) =>
-    request(`/api/oauth/connections/${accountId}/rebind`, {
-      method: 'POST',
-      body: JSON.stringify(data || {}),
-    }) as Promise<OAuthStartResponse>,
-  deleteOAuthConnection: (accountId: number) =>
-    request(`/api/oauth/connections/${accountId}`, {
-      method: 'DELETE',
-    }) as Promise<{ success: true }>,
-  deleteOAuthConnections: (ids: number[]) =>
-    request('/api/oauth/connections/batch-delete', {
-      method: 'POST',
-      body: JSON.stringify({ ids }),
-    }) as Promise<{
-      success: boolean;
-      successIds: number[];
-      failedItems: Array<{ id: number; message: string }>;
-    }>,
-  importOAuthConnections: (data: Record<string, unknown>) =>
-    request('/api/oauth/import', {
-      method: 'POST',
-      body: JSON.stringify(Array.isArray(data.items) ? data : { data }),
-    }) as Promise<OAuthImportResponse>,
-  createOAuthRouteUnit: (data: {
-    accountIds: number[];
-    name: string;
-    strategy: OAuthRouteUnitStrategy;
-  }) =>
-    request('/api/oauth/route-units', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }) as Promise<OAuthRouteUnitMutationResponse>,
-  deleteOAuthRouteUnit: (routeUnitId: number) =>
-    request(`/api/oauth/route-units/${routeUnitId}`, {
-      method: 'DELETE',
-    }) as Promise<{ success: true }>,
-
   // Events
   getEvents: (params?: string) =>
     request<EventsListResponse>(`/api/events${params ? '?' + params : ''}`),
@@ -1544,7 +1288,7 @@ export const api = {
                 const data = JSON.parse(line.slice(6));
                 if (currentEvent === 'result') callbacks.onResult?.(data);
                 else if (currentEvent === 'done') callbacks.onDone?.(data);
-                else if (currentEvent === 'error') callbacks.onError?.(new Error(data?.message || '探测失败'));
+                else if (currentEvent === 'error') callbacks.onError?.(new Error(data?.message || tr('探测失败')));
               } catch {}
             } else if (line === '') {
               currentEvent = '';

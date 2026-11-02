@@ -327,8 +327,22 @@
     {
       "idx": 46,
       "version": "6",
-      "when": 1792199496631,
-      "tag": "0047_proxy_log_token_id",
+      "when": 1792256409491,
+      "tag": "0047_model_availability_health",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1792288409215,
+      "tag": "0048_proxy_logs_token_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "6",
+      "when": 1792902123858,
+      "tag": "0049_drop_oauth_objects",
       "breakpoints": true
     }
   ]

@@ -31,7 +31,6 @@ import { testRoutes } from './routes/api/test.js';
 
 import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { peerRoutes } from './routes/api/peer.js';
-import { oauthRoutes } from './routes/api/oauth.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
 import { updateCenterRoutes } from './routes/api/updateCenter.js';
 import { registerProbeLogsRoutes } from './routes/api/probeLogs.js';
@@ -40,6 +39,7 @@ import { startScheduler, stopScheduler } from './services/checkinScheduler.js';
 import * as routeRefreshWorkflow from './services/routeRefreshWorkflow.js';
 import { startProxyFileRetentionService, stopProxyFileRetentionService } from './services/proxyFileRetentionService.js';
 import { encryptLegacyProxyVideoTaskTokens } from './services/proxyVideoTaskStore.js';
+import { encryptLegacyCredentials } from './services/credentialEncryptionMigration.js';
 import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
@@ -72,8 +72,6 @@ function installProcessCrashHandlers(): void {
 
 installProcessCrashHandlers();
 import { ensureDefaultSitesSeeded } from './services/defaultSiteSeedService.js';
-import { ensureOauthIdentityBackfill } from './services/oauth/oauthIdentityBackfill.js';
-import { startOAuthLoopbackCallbackServers, stopOAuthLoopbackCallbackServers } from './services/oauth/localCallbackServer.js';
 import { startSiteAnnouncementPolling, stopSiteAnnouncementPolling } from './services/siteAnnouncementPollingService.js';
 import {
   startChannelProbeScheduler,
@@ -100,10 +98,6 @@ import {
 } from './services/routeDecisionRefreshScheduler.js';
 import { fanoutSiteWideDisabledModels } from './services/siteDisabledModels.js';
 import { migrateLegacyNotifyChannels } from './services/notifyService.js';
-import {
-  startOauthTokenRefreshScheduler,
-  stopOauthTokenRefreshScheduler,
-} from './services/oauth/oauthRefreshScheduler.js';
 import {
   ensureProxyChannelAffinityLoaded,
 } from './services/proxyChannelCoordinator.js';
@@ -264,7 +258,6 @@ try {
   // converted on the next boot instead of staying on the old semantics.
   await migrateDownstreamKeyExclusionsToAllowLists();
   await ensureDefaultSitesSeeded();
-  await ensureOauthIdentityBackfill();
   await routeRefreshWorkflow.rebuildRoutesOnly();
 
   await ensureProxyChannelAffinityLoaded();
@@ -385,7 +378,6 @@ await app.register(testRoutes);
 
 await app.register(downstreamApiKeysRoutes);
 await app.register(peerRoutes);
-await app.register(oauthRoutes);
 
 // Register probe logs routes
 await app.register(registerProbeLogsRoutes);
@@ -429,6 +421,20 @@ if (migratedVideoTaskTokens > 0) {
   console.info(`[proxy-video-tasks] encrypted ${migratedVideoTaskTokens} legacy task credentials`);
 }
 
+const migratedCredentials = await encryptLegacyCredentials();
+if (migratedCredentials.sealed > 0) {
+  console.info(`[credentials] encrypted ${migratedCredentials.sealed} legacy credential values`);
+}
+if (migratedCredentials.upgraded > 0) {
+  console.info(`[credentials] upgraded ${migratedCredentials.upgraded} v1 envelopes to purpose-scoped keys`);
+}
+if (migratedCredentials.resealed > 0) {
+  console.info(`[credentials] re-sealed ${migratedCredentials.resealed} token rows copied under the account purpose`);
+}
+if (migratedCredentials.unreadable > 0) {
+  console.warn(`[credentials] ${migratedCredentials.unreadable} sealed values could not be opened with the configured secret and were left untouched`);
+}
+
 // Start scheduler
 await startScheduler();
 await reloadBackupWebdavScheduler();
@@ -440,12 +446,6 @@ void finalizeOtaOnBoot();
 startUsageAggregationProjectorScheduler();
 startAdminSnapshotWarmScheduler();
 startRouteDecisionRefreshScheduler();
-startOauthTokenRefreshScheduler();
-try {
-  await startOAuthLoopbackCallbackServers();
-} catch (error) {
-  console.warn(`Failed to start OAuth callback listeners: ${(error as Error)?.message || 'unknown error'}`);
-}
 setLegacyProxyLogRetentionFallbackEnabled(!config.logCleanupConfigured || config.proxyLogRetentionDays > 0);
 startProxyFileRetentionService();
 app.addHook('onClose', async () => {
@@ -460,8 +460,6 @@ app.addHook('onClose', async () => {
   await stopAdminSnapshotWarmScheduler();
   stopRouteDecisionRefreshScheduler();
   await stopSub2ApiManagedRefreshScheduler();
-  await stopOauthTokenRefreshScheduler();
-  await stopOAuthLoopbackCallbackServers();
   stopDispatcherCacheSweep();
 });
 

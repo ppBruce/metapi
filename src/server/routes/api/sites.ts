@@ -7,6 +7,7 @@ import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services
 import { formatUtcSqlDateTime, getLocalDayRangeUtc } from '../../services/localTimeService.js';
 import { getTodayIncomeValue } from '../../services/todayIncomeRewardService.js';
 import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
+import { invalidateModelPricingCache } from '../../services/modelPricingService.js';
 import { scheduleRouteDecisionRefresh } from '../../services/routeDecisionRefreshScheduler.js';
 import { parseSiteParamOverrideInput } from '../../services/siteParamOverride.js';
 import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
@@ -418,9 +419,12 @@ function aggregateSiteSubscription(
 }
 
 export async function sitesRoutes(app: FastifyInstance) {
-  function invalidateSiteCaches() {
+  function invalidateSiteCaches(siteId?: number) {
     invalidateSiteProxyCache();
     invalidateTokenRouterCache();
+    // Site URL/platform edits change the pricing source; without this the old
+    // catalog keeps pricing requests for up to the cache TTL.
+    if (siteId != null) invalidateModelPricingCache({ siteId });
   }
 
   async function applySiteStatusSideEffects(
@@ -550,7 +554,6 @@ export async function sitesRoutes(app: FastifyInstance) {
       balance: schema.accounts.balance,
       balanceUsed: schema.accounts.balanceUsed,
       extraConfig: schema.accounts.extraConfig,
-      oauthProvider: schema.accounts.oauthProvider,
     }).from(schema.accounts).all();
 
     // 获取所有 token 统计
@@ -601,7 +604,6 @@ export async function sitesRoutes(app: FastifyInstance) {
     const accountCountBySiteId: Record<number, number> = {};
     const sessionCountBySiteId: Record<number, number> = {};
     const apiKeyCountBySiteId: Record<number, number> = {};
-    const oauthCountBySiteId: Record<number, number> = {};
     const accountIdToSiteId: Record<number, number> = {};
 
     for (const row of accountRows) {
@@ -617,9 +619,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       totalTodaySpendBySiteId[row.siteId] = roundMetric((totalTodaySpendBySiteId[row.siteId] || 0) + (spendByAccount[row.id] || 0));
       subscriptionBySiteId[row.siteId] = aggregateSiteSubscription(subscriptionBySiteId[row.siteId], row.extraConfig);
       accountCountBySiteId[row.siteId] = (accountCountBySiteId[row.siteId] || 0) + 1;
-      if (row.oauthProvider) {
-        oauthCountBySiteId[row.siteId] = (oauthCountBySiteId[row.siteId] || 0) + 1;
-      } else {
+      {
         const mode = getCredentialModeFromExtraConfig(row.extraConfig);
         if (mode === 'apikey') {
           apiKeyCountBySiteId[row.siteId] = (apiKeyCountBySiteId[row.siteId] || 0) + 1;
@@ -708,7 +708,6 @@ export async function sitesRoutes(app: FastifyInstance) {
         sessions: sessionCountBySiteId[site.id] || 0,
         apiKeys: apiKeyCountBySiteId[site.id] || 0,
         tokens: tokenCountBySiteId[site.id] || 0,
-        oauth: oauthCountBySiteId[site.id] || 0,
       },
       disabledModels: disabledModelsBySiteId[site.id] || null,
     }));
@@ -732,7 +731,6 @@ export async function sitesRoutes(app: FastifyInstance) {
       siteId: schema.accounts.siteId,
       balance: schema.accounts.balance,
       extraConfig: schema.accounts.extraConfig,
-      oauthProvider: schema.accounts.oauthProvider,
     }).from(schema.accounts).where(eq(schema.accounts.siteId, siteId)).all();
 
     const tokenRows = await db.select({
@@ -746,16 +744,13 @@ export async function sitesRoutes(app: FastifyInstance) {
     let accountCount = 0;
     let sessionCount = 0;
     let apiKeyCount = 0;
-    let oauthCount = 0;
     const accountIdToSiteId: Record<number, number> = {};
 
     for (const row of accountRows) {
       totalBalance += Number(row.balance || 0);
       subscriptionSummary = aggregateSiteSubscription(subscriptionSummary, row.extraConfig);
       accountCount += 1;
-      if (row.oauthProvider) {
-        oauthCount += 1;
-      } else {
+      {
         const mode = getCredentialModeFromExtraConfig(row.extraConfig);
         if (mode === 'apikey') {
           apiKeyCount += 1;
@@ -782,7 +777,6 @@ export async function sitesRoutes(app: FastifyInstance) {
         sessions: sessionCount,
         apiKeys: apiKeyCount,
         tokens: tokenCount,
-        oauth: oauthCount,
       },
     };
   });
@@ -1077,7 +1071,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       await applySiteStatusSideEffects(id, existingSite.name, normalizedStatus);
     }
 
-    invalidateSiteCaches();
+    invalidateSiteCaches(id);
     await invalidateAccountsSnapshot();
     // Global weight change affects routing probabilities; schedule a lightweight refresh.
     if (weightChanged) scheduleRouteDecisionRefresh();
@@ -1116,9 +1110,6 @@ export async function sitesRoutes(app: FastifyInstance) {
             .run();
         }
 
-        await tx.delete(schema.oauthRouteUnitMembers)
-          .where(inArray(schema.oauthRouteUnitMembers.accountId, accountIds))
-          .run();
         await tx.delete(schema.routeChannels)
           .where(inArray(schema.routeChannels.accountId, accountIds))
           .run();
@@ -1136,7 +1127,6 @@ export async function sitesRoutes(app: FastifyInstance) {
           .run();
       }
 
-      await tx.delete(schema.oauthRouteUnits).where(eq(schema.oauthRouteUnits.siteId, siteId)).run();
       await tx.delete(schema.siteApiEndpoints).where(eq(schema.siteApiEndpoints.siteId, siteId)).run();
       await tx.delete(schema.siteDisabledModels).where(eq(schema.siteDisabledModels.siteId, siteId)).run();
       await tx.delete(schema.siteAnnouncements).where(eq(schema.siteAnnouncements.siteId, siteId)).run();
@@ -1157,7 +1147,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'Site not found' });
     }
     await deleteSiteAndRelatedData(id);
-    invalidateSiteCaches();
+    invalidateSiteCaches(id);
     return { success: true };
   });
 
@@ -1196,6 +1186,7 @@ export async function sitesRoutes(app: FastifyInstance) {
         if (action === 'delete') {
           // deleteSiteAndRelatedData has cascade deletion — keep sequential.
           await deleteSiteAndRelatedData(id);
+          invalidateModelPricingCache({ siteId: id });
         } else {
           const nextStatus = action === 'enable' ? 'active' : 'disabled';
           await db.update(schema.sites)

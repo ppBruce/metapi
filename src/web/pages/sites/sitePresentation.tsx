@@ -4,8 +4,9 @@
  * format a SiteRow/SubscriptionSummary or render a label.
  */
 
-import { BanIcon, FileTextIcon, GlobeIcon, KeyIcon, SlidersIcon, UnlockIcon, UserIcon } from '../../components/MiniIcons.js';
+import { BanIcon, FileTextIcon, GlobeIcon, KeyIcon, SlidersIcon, UserIcon } from '../../components/MiniIcons.js';
 import HoverPopover from '../../components/HoverPopover.js';
+import { tr } from '../../i18n.js';
 
 export type SiteSubscriptionSummary = {
   activeCount: number;
@@ -77,14 +78,14 @@ export function SiteOutboundFlags(props: {
     <span className="sites-name-flags">
       {hasProxy ? (
         <span className="sites-name-flag">
-          <HoverPopover content="已配置出站代理">
+          <HoverPopover content={tr('已配置出站代理')}>
             <GlobeIcon size={12} />
           </HoverPopover>
         </span>
       ) : null}
       {headerCount > 0 ? (
         <span className="sites-name-flag">
-          <HoverPopover content={`已配置自定义请求头 ${headerCount} 项${customHeadersOverrideRequestHeaders ? '，覆盖上游同名请求头' : ''}`}>
+          <HoverPopover content={`已配置自定义请求头 ${headerCount} 项${customHeadersOverrideRequestHeaders ? tr('，覆盖上游同名请求头') : ''}`}>
             <SlidersIcon size={12} />
           </HoverPopover>
         </span>
@@ -97,7 +98,6 @@ export type SiteConnectionStatsLike = {
   sessions: number;
   apiKeys: number;
   tokens: number;
-  oauth: number;
 };
 
 /** Per-key disabled-model summary carried by the sites list payload. */
@@ -127,12 +127,11 @@ export function SiteConnectionStats(props: {
     ? `禁用模型（按 key）：${disabled.keys
       .map((entry) => `${entry.username || `账号 ${entry.accountId}`} ${entry.count} 个`)
       .join('；')}`
-    : '禁用模型';
+    : tr('禁用模型');
   const markers = [
-    { key: 'sessions', label: 'Session 账号', count: stats?.sessions || 0, Icon: UserIcon },
+    { key: 'sessions', label: tr('Session 账号'), count: stats?.sessions || 0, Icon: UserIcon },
     { key: 'apiKeys', label: 'API Key', count: stats?.apiKeys || 0, Icon: KeyIcon },
-    { key: 'tokens', label: '令牌', count: stats?.tokens || 0, Icon: FileTextIcon },
-    { key: 'oauth', label: 'OAuth', count: stats?.oauth || 0, Icon: UnlockIcon },
+    { key: 'tokens', label: tr('令牌'), count: stats?.tokens || 0, Icon: FileTextIcon },
     { key: 'disabledModels', label: disabledLabel, count: disabled?.total || 0, Icon: BanIcon },
   ].filter((marker) => marker.count > 0);
 
@@ -160,8 +159,8 @@ export function formatUsd(value?: number | null): string {
 
 export function resolveSiteCreatedSessionLabel(platform?: string | null): string {
   const normalized = String(platform || '').trim().toLowerCase();
-  if (normalized === 'codex' || normalized === 'gemini-cli' || normalized === 'antigravity') return '添加 OAuth 连接';
-  return '添加账号（用户名密码登录）';
+  if (normalized === 'codex' || normalized === 'gemini-cli' || normalized === 'antigravity') return tr('添加 Session 凭据');
+  return tr('添加账号（用户名密码登录）');
 }
 
 /**
@@ -193,13 +192,13 @@ export function formatRemainingDuration(value?: string | null): string | null {
   const targetMs = Date.parse(value);
   if (!Number.isFinite(targetMs)) return null;
   const deltaMs = targetMs - Date.now();
-  if (deltaMs <= 0) return '已到期';
+  if (deltaMs <= 0) return tr('已到期');
 
   const minuteMs = 60 * 1000;
   const hourMs = 60 * minuteMs;
   const dayMs = 24 * hourMs;
   if (deltaMs >= dayMs) return `剩余${Math.ceil(deltaMs / dayMs)}天`;
-  if (deltaMs >= hourMs) return `剩余${Math.ceil(deltaMs / hourMs)}小时`;
+  if (deltaMs >= hourMs) return `${tr('剩余')}${Math.ceil(deltaMs / hourMs)}${tr('小时')}`;
   if (deltaMs >= minuteMs) return `剩余${Math.ceil(deltaMs / minuteMs)}分钟`;
   return `剩余${Math.max(1, Math.ceil(deltaMs / 1000))}秒`;
 }
@@ -302,36 +301,6 @@ export function platformBadgeClass(platform?: string | null): string {
   return platformColors[key] || 'badge-muted';
 }
 
-export type OAuthProviderSiteInfo = {
-  platform: string;
-  siteUrl?: string | null;
-};
-
-/**
- * Whether a platform reaches the form via auto-detect or the OAuth flow rather
- * than the manual dropdown. Manual-entry platforms must never resolve to an
- * OAuth provider — that prefills the editor with the provider's own upstream URL.
- */
-export function isOauthFlowPlatform(platform?: string | null): boolean {
-  const normalized = String(platform || '').trim().toLowerCase();
-  if (!normalized) return false;
-  return !SITE_PLATFORM_OPTIONS.some((option) => option.value === normalized);
-}
-
-/**
- * The OAuth provider a platform maps to, or null for manual-entry platforms.
- * One source of truth for the editor's selected-provider lookup and the
- * platform-select prefill guard, so the two cannot drift apart again.
- */
-export function findOauthProviderForPlatform<T extends OAuthProviderSiteInfo>(
-  platform: string | null | undefined,
-  providers: ReadonlyArray<T>,
-): T | null {
-  if (!isOauthFlowPlatform(platform)) return null;
-  const normalized = String(platform || '').trim().toLowerCase();
-  return providers.find((provider) => provider.platform === normalized) || null;
-}
-
 export const platformColors: Record<string, string> = {
   'new-api': 'badge-muted',
   'one-api': 'badge-muted',
@@ -345,12 +314,12 @@ export const platformColors: Record<string, string> = {
 };
 
 export const SITE_PLATFORM_OPTIONS = [
-  { value: '', label: '平台类型（可自动检测）' },
-  { value: 'new-api', label: 'new-api', description: '聚合面板，多渠道统一管理' },
-  { value: 'one-api', label: 'one-api', description: '经典聚合面板，通用 OpenAI 中转' },
-  { value: 'sub2api', label: 'sub2api', description: '订阅式中转面板，可同步套餐与余额' },
-  { value: 'metapi', label: 'metapi', description: '另一个 MetAPI 实例，填下游 key 同步余额与用量' },
-  { value: 'openai', label: 'openai', description: '通用 OpenAI 兼容接口，手填 Base URL' },
-  { value: 'claude', label: 'claude', description: 'Claude / Anthropic 接口，手填 Base URL + API Key' },
-  { value: 'gemini', label: 'gemini', description: '通用 Gemini / Google AI 兼容接口' },
+  { value: '', label: tr('平台类型（可自动检测）') },
+  { value: 'new-api', label: 'new-api', description: tr('聚合面板，多渠道统一管理') },
+  { value: 'one-api', label: 'one-api', description: tr('经典聚合面板，通用 OpenAI 中转') },
+  { value: 'sub2api', label: 'sub2api', description: tr('订阅式中转面板，可同步套餐与余额') },
+  { value: 'metapi', label: 'metapi', description: tr('另一个 MetAPI 实例，填下游 key 同步余额与用量') },
+  { value: 'openai', label: 'openai', description: tr('通用 OpenAI 兼容接口，手填 Base URL') },
+  { value: 'claude', label: 'claude', description: tr('Claude / Anthropic 接口，手填 Base URL + API Key') },
+  { value: 'gemini', label: 'gemini', description: tr('通用 Gemini / Google AI 兼容接口') },
 ];

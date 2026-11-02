@@ -6,6 +6,7 @@ import { formatCompactTokenMetric } from '../numberFormat.js';
 import { useThemeLabelColor } from './useThemeLabelColor.js';
 import { useIsMobile } from './useIsMobile.js';
 import { availabilityRgb, buildHorizontalBarSpec, CHART_BAR_GRADIENTS, formatMoney } from './charts/chartShared.js';
+import { tr } from '../i18n.js';
 
 type TabKey = 'spend' | 'trend' | 'calls' | 'rank';
 
@@ -28,10 +29,10 @@ interface ModelAnalysisPanelProps {
 }
 
 const tabs: Array<{ key: TabKey; label: string; icon: string }> = [
-  { key: 'spend', label: '花费分布', icon: '💰' },
-  { key: 'trend', label: '用量分布', icon: '📊' },
-  { key: 'calls', label: '调用分布', icon: '🔄' },
-  { key: 'rank', label: '模型排行', icon: '🏆' },
+  { key: 'spend', label: tr('花费分布'), icon: '💰' },
+  { key: 'trend', label: tr('用量分布'), icon: '📊' },
+  { key: 'calls', label: tr('调用分布'), icon: '🔄' },
+  { key: 'rank', label: tr('模型排行'), icon: '🏆' },
 ];
 
 function toSafeNumber(value: unknown): number {
@@ -46,8 +47,8 @@ function formatPercent(value: number): string {
 function EmptyBlock() {
   return (
     <div className="empty-state" style={{ padding: 28 }}>
-      <div className="empty-state-title">今日暂无模型调用数据</div>
-      <div className="empty-state-desc">今日有代理流量进入后会自动生成统计图表</div>
+      <div className="empty-state-title">{tr('今日暂无模型调用数据')}</div>
+      <div className="empty-state-desc">{tr('今日有代理流量进入后会自动生成统计图表')}</div>
     </div>
   );
 }
@@ -189,11 +190,11 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
             <thead>
               <tr>
                 <th style={{ width: 36, textAlign: 'center' }}>#</th>
-                <th>模型</th>
-                <th style={{ textAlign: 'center' }}>调用</th>
-                <th style={{ textAlign: 'center' }}>成功率</th>
-                <th style={{ textAlign: 'center' }}>平均延迟</th>
-                <th style={{ textAlign: 'right' }}>消耗</th>
+                <th>{tr('模型')}</th>
+                <th style={{ textAlign: 'center' }}>{tr('调用')}</th>
+                <th style={{ textAlign: 'center' }}>{tr('成功率')}</th>
+                <th style={{ textAlign: 'center' }}>{tr('平均延迟')}</th>
+                <th style={{ textAlign: 'right' }}>{tr('消耗')}</th>
               </tr>
             </thead>
             <tbody>

@@ -67,7 +67,9 @@ describe('backupService', () => {
       customHeaders: JSON.stringify({
         'cf-access-client-id': 'roundtrip-client',
       }),
+      paramOverride: JSON.stringify({ tags: ['roundtrip'] }),
       customHeadersOverrideRequestHeaders: true,
+      protocolProfile: JSON.stringify({ preferMessages: true }),
       status: 'active',
       isPinned: true,
       sortOrder: 9,
@@ -81,9 +83,6 @@ describe('backupService', () => {
       username: 'roundtrip-user',
       accessToken: 'session-token',
       apiToken: 'api-token',
-      oauthProvider: 'codex',
-      oauthAccountKey: 'roundtrip-account-key',
-      oauthProjectId: 'roundtrip-project-id',
       balance: 12.3,
       balanceUsed: 4.5,
       quota: 99.9,
@@ -146,6 +145,7 @@ describe('backupService', () => {
       weight: 5,
       enabled: true,
       manualOverride: false,
+      requestOverrideRules: JSON.stringify({ temperature: 0.2 }),
       successCount: 10,
       failCount: 1,
       totalLatencyMs: 2500,
@@ -205,7 +205,16 @@ describe('backupService', () => {
       usedCost: 11.5,
       maxRequests: 500,
       usedRequests: 33,
+      maxRpm: 60,
+      maxInflight: 4,
+      maxDailyRequests: 1000,
+      maxDailyCost: 5.5,
+      dailyUsedRequests: 7,
+      dailyUsedCost: 1.25,
+      dailyWindowDate: '2026-10-18',
+      sensitiveWordDetection: true,
       supportedModels: '["gpt-4o-mini"]',
+      modelMappings: JSON.stringify([{ from: 'gpt-4o', to: 'gpt-4o-mini' }]),
       allowedRouteIds: `[${route.id}]`,
       siteWeightMultipliers: `{"${site.id}":1.5}`,
       allowedSiteIds: `[${site.id}]`,
@@ -261,6 +270,9 @@ describe('backupService', () => {
     expect(exported.accounts.downstreamApiKeys[0]).not.toHaveProperty('usedCost');
     expect(exported.accounts.downstreamApiKeys[0]).not.toHaveProperty('usedRequests');
     expect(exported.accounts.downstreamApiKeys[0]).not.toHaveProperty('lastUsedAt');
+    expect(exported.accounts.downstreamApiKeys[0]).not.toHaveProperty('dailyUsedRequests');
+    expect(exported.accounts.downstreamApiKeys[0]).not.toHaveProperty('dailyUsedCost');
+    expect(exported.accounts.downstreamApiKeys[0]).not.toHaveProperty('dailyWindowDate');
 
     const result = await backupService.importBackup(exported as Record<string, unknown>);
 
@@ -283,12 +295,11 @@ describe('backupService', () => {
     expect(restoredSite?.customHeadersOverrideRequestHeaders).toBe(true);
     expect(restoredSite?.isPinned).toBe(true);
     expect(restoredSite?.sortOrder).toBe(9);
+    expect(restoredSite?.paramOverride).toBe('{"tags":["roundtrip"]}');
+    expect(restoredSite?.protocolProfile).toBe('{"preferMessages":true}');
 
     expect(restoredAccount?.isPinned).toBe(true);
     expect(restoredAccount?.sortOrder).toBe(7);
-    expect(restoredAccount?.oauthProvider).toBe('codex');
-    expect(restoredAccount?.oauthAccountKey).toBe('roundtrip-account-key');
-    expect(restoredAccount?.oauthProjectId).toBe('roundtrip-project-id');
 
     expect(restoredRoute?.displayName).toBe('gpt-route');
     expect(restoredRoute?.displayIcon).toBe('icon-gpt');
@@ -299,6 +310,7 @@ describe('backupService', () => {
     expect(restoredGroupSource?.sourceRouteId).toBe(sourceRoute.id);
 
     expect(restoredChannel?.sourceModel).toBe('gpt-4o');
+    expect(restoredChannel?.requestOverrideRules).toBe('{"temperature":0.2}');
     expect(restoredDisabledModels).toEqual([
       expect.objectContaining({ siteId: site.id, modelName: 'gpt-hidden' }),
     ]);
@@ -316,7 +328,16 @@ describe('backupService', () => {
         usedCost: 11.5,
         maxRequests: 500,
         usedRequests: 33,
+        maxRpm: 60,
+        maxInflight: 4,
+        maxDailyRequests: 1000,
+        maxDailyCost: 5.5,
+        dailyUsedRequests: 7,
+        dailyUsedCost: 1.25,
+        dailyWindowDate: '2026-10-18',
+        sensitiveWordDetection: true,
         supportedModels: '["gpt-4o-mini"]',
+        modelMappings: '[{"from":"gpt-4o","to":"gpt-4o-mini"}]',
         allowedRouteIds: `[${route.id}]`,
         siteWeightMultipliers: `{"${site.id}":1.5}`,
         allowedSiteIds: `[${site.id}]`,
@@ -1449,82 +1470,6 @@ describe('backupService', () => {
     } finally {
       fetchSpy.mockRestore();
     }
-  });
-
-  it('backfills oauth columns from extraConfig when importing older backups', async () => {
-    const payload = {
-      timestamp: Date.now(),
-      accounts: {
-        sites: [
-          {
-            id: 1,
-            name: 'codex-site',
-            url: 'https://codex.example.com',
-            platform: 'chatgpt-account',
-            proxyUrl: null,
-            status: 'active',
-            isPinned: false,
-            sortOrder: 0,
-            apiKey: null,
-            createdAt: '2026-03-01T00:00:00.000Z',
-            updatedAt: '2026-03-01T00:00:00.000Z',
-            externalCheckinUrl: null,
-            useSystemProxy: false,
-            globalWeight: 1,
-            customHeaders: null,
-          },
-        ],
-        accounts: [
-          {
-            id: 10,
-            siteId: 1,
-            username: 'oauth-user',
-            accessToken: 'oauth-access-token',
-            apiToken: null,
-            balance: 0,
-            balanceUsed: 0,
-            quota: 0,
-            unitCost: null,
-            valueScore: 0,
-            status: 'active',
-            isPinned: false,
-            sortOrder: 0,
-            checkinEnabled: true,
-            lastCheckinAt: null,
-            lastBalanceRefresh: null,
-            extraConfig: JSON.stringify({
-              credentialMode: 'session',
-              oauth: {
-                provider: 'gemini-cli',
-                accountId: 'oauth-user@example.com',
-                accountKey: 'oauth-user@example.com',
-                projectId: 'oauth-project-id',
-                refreshToken: 'oauth-refresh-token',
-              },
-            }),
-            createdAt: '2026-03-01T00:00:00.000Z',
-            updatedAt: '2026-03-01T00:00:00.000Z',
-            oauthProvider: null,
-            oauthAccountKey: null,
-            oauthProjectId: null,
-          },
-        ],
-        accountTokens: [],
-        tokenRoutes: [],
-        routeChannels: [],
-      },
-    } as Record<string, unknown>;
-
-    const result = await backupService.importBackup(payload);
-
-    expect(result.allImported).toBe(true);
-    expect(result.sections.accounts).toBe(true);
-
-    const restoredAccount = await db.select().from(schema.accounts).where(eq(schema.accounts.id, 10)).get();
-
-    expect(restoredAccount?.oauthProvider).toBe('gemini-cli');
-    expect(restoredAccount?.oauthAccountKey).toBe('oauth-user@example.com');
-    expect(restoredAccount?.oauthProjectId).toBe('oauth-project-id');
   });
 
   it('exports configured backup payload to webdav and records sync state', async () => {

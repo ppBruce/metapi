@@ -2,6 +2,7 @@ import React from 'react';
 import CenteredModal from '../../components/CenteredModal.js';
 import { StatusPill } from '../../components/StatusText.js';
 import { fuzzyMatch } from '../helpers/fuzzySearch.js';
+import { tr } from '../../i18n.js';
 
 type AccountModelRow = {
   name: string;
@@ -12,6 +13,7 @@ type AccountModelRow = {
 
 type AccountModelModalState = {
   open: boolean;
+  newModelPolicy?: 'auto' | 'disable';
   account: any | null;
   models: AccountModelRow[];
   pendingDisabled: Set<string>;
@@ -29,6 +31,7 @@ type AccountModelsModalProps = {
   onSave: () => void;
   onRefresh: () => Promise<void> | void;
   onToggleModelDisabled: (modelName: string) => void;
+  onNewModelPolicyChange: (policy: 'auto' | 'disable') => void;
   onSetPendingDisabled: (pendingDisabled: Set<string>) => void;
   onManualInputChange: (value: string) => void;
   onAddManualModels: () => Promise<void> | void;
@@ -43,6 +46,7 @@ export default function AccountModelsModal({
   onSave,
   onRefresh,
   onToggleModelDisabled,
+  onNewModelPolicyChange,
   onSetPendingDisabled,
   onManualInputChange,
   onAddManualModels,
@@ -59,17 +63,17 @@ export default function AccountModelsModal({
     <CenteredModal
       open={modelModal.open}
       onClose={onClose}
-      title={modelModal.siteName ? `模型管理 · ${modelModal.siteName}` : '模型管理'}
+      title={modelModal.siteName ? `模型管理 · ${modelModal.siteName}` : tr('模型管理')}
       maxWidth={600}
       footer={(
         <>
-          <button onClick={onClose} className="btn btn-ghost">取消</button>
+          <button onClick={onClose} className="btn btn-ghost">{tr('取消')}</button>
           <button
             onClick={onSave}
             disabled={modelModal.saving || modelModal.loading}
             className="btn btn-primary"
           >
-            {modelModal.saving ? <><span className="spinner spinner-sm" />保存中...</> : '保存'}
+            {modelModal.saving ? <><span className="spinner spinner-sm" />{tr('保存中...')}</> : tr('保存')}
           </button>
         </>
       )}
@@ -77,21 +81,52 @@ export default function AccountModelsModal({
       {modelModal.loading ? (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '48px 0', gap: 10 }}>
           <span className="spinner" />
-          <span style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>加载模型列表...</span>
+          <span style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>{tr('加载模型列表...')}</span>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              flexWrap: 'wrap',
+              padding: '6px 8px',
+              border: '1px solid var(--color-border-light)',
+              borderRadius: 8,
+            }}
+          >
+            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('上游新增模型：')}</span>
+            {(['auto', 'disable'] as const).map((policy) => (
+              <button
+                key={policy}
+                className="btn btn-ghost"
+                style={{
+                  fontSize: 12,
+                  padding: '2px 10px',
+                  border: `1px solid ${modelModal.newModelPolicy === policy ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                  color: modelModal.newModelPolicy === policy ? 'var(--color-primary)' : undefined,
+                }}
+                onClick={() => onNewModelPolicyChange(policy)}
+              >
+                {policy === 'auto' ? tr('自动启用') : tr('自动禁用')}
+              </button>
+            ))}
+            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+              {modelModal.newModelPolicy === 'disable'
+                ? tr('刷新发现新模型时自动保持禁用，直到你手动启用')
+                : tr('刷新发现的新模型立即启用（默认）')}
+            </span>
+          </div>
           {modelModal.models.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '32px 0' }}>
               <div style={{ fontSize: 32, marginBottom: 8 }}>🤖</div>
-              <div style={{ fontSize: 14, color: 'var(--color-text-muted)', marginBottom: 8 }}>暂无可用模型</div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 16 }}>请先点击账号操作栏中的「刷新」或「模型」按钮获取模型</div>
+              <div style={{ fontSize: 14, color: 'var(--color-text-muted)', marginBottom: 8 }}>{tr('暂无可用模型')}</div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 16 }}>{tr('请先点击账号操作栏中的「刷新」或「模型」按钮获取模型')}</div>
               <button
                 onClick={() => void onRefresh()}
                 className="btn btn-soft-primary"
-              >
-                立即获取模型
-              </button>
+              >{tr('立即获取模型')}</button>
             </div>
           ) : (
             <>
@@ -119,8 +154,7 @@ export default function AccountModelsModal({
                     }}
                     style={{ accentColor: 'var(--color-primary)', width: 15, height: 15 }}
                   />
-                  <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    已启用 <strong style={{ color: 'var(--color-text-primary)' }}>{enabledCount}</strong> / {modelModal.models.length} 个模型
+                  <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{tr('已启用')} <strong style={{ color: 'var(--color-text-primary)' }}>{enabledCount}</strong> / {modelModal.models.length} 个模型
                   </span>
                 </label>
                 <div style={{ display: 'flex', gap: 6 }}>
@@ -130,7 +164,7 @@ export default function AccountModelsModal({
                     className="btn btn-ghost"
                     style={{ fontSize: 12, padding: '4px 10px' }}
                   >
-                    刷新模型
+                    {tr('刷新模型')}
                   </button>
                   <button
                     onClick={() => {
@@ -142,23 +176,17 @@ export default function AccountModelsModal({
                     }}
                     className="btn btn-ghost"
                     style={{ fontSize: 12, padding: '4px 10px' }}
-                  >
-                    反选
-                  </button>
+                  >{tr('反选')}</button>
                   <button
                     onClick={() => onSetPendingDisabled(new Set(modelModal.models.map((model) => model.name)))}
                     className="btn btn-ghost"
                     style={{ fontSize: 12, padding: '4px 10px' }}
-                  >
-                    全部禁用
-                  </button>
+                  >{tr('全部禁用')}</button>
                   <button
                     onClick={() => onSetPendingDisabled(new Set())}
                     className="btn btn-ghost"
                     style={{ fontSize: 12, padding: '4px 10px' }}
-                  >
-                    全部启用
-                  </button>
+                  >{tr('全部启用')}</button>
                 </div>
               </div>
 
@@ -166,7 +194,7 @@ export default function AccountModelsModal({
                 <input
                   value={modelSearch}
                   onChange={(e) => setModelSearch(e.target.value)}
-                  placeholder="搜索模型（支持模糊匹配）"
+                  placeholder={tr('搜索模型（支持模糊匹配）')}
                   style={{ ...inputStyle, flex: 1, minWidth: 0, padding: '8px 10px', fontSize: 12 }}
                 />
                 {searchQuery ? (
@@ -180,7 +208,7 @@ export default function AccountModelsModal({
                   className="btn btn-ghost"
                   style={{ fontSize: 12, padding: '4px 10px', whiteSpace: 'nowrap' }}
                 >
-                  清空
+                  {tr('清空')}
                 </button>
               </div>
 
@@ -192,7 +220,7 @@ export default function AccountModelsModal({
               }}>
                 {searchQuery && filteredModels.length === 0 ? (
                   <div style={{ padding: '24px 14px', textAlign: 'center', fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    没有匹配的模型
+                    {tr('没有匹配的模型')}
                   </div>
                 ) : filteredModels.map((model, idx) => {
                   const isDisabled = modelModal.pendingDisabled.has(model.name);
@@ -226,7 +254,7 @@ export default function AccountModelsModal({
                         </span>
                       ) : null}
                       {model.isManual ? (
-                        <StatusPill tone="info" style={{ fontSize: 10, flexShrink: 0, padding: '0 4px' }}>手动</StatusPill>
+                        <StatusPill tone="info" style={{ fontSize: 10, flexShrink: 0, padding: '0 4px' }}>{tr('手动')}</StatusPill>
                       ) : null}
                       {model.isManual ? (
                         <button
@@ -236,7 +264,7 @@ export default function AccountModelsModal({
                             void onRemoveManualModel(model.name);
                           }}
                           disabled={removingManualModelName !== null}
-                          title="删除该手动模型"
+                          title={tr('删除该手动模型')}
                           className="btn btn-soft-danger"
                           style={{
                             fontSize: 10,
@@ -246,30 +274,26 @@ export default function AccountModelsModal({
                             lineHeight: '16px',
                           }}
                         >
-                          {removingManualModelName === model.name ? <span className="spinner spinner-sm" /> : '删除'}
+                          {removingManualModelName === model.name ? <span className="spinner spinner-sm" /> : tr('删除')}
                         </button>
                       ) : null}
                       {isDisabled ? (
-                        <StatusPill tone="danger" style={{ fontSize: 10, flexShrink: 0 }}>禁用</StatusPill>
+                        <StatusPill tone="danger" style={{ fontSize: 10, flexShrink: 0 }}>{tr('禁用')}</StatusPill>
                       ) : null}
                     </label>
                   );
                 })}
               </div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                💡 禁用的模型只对这个 key 生效，同一站点的其他 key 不受影响。
-              </div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>{tr('💡 禁用的模型只对这个 key 生效，同一站点的其他 key 不受影响。')}</div>
             </>
           )}
 
           <div style={{ marginTop: 16, padding: '12px', background: 'var(--color-bg-inset)', border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: 'var(--color-text-primary)' }}>手动添加可用模型</div>
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-              如果您的账号支持某些未在上方列表中显示的模型，可以在此手动添加（多个以英文逗号分隔）。
-            </div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: 'var(--color-text-primary)' }}>{tr('手动添加可用模型')}</div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>{tr('如果您的账号支持某些未在上方列表中显示的模型，可以在此手动添加（多个以英文逗号分隔）。')}</div>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
-                placeholder="例如: gpt-4-custom, claude-3-5-sonnet-20241022"
+                placeholder={tr('例如: gpt-4-custom, claude-3-5-sonnet-20241022')}
                 value={modelModal.manualModelsInput}
                 onChange={(e) => onManualInputChange(e.target.value)}
                 style={{ ...inputStyle, flex: 1, fontFamily: 'var(--font-mono)' }}
@@ -285,7 +309,7 @@ export default function AccountModelsModal({
                 className="btn btn-primary btn-sm"
                 style={{ whiteSpace: 'nowrap' }}
               >
-                {modelModal.addingManualModels ? <span className="spinner spinner-sm" /> : '添加'}
+                {modelModal.addingManualModels ? <span className="spinner spinner-sm" /> : tr('添加')}
               </button>
             </div>
           </div>

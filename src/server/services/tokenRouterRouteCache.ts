@@ -11,16 +11,13 @@ import { eq, inArray } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { config } from '../config.js';
 import type { ChannelRow, RouteMatch, RouteRow } from './tokenRouterTypes.js';
+import { invalidateModelsSurfaceCache } from './modelsSurfaceCache.js';
 import {
   isExplicitGroupRoute,
   normalizeChannelSourceModel,
   normalizeRouteMode,
 } from './tokenRouterModelMatching.js';
 import { isExactRouteModelPattern } from './tokenRouterModelPatterns.js';
-import {
-  listOauthRouteUnitMembersByUnitIds,
-  loadOauthRouteUnitSummariesByIds,
-} from './oauth/routeUnitService.js';
 import {
   getStableFirstLastSelectedSiteByKey,
   getStableFirstObservationProgressByKey,
@@ -150,16 +147,6 @@ export async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promi
         .all()
       : [];
 
-    const oauthRouteUnitIds: number[] = Array.from(new Set<number>(
-      channels
-        .map((row: any) => Number(row.route_channels.oauthRouteUnitId))
-        .filter((id: any): id is number => Number.isFinite(id) && id > 0),
-    ));
-    const [routeUnitSummaries, routeUnitMembersByUnitId] = await Promise.all([
-      loadOauthRouteUnitSummariesByIds(oauthRouteUnitIds),
-      listOauthRouteUnitMembersByUnitIds(oauthRouteUnitIds),
-    ]);
-
     const mapped = channels.map((row: any) => ({
       channel: {
         ...row.route_channels,
@@ -170,17 +157,6 @@ export async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promi
       account: row.accounts,
       site: row.sites,
       token: row.account_tokens,
-      routeUnit: row.route_channels.oauthRouteUnitId
-        ? (routeUnitSummaries.get(row.route_channels.oauthRouteUnitId) || null)
-        : null,
-      routeUnitMembers: row.route_channels.oauthRouteUnitId
-        ? (routeUnitMembersByUnitId.get(row.route_channels.oauthRouteUnitId) || []).map((member) => ({
-          member: member.member,
-          account: member.account,
-          site: member.site,
-          token: null,
-        }))
-        : [],
     }));
 
     const match = { route, channels: mapped };
@@ -239,6 +215,10 @@ export function invalidateTokenRouterCache(): void {
     loadedAt: 0,
     routes: [],
   };
+  // /v1/models listings are derived from route availability: any invalidation
+  // that can add/remove models or flip channel availability must also drop the
+  // response cache.
+  invalidateModelsSurfaceCache();
   routeMatchCache.clear();
   getStableFirstLastSelectedSiteByKey().clear();
   getStableFirstObservationProgressByKey().clear();

@@ -1,12 +1,28 @@
-﻿import { and, eq } from 'drizzle-orm';
+﻿import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { config } from '../config.js';
 import { refreshModelPricingCatalog } from './modelPricingService.js';
 
 import { type SiteRuntimeFailureContext } from './siteFailureClassification.js';
 
-import type { RouteChannelCandidate, RouteMatch, RouteRow } from './tokenRouterTypes.js';
-import { compareNullableTimeAsc, compareNullableTimeDesc } from './tokenRouterMath.js';
+import type {
+  CandidateEligibilityReason,
+  ExplainSelectionOptions,
+  RouteChannelCandidate,
+  RouteDecisionExplanation,
+  RouteMatch,
+} from './tokenRouterTypes.js';
+
+// Compatibility re-export: these types used to be declared here and a few
+// call sites still name `tokenRouter.js` as their source.
+export type {
+  CandidateEligibilityOptions,
+  CandidateEligibilityReason,
+  ExplainSelectionOptions,
+  RouteDecisionExplanation,
+  WeightedSelectionMode,
+  WeightedSelectionResult,
+} from './tokenRouterTypes.js';
 import {
   buildStableFirstPoolPlan,
   shouldUseStableFirstObservationCandidate,
@@ -38,9 +54,8 @@ import { filterRecentlyFailedCandidates, isChannelRecentlyFailed } from './token
 // Kept on this module's public surface: both were exported from here before the
 // failure policy moved out, and callers (and their tests) import them from here.
 export { filterRecentlyFailedCandidates, isChannelRecentlyFailed } from './tokenRouterFailurePolicy.js';
-import { isOauthRouteUnitCandidate, resolveRouteStrategy } from './tokenRouterCandidateHelpers.js';
+import { resolveRouteStrategy } from './tokenRouterCandidateHelpers.js';
 import {
-  invalidateRouteScopedCache,
   loadEnabledRoutes,
   loadRouteMatch,
   patchCachedChannel,
@@ -58,13 +73,11 @@ import {
   normalizeChannelSourceModel,
   resolveMappedModel,
   resolveModelResolution,
-  type ModelResolution,
 } from './tokenRouterModelMatching.js';
 import { isExactRouteModelPattern, matchesModelPattern } from './tokenRouterModelPatterns.js';
 import {
   formatShadowSelectionLog,
   rankShadowCandidates,
-  type ShadowCandidateInput,
 } from './routeScoringShadow.js';
 
 import {
@@ -74,8 +87,6 @@ import {
   type ConnectivityLookup,
   type ConnectivitySignal,
 } from './routeConnectivityLookup.js';
-
-import { type RouteDecision, type RouteDecisionReasonCode } from '../../shared/tokenRouteContract.js';
 
 interface SelectedChannel {
   channel: typeof schema.routeChannels.$inferSelect;
@@ -90,13 +101,6 @@ interface SelectedChannel {
 // 余额/配额耗尽（"Insufficient Balance" 等）的固定冷却：这类状态只能靠充值或
 // 人工解除，恢复探测对它无效。用一个小时量级的固定冷却把渠道从探测池里摘出去，
 // 同时保留路由层 1 小时后自动复检一次的机会（与「冷却上限 1 小时」的约定一致）。
-
-export type WeightedSelectionMode = 'weighted' | 'stable_first';
-export type WeightedSelectionResult = {
-  selected: RouteChannelCandidate | null;
-  details: Array<{ candidate: RouteChannelCandidate; probability: number; reason: string }>;
-  stableSiteCount: number;
-};
 
 const boundedGapStates = new Map<string, BoundedGapState>();
 attachBoundedGapStateMap(boundedGapStates);
@@ -118,23 +122,6 @@ function getBoundedGapState(requestedModel: string, siteId: number, channelId?: 
   enforceBoundedGapStateLimit();
   return state;
 }
-
-export type RouteDecisionExplanation = RouteDecision & {
-  routeId?: number;
-  modelPattern?: string;
-  selectedAccountId?: number;
-  modelResolution?: ModelResolution;
-};
-
-export type ExplainSelectionOptions = {
-  excludeChannelIds?: number[];
-  bypassSourceModelCheck?: boolean;
-  useChannelSourceModelForCost?: boolean;
-  downstreamPolicy?: DownstreamRoutingPolicy;
-  /** Request's estimated context requirement — mirrors the live selection
-   * filter so the decision snapshot and the real choice agree. */
-  requiredContextTokens?: number;
-};
 
 /**
  * Options for concurrency-spread selection: pick a different channel while the
@@ -158,27 +145,6 @@ type PricingReferenceRefreshOptions = {
   refreshedKeys?: Set<string>;
 };
 
-export type CandidateEligibilityReason = {
-  code: RouteDecisionReasonCode;
-  message: string;
-  details?: Record<string, unknown>;
-};
-
-export type CandidateEligibilityOptions = {
-  requestedModel: string;
-  bypassSourceModelCheck?: boolean;
-  excludeChannelIds?: number[];
-  nowIso?: string;
-  downstreamPolicy?: DownstreamRoutingPolicy;
-  /** Request's estimated context requirement (input + output budget + margin). */
-  requiredContextTokens?: number;
-  /** Availability-first: relax a cooldown that came from a HEALTH PROBE when it
-   * would be the only reason the candidate set is empty. Real-failure and
-   * credential-scoped cooldowns stay hard exclusions (see
-   * isProbeAttributableCooldown). */
-  ignoreProbeCooldown?: boolean;
-};
-
 import {
   STICKY_PREFERRED_YIELD_LOW_COVERAGE,
   resolvePreferredBalanceCoverage,
@@ -194,17 +160,14 @@ import {
 } from './tokenRouterFailureRecording.js';
 import {
   DEFAULT_DOWNSTREAM_POLICY,
-  buildRouteUnitMemberDispatchCandidate,
   buildShadowCandidateInputs,
   buildStableFirstRotationKey,
   calculateWeightedSelection,
   explainSelectionFromMatch,
   getCandidateEligibilityReasons,
-  getEligibleRouteUnitMembers,
   getRoundRobinCandidates,
   isKeylessApiConnection,
   resolveChannelTokenValue,
-  resolveRouteUnitMemberTokenValue,
 } from './tokenRouterSelectionEngine.js';
 
 export {
@@ -222,6 +185,22 @@ export {
   resetSiteRuntimeHealthState,
 } from './tokenRouterRuntimeHealthStore.js';
 import { recordNoChannelDiagnostic } from './proxyNoChannelDiagnostics.js';
+
+/**
+ * Number of literal characters in a route pattern: `*`, `?` and `re:` syntax
+ * do not pin a model down, so a pattern with more literals is the more
+ * specific match. Used to order pattern candidates; `*` scores 0 and becomes
+ * the last resort.
+ */
+function patternSpecificity(modelPattern: string): number {
+  const pattern = (modelPattern || '').trim();
+  if (pattern.startsWith('re:')) return pattern.length;
+  let literals = 0;
+  for (const ch of pattern) {
+    if (ch !== '*' && ch !== '?') literals += 1;
+  }
+  return literals;
+}
 
 export class TokenRouter {
   /**
@@ -276,7 +255,7 @@ export class TokenRouter {
     const nowIso = new Date().toISOString();
     const requestedByDisplayName = isRouteDisplayNameMatch(effectiveModel, match.route.displayName);
     const countWith = (contextTokens?: number): number => match.channels.filter((candidate) => (
-      this.getCandidateEligibilityReasons(candidate, {
+      getCandidateEligibilityReasons(candidate, {
         requestedModel: effectiveModel,
         bypassSourceModelCheck: requestedByDisplayName,
         excludeChannelIds,
@@ -406,7 +385,7 @@ export class TokenRouter {
     await ensureSiteRuntimeHealthStateLoaded();
     await ensureSiteContextCapabilityLoaded();
     const match = await this.findRoute(requestedModel, downstreamPolicy);
-    return await this.explainSelectionFromMatch(match, requestedModel, {
+    return await explainSelectionFromMatch(match, requestedModel, {
       excludeChannelIds,
       downstreamPolicy,
       ...options,
@@ -421,14 +400,14 @@ export class TokenRouter {
   ): Promise<RouteDecisionExplanation> {
     await ensureSiteRuntimeHealthStateLoaded();
     const match = await this.findRouteById(routeId, downstreamPolicy);
-    return await this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
+    return await explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
   }
 
   async explainSelectionRouteWide(routeId: number, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<RouteDecisionExplanation> {
     await ensureSiteRuntimeHealthStateLoaded();
     const match = await this.findRouteById(routeId, downstreamPolicy);
     const fallbackRequestedModel = match?.route.modelPattern || `route:${routeId}`;
-    return await this.explainSelectionFromMatch(match, fallbackRequestedModel, {
+    return await explainSelectionFromMatch(match, fallbackRequestedModel, {
       bypassSourceModelCheck: true,
       useChannelSourceModelForCost: true,
       downstreamPolicy,
@@ -465,10 +444,6 @@ export class TokenRouter {
       ...options,
       useChannelSourceModelForCost: true,
     });
-  }
-
-    private async explainSelectionFromMatch(match: RouteMatch | null, requestedModel: string, options: ExplainSelectionOptions = {}) : Promise<RouteDecisionExplanation> {
-    return explainSelectionFromMatch(match, requestedModel, options);
   }
 
   private async refreshPricingReferenceCostsForMatch(
@@ -510,12 +485,12 @@ export class TokenRouter {
     }));
   }
 
-  async recordSuccess(channelId: number, latencyMs: number, cost: number, modelName?: string | null, actualAccountId?: number) {
-    return recordSuccess(channelId, latencyMs, cost, modelName, actualAccountId);
+  async recordSuccess(channelId: number, latencyMs: number, cost: number, modelName?: string | null) {
+    return recordSuccess(channelId, latencyMs, cost, modelName);
   }
 
-    async recordProbeSuccess(channelId: number, latencyMs: number, modelName?: string | null, actualAccountId?: number) {
-    return recordProbeSuccess(channelId, latencyMs, modelName, actualAccountId);
+  async recordProbeSuccess(channelId: number, latencyMs: number, modelName?: string | null) {
+    return recordProbeSuccess(channelId, latencyMs, modelName);
   }
 
   async recordProbeFailure(channelId: number, options: { inconclusive?: boolean; quotaExhausted?: boolean } = {}, nowMs: number = Date.now()) {
@@ -526,8 +501,8 @@ export class TokenRouter {
     return clearChannelFailureState(channelIds);
   }
 
-  async recordFailure(channelId: number, context: SiteRuntimeFailureContext | string | null = {}, actualAccountId?: number) {
-    return recordFailure(channelId, context, actualAccountId);
+  async recordFailure(channelId: number, context: SiteRuntimeFailureContext | string | null = {}) {
+    return recordFailure(channelId, context);
   }
 
   async clearFailureCooldown(channelId: number) : Promise<void> {
@@ -547,10 +522,6 @@ export class TokenRouter {
 
   // --- Private methods ---
 
-    private buildShadowCandidateInputs(candidates: RouteChannelCandidate[], modelName: string | ((candidate: RouteChannelCandidate) => string), downstreamPolicy: DownstreamRoutingPolicy, nowMs: number, connectivityLookup?: ConnectivityLookup | null, requestedModel?: string) : ShadowCandidateInput[] {
-    return buildShadowCandidateInputs(candidates, modelName, downstreamPolicy, nowMs, connectivityLookup, requestedModel);
-  }
-
   /**
    * Live balanced-v2 selection (formerly shadow-only).
    * Default: stable top-1 pick. Small exploration rate keeps long-term discovery
@@ -567,7 +538,7 @@ export class TokenRouter {
     if (candidates.length === 0) return null;
     if (candidates.length === 1) return candidates[0] ?? null;
     try {
-      const inputs = this.buildShadowCandidateInputs(
+      const inputs = buildShadowCandidateInputs(
         candidates,
         modelName,
         downstreamPolicy,
@@ -643,7 +614,7 @@ export class TokenRouter {
     // Kept for non-weighted strategies (round_robin/stable_first) observability only.
     try {
       if (candidates.length === 0) return;
-      const inputs = this.buildShadowCandidateInputs(
+      const inputs = buildShadowCandidateInputs(
         candidates,
         modelName,
         downstreamPolicy,
@@ -712,7 +683,7 @@ export class TokenRouter {
           requiredContextTokens: undefined,
           ...(variant === 'no-context-probe-ok' ? { ignoreProbeCooldown: true } : {}),
         };
-      const reasons = this.getCandidateEligibilityReasons(candidate, options);
+      const reasons = getCandidateEligibilityReasons(candidate, options);
       eligibilityCache.set(cacheKey, reasons);
       return reasons;
     };
@@ -808,7 +779,7 @@ export class TokenRouter {
         );
         if (!hasFreshCandidate && layerIndex < sortedPriorities.length - 1) continue;
         const candidates = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
-        const selected = this.selectRoundRobinCandidate(candidates);
+        const selected = getRoundRobinCandidates(candidates)[0] ?? null;
         if (!selected) continue;
         const resolvedRoundRobin = await this.finalizeSelectedCandidateForDispatch(
           selected,
@@ -842,7 +813,7 @@ export class TokenRouter {
     if (routeStrategy === 'stable_first') {
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(routePool, runtimeModelResolver, nowMs);
       const candidates = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
-      const rotationKey = this.buildStableFirstRotationKey(match.route.id, requestedModel);
+      const rotationKey = buildStableFirstRotationKey(match.route.id, requestedModel);
       const poolPlan = buildStableFirstPoolPlan(
         candidates,
         requestedByDisplayName ? runtimeModelResolver : mappedModel,
@@ -861,13 +832,14 @@ export class TokenRouter {
       const selectionPool = shouldUseObservation
         ? poolPlan.observationCandidates
         : (poolPlan.primaryCandidates.length > 0 ? poolPlan.primaryCandidates : poolPlan.observationCandidates);
-      const selected = this.stableFirstSelect(
+      const selected = calculateWeightedSelection(
         selectionPool,
         requestedByDisplayName ? runtimeModelResolver : mappedModel,
         downstreamPolicy,
         nowMs,
+        'stable_first',
         shouldUseObservation ? `${rotationKey}:observe` : rotationKey,
-      );
+      ).selected;
       if (!selected) return null;
       const resolvedStable = await this.finalizeSelectedCandidateForDispatch(
         selected,
@@ -914,7 +886,7 @@ export class TokenRouter {
       );
       // A fully cooling-down layer must not block lower-priority layers: the
       // fallback in filterRecentlyFailedCandidates would otherwise return the
-      // whole pool and weightedRandomSelect would burn a hop on a channel that
+      // whole pool and selectByBalancedV2 would burn a hop on a channel that
       // just failed. Only the last layer keeps the least-bad fallback when
       // nothing fresh exists anywhere in the route.
       if (layerCandidates.length > 0
@@ -923,12 +895,13 @@ export class TokenRouter {
         continue;
       }
       const candidates = filterRecentlyFailedCandidates(layerCandidates, nowMs);
-      const selected = this.weightedRandomSelect(
+      const selectionModelName = requestedByDisplayName ? runtimeModelResolver : mappedModel;
+      const selected = this.selectByBalancedV2(
         candidates,
-        requestedByDisplayName ? runtimeModelResolver : mappedModel,
+        selectionModelName,
         downstreamPolicy,
         nowMs,
-        requestedModel,
+        requestedModel || (typeof selectionModelName === 'string' ? selectionModelName : ''),
         connectivityLookup,
       );
       if (!selected) continue;
@@ -981,7 +954,7 @@ export class TokenRouter {
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
     const available = match.channels.filter((candidate) => (
-      this.getCandidateEligibilityReasons(candidate, {
+      getCandidateEligibilityReasons(candidate, {
         requestedModel,
         bypassSourceModelCheck,
         excludeChannelIds,
@@ -1048,7 +1021,7 @@ export class TokenRouter {
 
     const selected = breakerFiltered.candidates.find((candidate) => candidate.channel.id === preferredChannelId);
     if (!selected) return null;
-    if (!isOauthRouteUnitCandidate(selected) && routeStrategy !== 'round_robin' && isChannelRecentlyFailed(selected.channel, nowMs)) {
+    if (routeStrategy !== 'round_robin' && isChannelRecentlyFailed(selected.channel, nowMs)) {
       return null;
     }
     return await this.finalizeSelectedCandidateForDispatch(
@@ -1060,8 +1033,8 @@ export class TokenRouter {
       recordSelection && (routeStrategy === 'round_robin' || routeStrategy === 'stable_first'),
       nowIso,
       nowMs,
-      routeStrategy === 'stable_first' ? this.buildStableFirstRotationKey(match.route.id, requestedModel) : undefined,
-      routeStrategy === 'stable_first' ? `${this.buildStableFirstRotationKey(match.route.id, requestedModel)}:observe` : undefined,
+      routeStrategy === 'stable_first' ? buildStableFirstRotationKey(match.route.id, requestedModel) : undefined,
+      routeStrategy === 'stable_first' ? `${buildStableFirstRotationKey(match.route.id, requestedModel)}:observe` : undefined,
       false,
       excludeChannelIds,
     );
@@ -1091,7 +1064,7 @@ export class TokenRouter {
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
     const available = match.channels.filter((candidate) => (
-      this.getCandidateEligibilityReasons(candidate, {
+      getCandidateEligibilityReasons(candidate, {
         requestedModel,
         bypassSourceModelCheck: requestedByDisplayName,
         excludeChannelIds,
@@ -1135,7 +1108,7 @@ export class TokenRouter {
 
     const picked = finalPool.length === 1
       ? finalPool[0]
-      : this.weightedRandomSelect(finalPool, runtimeModelResolver, downstreamPolicy, nowMs, requestedModel);
+      : this.selectByBalancedV2(finalPool, runtimeModelResolver, downstreamPolicy, nowMs, requestedModel);
     if (!picked) return null;
 
     // Resolve the picked channel exactly like a sticky hop (eligibility,
@@ -1169,23 +1142,42 @@ export class TokenRouter {
       routes = routes.filter((route) => allowSet.has(route.id));
     }
 
-    // Prefer broad wildcard/regex routes, then explicit groups, and keep an
-    // exact route as the final fallback for a single-channel destination.
-    const matchedRoute = routes.find((route) => (
-      !isExplicitGroupRoute(route)
-      && !isExactRouteModelPattern(route.modelPattern)
-      && (isRouteDisplayNameMatch(model, route.displayName) || matchesModelPattern(model, route.modelPattern))
-    ))
-      || routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
-      || routes.find((route) => (
+    // Preserve the local dispatch precedence: broad wildcard/regex routes,
+    // then explicit groups, then exact-model routes. Within the broad-pattern
+    // tier, prefer the most specific match and skip stale shells when another
+    // route can actually serve the request.
+    const patternRoutes = routes
+      .filter((route) => (
         !isExplicitGroupRoute(route)
-        && isExactRouteModelPattern(route.modelPattern)
-        && ((route.modelPattern || '').trim() === model || isRouteDisplayNameMatch(model, route.displayName))
-      ));
+        && !isExactRouteModelPattern(route.modelPattern)
+        && (isRouteDisplayNameMatch(model, route.displayName) || matchesModelPattern(model, route.modelPattern))
+      ))
+      .sort((a, b) => {
+        const bySpecificity = patternSpecificity(b.modelPattern) - patternSpecificity(a.modelPattern);
+        return bySpecificity !== 0 ? bySpecificity : (b.modelPattern || '').length - (a.modelPattern || '').length;
+      });
 
-    if (!matchedRoute) return null;
+    for (const route of patternRoutes) {
+      const match = await loadRouteMatch(route);
+      if (match.channels.some((candidate) => candidate.channel.enabled)) return match;
+    }
 
-    return await this.loadRouteMatch(matchedRoute);
+    const namedGroup = routes.find((route) => (
+      isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName)
+    ));
+    if (namedGroup) return await loadRouteMatch(namedGroup);
+
+    const exactRoute = routes.find((route) => (
+      !isExplicitGroupRoute(route)
+      && isExactRouteModelPattern(route.modelPattern)
+      && ((route.modelPattern || '').trim() === model || isRouteDisplayNameMatch(model, route.displayName))
+    ));
+    if (exactRoute) return await loadRouteMatch(exactRoute);
+
+    // Retain the historical no-channel response when a broad pattern was the
+    // only matching route, after checking group and exact fallbacks.
+    if (patternRoutes.length > 0) return await loadRouteMatch(patternRoutes[0]);
+    return null;
   }
 
   private async findRouteById(routeId: number, downstreamPolicy: DownstreamRoutingPolicy): Promise<RouteMatch | null> {
@@ -1196,173 +1188,8 @@ export class TokenRouter {
     const route = (await loadEnabledRoutes()).find((item) => item.id === routeId);
     if (!route) return null;
 
-    return await this.loadRouteMatch(route);
-  }
-
-  private async loadRouteMatch(route: RouteRow): Promise<RouteMatch> {
     return await loadRouteMatch(route);
   }
-
-    private resolveRouteUnitMemberTokenValue(candidate: {
-    account: typeof schema.accounts.$inferSelect;
-  }) : string | null {
-    return resolveRouteUnitMemberTokenValue(candidate);
-  }
-
-    private buildRouteUnitMemberDispatchCandidate(outerCandidate: RouteChannelCandidate, memberCandidate: RouteChannelCandidate['routeUnitMembers'][number]) : RouteChannelCandidate {
-    return buildRouteUnitMemberDispatchCandidate(outerCandidate, memberCandidate);
-  }
-
-
-
-    private getEligibleRouteUnitMembers(candidate: RouteChannelCandidate, options: CandidateEligibilityOptions) : RouteChannelCandidate['routeUnitMembers'] {
-    return getEligibleRouteUnitMembers(candidate, options);
-  }
-
-  private getRoundRobinRouteUnitMembers(
-    members: RouteChannelCandidate['routeUnitMembers'],
-  ): RouteChannelCandidate['routeUnitMembers'] {
-    return [...members].sort((left, right) => {
-      const selectionOrder = compareNullableTimeAsc(
-        left.member.lastSelectedAt || left.member.lastUsedAt,
-        right.member.lastSelectedAt || right.member.lastUsedAt,
-      );
-      if (selectionOrder !== 0) return selectionOrder;
-
-      const usedOrder = compareNullableTimeAsc(left.member.lastUsedAt, right.member.lastUsedAt);
-      if (usedOrder !== 0) return usedOrder;
-
-      const sortOrder = (left.member.sortOrder ?? 0) - (right.member.sortOrder ?? 0);
-      if (sortOrder !== 0) return sortOrder;
-
-      return left.account.id - right.account.id;
-    });
-  }
-
-  private getStickyPreferredRouteUnitMember(
-    members: RouteChannelCandidate['routeUnitMembers'],
-  ): RouteChannelCandidate['routeUnitMembers'][number] | null {
-    return [...members].sort((left, right) => {
-      const selectionOrder = compareNullableTimeDesc(
-        left.member.lastSelectedAt || left.member.lastUsedAt,
-        right.member.lastSelectedAt || right.member.lastUsedAt,
-      );
-      if (selectionOrder !== 0) return selectionOrder;
-
-      const sortOrder = (left.member.sortOrder ?? 0) - (right.member.sortOrder ?? 0);
-      if (sortOrder !== 0) return sortOrder;
-
-      return left.account.id - right.account.id;
-    })[0] ?? null;
-  }
-
-  private selectRouteUnitMember(
-    candidate: RouteChannelCandidate,
-    requestedModel: string,
-    downstreamPolicy: DownstreamRoutingPolicy,
-    nowIso: string,
-    nowMs: number,
-    excludeChannelIds: number[] = [],
-  ): RouteChannelCandidate['routeUnitMembers'][number] | null {
-    if (!isOauthRouteUnitCandidate(candidate)) return null;
-    const eligibleMembers = this.getEligibleRouteUnitMembers(candidate, {
-      requestedModel,
-      bypassSourceModelCheck: true,
-      excludeChannelIds: [],
-      nowIso,
-      downstreamPolicy,
-    });
-    if (eligibleMembers.length === 0) return null;
-
-    const isRouteUnitFailover = excludeChannelIds.includes(candidate.channel.id);
-    const healthyMembers = isRouteUnitFailover
-      ? eligibleMembers.filter((memberCandidate) => !isChannelRecentlyFailed(memberCandidate.member, nowMs))
-      : filterRecentlyFailedCandidates(
-        eligibleMembers.map((memberCandidate) => ({
-          memberCandidate,
-          channel: memberCandidate.member,
-        })),
-        nowMs,
-      ).map((item) => item.memberCandidate);
-    const candidateMembers = healthyMembers.length > 0
-      ? healthyMembers
-      : (isRouteUnitFailover ? [] : eligibleMembers);
-    if (candidate.routeUnit?.strategy === 'stick_until_unavailable') {
-      const sticky = this.getStickyPreferredRouteUnitMember(candidateMembers);
-      if (sticky) return sticky;
-      return this.getRoundRobinRouteUnitMembers(candidateMembers)[0] ?? null;
-    }
-
-    return this.getRoundRobinRouteUnitMembers(candidateMembers)[0] ?? null;
-  }
-
-  private async recordRouteUnitMemberSelection(
-    routeUnitId: number,
-    accountId: number,
-  ): Promise<void> {
-    const nowIso = new Date().toISOString();
-    await db.update(schema.oauthRouteUnitMembers).set({
-      lastSelectedAt: nowIso,
-      updatedAt: nowIso,
-    }).where(and(
-      eq(schema.oauthRouteUnitMembers.unitId, routeUnitId),
-      eq(schema.oauthRouteUnitMembers.accountId, accountId),
-    )).run();
-    const routeRows = await db.select({
-      routeId: schema.routeChannels.routeId,
-    }).from(schema.routeChannels)
-      .where(eq(schema.routeChannels.oauthRouteUnitId, routeUnitId))
-      .all();
-    const routeIds: number[] = Array.from(new Set<number>(
-      routeRows
-        .map((row: any) => Number(row.routeId))
-        .filter((routeId: any): routeId is number => Number.isFinite(routeId) && routeId > 0),
-    ));
-    for (const routeId of routeIds) {
-      invalidateRouteScopedCache(routeId);
-    }
-  }
-
-    private isKeylessApiConnection(candidate: {
-    channel: typeof schema.routeChannels.$inferSelect;
-    account: typeof schema.accounts.$inferSelect;
-    token: typeof schema.accountTokens.$inferSelect | null;
-  }) : boolean {
-    return isKeylessApiConnection(candidate);
-  }
-
-    private resolveChannelTokenValue(candidate: {
-    channel: typeof schema.routeChannels.$inferSelect;
-    account: typeof schema.accounts.$inferSelect;
-    site?: typeof schema.sites.$inferSelect | null;
-    token: typeof schema.accountTokens.$inferSelect | null;
-  }) : string | null {
-    return resolveChannelTokenValue(candidate);
-  }
-
-
-
-    private getCandidateEligibilityReasons(candidate: RouteChannelCandidate, options: CandidateEligibilityOptions) : CandidateEligibilityReason[] {
-    return getCandidateEligibilityReasons(candidate, options);
-  }
-
-    private getRoundRobinCandidates(candidates: RouteChannelCandidate[]) : RouteChannelCandidate[] {
-    return getRoundRobinCandidates(candidates);
-  }
-
-  private selectRoundRobinCandidate(candidates: RouteChannelCandidate[]): RouteChannelCandidate | null {
-    return this.getRoundRobinCandidates(candidates)[0] ?? null;
-  }
-
-
-
-    private buildStableFirstRotationKey(routeId: number, requestedModel: string) : string {
-    return buildStableFirstRotationKey(routeId, requestedModel);
-  }
-
-
-
-
 
   private async recordChannelSelection(channelId: number): Promise<void> {
     const nowIso = new Date().toISOString();
@@ -1380,36 +1207,18 @@ export class TokenRouter {
     match: RouteMatch,
     requestedModel: string,
     _mappedModel: string,
-    downstreamPolicy: DownstreamRoutingPolicy,
+    _downstreamPolicy: DownstreamRoutingPolicy,
     recordSelection: boolean,
-    nowIso: string,
+    _nowIso: string,
     nowMs: number,
     stableFirstRotationKey?: string,
     stableFirstObservationKey?: string,
     usedObservation = false,
-    excludeChannelIds: number[] = [],
+    _excludeChannelIds: number[] = [],
   ): Promise<SelectedChannel | null> {
-    let dispatchCandidate = selected;
-    let resolvedRouteUnitMemberTokenValue: string | null = null;
-    if (isOauthRouteUnitCandidate(selected)) {
-      const member = this.selectRouteUnitMember(
-        selected,
-        requestedModel,
-        downstreamPolicy,
-        nowIso,
-        nowMs,
-        excludeChannelIds,
-      );
-      if (!member || !selected.routeUnit) return null;
-      resolvedRouteUnitMemberTokenValue = this.resolveRouteUnitMemberTokenValue(member);
-      dispatchCandidate = this.buildRouteUnitMemberDispatchCandidate(selected, member);
-      if (recordSelection) {
-        await this.recordRouteUnitMemberSelection(selected.routeUnit.id, member.account.id);
-      }
-    }
-
-    const tokenValue = resolvedRouteUnitMemberTokenValue ?? this.resolveChannelTokenValue(dispatchCandidate);
-    if (!tokenValue && !this.isKeylessApiConnection(dispatchCandidate)) return null;
+    const dispatchCandidate = selected;
+    const tokenValue = resolveChannelTokenValue(dispatchCandidate);
+    if (!tokenValue && !isKeylessApiConnection(dispatchCandidate)) return null;
     const dispatchTokenValue = tokenValue || '';
 
     if (recordSelection) {
@@ -1443,49 +1252,6 @@ export class TokenRouter {
       actualModel,
     };
   }
-
-  private weightedRandomSelect(
-    candidates: RouteChannelCandidate[],
-    modelName: string | ((candidate: RouteChannelCandidate) => string),
-    downstreamPolicy: DownstreamRoutingPolicy,
-    nowMs = Date.now(),
-    requestedModel = '',
-    connectivityLookup?: ConnectivityLookup | null,
-  ) {
-    // Production selection now uses balanced-v2 (API-key boost + soft balance drain + connectivity).
-    return this.selectByBalancedV2(
-      candidates,
-      modelName,
-      downstreamPolicy,
-      nowMs,
-      requestedModel || (typeof modelName === 'string' ? modelName : ''),
-      connectivityLookup,
-    );
-  }
-
-  private stableFirstSelect(
-    candidates: RouteChannelCandidate[],
-    modelName: string | ((candidate: RouteChannelCandidate) => string),
-    downstreamPolicy: DownstreamRoutingPolicy,
-    nowMs = Date.now(),
-    stableFirstRotationKey?: string,
-  ) {
-    return this.calculateWeightedSelection(
-      candidates,
-      modelName,
-      downstreamPolicy,
-      nowMs,
-      'stable_first',
-      stableFirstRotationKey,
-    ).selected;
-  }
-
-    private calculateWeightedSelection(candidates: RouteChannelCandidate[], modelName: string | ((candidate: RouteChannelCandidate) => string), downstreamPolicy: DownstreamRoutingPolicy, nowMs = Date.now(), selectionMode: WeightedSelectionMode = 'weighted', stableFirstRotationKey?: string) : WeightedSelectionResult {
-    return calculateWeightedSelection(candidates, modelName, downstreamPolicy, nowMs, selectionMode, stableFirstRotationKey);
-  }
-
-
-
 
 }
 

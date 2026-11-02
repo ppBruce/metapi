@@ -119,7 +119,7 @@ export default function ModelTester() {
 
   const listModels = useCallback(async () => {
     if (!baseUrl.trim()) {
-      setListError('请填写 Base URL');
+      setListError(tr('请填写 Base URL'));
       return;
     }
 
@@ -141,13 +141,13 @@ export default function ModelTester() {
 
       if (!result.ok) {
         setModel('');
-        setListError(result.error || '拉取模型列表失败');
+        setListError(result.error || tr('拉取模型列表失败'));
         return;
       }
 
       if (nextModels.length === 0) {
         setModel('');
-        setListError('上游返回了空模型列表');
+        setListError(tr('上游返回了空模型列表'));
         return;
       }
 
@@ -156,7 +156,7 @@ export default function ModelTester() {
       const errorMessage = error instanceof Error ? error.message : String(error);
       setModels([]);
       setModel('');
-      setListError(errorMessage || '拉取模型列表失败');
+      setListError(errorMessage || tr('拉取模型列表失败'));
     } finally {
       setListing(false);
     }
@@ -164,7 +164,7 @@ export default function ModelTester() {
 
   const probeModel = useCallback(async () => {
     if (!baseUrl.trim() || !model.trim() || !models.includes(model)) {
-      setProbeError('请先拉取模型列表并选择模型');
+      setProbeError(tr('请先拉取模型列表并选择模型'));
       return;
     }
 
@@ -188,7 +188,7 @@ export default function ModelTester() {
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      setProbeError(errorMessage || '检测失败');
+      setProbeError(errorMessage || tr('检测失败'));
     } finally {
       setProbing(false);
     }
@@ -210,9 +210,7 @@ export default function ModelTester() {
       <div className="page-header" style={{ marginBottom: 16 }}>
         <div>
           <h2 className="page-title">{tr('模型检测')}</h2>
-          <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '4px 0 0' }}>
-            用临时 Base URL + Key 拉取模型，检测该模型在选定协议下是否可用。
-          </p>
+          <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '4px 0 0' }}>{tr('用临时 Base URL + Key 拉取模型，检测该模型在选定协议下是否可用。')}</p>
         </div>
       </div>
 
@@ -225,7 +223,7 @@ export default function ModelTester() {
             <input
               value={baseUrl}
               onChange={(event) => setBaseUrl(event.target.value)}
-              placeholder="https://api.example.com 或 …/v1"
+              placeholder={tr('https://api.example.com 或 …/v1')}
               style={inputBaseStyle}
               autoComplete="off"
               spellCheck={false}
@@ -234,12 +232,12 @@ export default function ModelTester() {
 
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, fontWeight: 600 }}>
-              API Key（可选）
+              {tr('API Key（可选）')}
             </div>
             <input
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}
-              placeholder="不需要认证时可留空"
+              placeholder={tr('不需要认证时可留空')}
               style={inputBaseStyle}
               autoComplete="off"
               spellCheck={false}
@@ -249,7 +247,7 @@ export default function ModelTester() {
 
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, fontWeight: 600 }}>
-              协议
+              {tr('协议')}
             </div>
             <ModernSelect
               value={protocol}
@@ -261,7 +259,7 @@ export default function ModelTester() {
                 }
               }}
               options={PROTOCOL_OPTIONS}
-              placeholder="选择协议"
+              placeholder={tr('选择协议')}
             />
           </div>
 
@@ -273,7 +271,7 @@ export default function ModelTester() {
               disabled={!canList}
               style={{ flex: '1 1 140px' }}
             >
-              {listing ? '拉取中…' : '拉取模型列表'}
+              {listing ? tr('拉取中…') : tr('拉取模型列表')}
             </button>
             <button
               type="button"
@@ -281,7 +279,7 @@ export default function ModelTester() {
               style={{ border: '1px solid var(--color-border)', flex: '0 0 auto' }}
               onClick={clearAll}
             >
-              清空
+              {tr('清空')}
             </button>
           </div>
 
@@ -300,7 +298,7 @@ export default function ModelTester() {
 
         <div className="card" style={{ padding: 16 }}>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, fontWeight: 600 }}>
-            模型
+            {tr('模型')}
           </div>
           <ModernSelect
             value={model && models.includes(model) ? model : ''}
@@ -312,16 +310,16 @@ export default function ModelTester() {
               setProbeError('');
             }}
             options={modelOptions}
-            placeholder={models.length === 0 ? '暂无模型，请先拉取列表' : '选择模型'}
+            placeholder={models.length === 0 ? tr('暂无模型，请先拉取列表') : tr('选择模型')}
             disabled={models.length === 0}
-            emptyLabel="无匹配模型"
+            emptyLabel={tr('无匹配模型')}
             menuMaxHeight={280}
             searchable
-            searchPlaceholder="搜索模型"
+            searchPlaceholder={tr('搜索模型')}
           />
           {models.length > 0 ? (
             <div style={{ marginTop: 6, fontSize: 11, color: 'var(--color-text-muted)' }}>
-              共 {models.length} 个模型，打开下拉可搜索
+              {tr('共')} {models.length} {tr('个模型，打开下拉可搜索')}
             </div>
           ) : null}
 
@@ -332,31 +330,27 @@ export default function ModelTester() {
             onClick={() => { void probeModel(); }}
             disabled={!canProbe}
           >
-            {probing ? '检测中…' : '检测模型'}
+            {probing ? tr('检测中…') : tr('检测模型')}
           </button>
         </div>
 
         <div className="card" style={{ padding: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 10 }}>
-            <h3 style={{ margin: 0, fontSize: 15 }}>结果</h3>
+            <h3 style={{ margin: 0, fontSize: 15 }}>{tr('结果')}</h3>
             <div style={{ fontSize: 14, fontWeight: 700, color: statusColor(probeOk, probing) }}>
-              {probing ? '检测中' : probeOk === true ? '可用' : probeOk === false ? '不可用' : '未检测'}
+              {probing ? tr('检测中') : probeOk === true ? tr('可用') : probeOk === false ? tr('不可用') : tr('未检测')}
             </div>
           </div>
 
           {!probeResult && !probeError && !probing ? (
-            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-              拉取模型并点击「检测模型」后显示结果。
-            </div>
+            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{tr('拉取模型并点击「检测模型」后显示结果。')}</div>
           ) : null}
 
           {(probeResult || probeError) && !probing ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={{ fontSize: 13, lineHeight: 1.5 }}>
-                <div>
-                  状态：
-                  <strong style={{ color: statusColor(probeOk, false), marginLeft: 6 }}>
-                    {probeOk ? '可用' : '不可用'}
+                <div>{tr('状态：')}<strong style={{ color: statusColor(probeOk, false), marginLeft: 6 }}>
+                    {probeOk ? tr('可用') : tr('不可用')}
                   </strong>
                 </div>
                 {probeResult ? (
@@ -394,9 +388,7 @@ export default function ModelTester() {
 
               {probeResult ? (
                 <details>
-                  <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--color-text-muted)' }}>
-                    响应详情
-                  </summary>
+                  <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('响应详情')}</summary>
                   <pre
                     style={{
                       margin: '8px 0 0',

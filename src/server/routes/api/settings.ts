@@ -1,47 +1,18 @@
 import { FastifyInstance } from 'fastify';
 import cron from 'node-cron';
 import { config, normalizeTokenRouterFailureCooldownMaxSec } from '../../config.js';
-import { db, runtimeDbDialect, schema } from '../../db/index.js';
+import { db, schema } from '../../db/index.js';
 import { eq } from 'drizzle-orm';
 import { upsertSetting } from '../../db/upsertSetting.js';
-import { isTunnelAdminRequest, rejectTunnelAdminAction } from '../../tunnelAccessPolicy.js';
+import { isTunnelAdminRequest } from '../../tunnelAccessPolicy.js';
 import { normalizeRouteRoutingStrategy } from '../../services/routeRoutingStrategy.js';
-import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import { updateBalanceRefreshCron, updateCheckinSchedule, updateLogCleanupSettings } from '../../services/checkinScheduler.js';
 import { sendNotification } from '../../services/notifyService.js';
 import {
-  exportBackup,
-  exportBackupToWebdav,
-  getBackupWebdavConfig,
-  importBackup,
-  importBackupFromWebdav,
-  reloadBackupWebdavScheduler,
-  saveBackupWebdavConfig,
-  type BackupExportType,
-} from '../../services/backupService.js';
-import { startBackgroundTask } from '../../services/backgroundTaskService.js';
-import {
-  deleteAdminSnapshot,
-  readAdminSnapshot,
-  writeAdminSnapshot,
-} from '../../services/adminSnapshotStore.js';
-import {
-  maskConnectionString,
-  migrateCurrentDatabase,
-  normalizeMigrationInput,
-  testDatabaseConnection,
-  type MigrationDialect,
-} from '../../services/databaseMigrationService.js';
-import {
-  parseDatabaseMigrationPayload,
-  parseBackupImportPayload,
   parseRuntimeSettingsPayload,
-  parseBackupWebdavConfigPayload,
-  parseBackupWebdavExportPayload,
 } from '../../contracts/settingsRoutePayloads.js';
-import { formatUtcSqlDateTime, getResolvedTimeZone } from '../../services/localTimeService.js';
+import { getResolvedTimeZone } from '../../services/localTimeService.js';
 import { findInvalidIpAllowlistEntries, getTrustedClientIp, isIpAllowed } from '../../middleware/clientIp.js';
-import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
 import {
@@ -49,6 +20,10 @@ import {
   stopChannelProbeScheduler,
 } from '../../services/channelRecoveryProbeService.js';
 import { parsePayloadRulesConfigInput } from '../../services/payloadRules.js';
+import { appendSettingsEvent } from './settingsShared.js';
+import { registerSettingsMaintenanceRoutes } from './settingsMaintenance.js';
+import { registerSettingsDatabaseRoutes } from './settingsDatabase.js';
+import { registerSettingsBackupRoutes } from './settingsBackup.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -123,27 +98,6 @@ interface RuntimeSettingsBody {
   proxyChannelFailoverMaxAttempts?: number;
 }
 
-
-interface BackupWebdavConfigBody {
-  enabled?: unknown;
-  fileUrl?: unknown;
-  username?: unknown;
-  password?: unknown;
-  clearPassword?: unknown;
-  exportType?: unknown;
-  autoSyncEnabled?: unknown;
-  autoSyncCron?: unknown;
-}
-
-type RuntimeDatabaseConfig = {
-  dialect: MigrationDialect;
-  connectionString: string;
-  ssl: boolean;
-};
-
-const DB_TYPE_SETTING_KEY = 'db_type';
-const DB_URL_SETTING_KEY = 'db_url';
-const DB_SSL_SETTING_KEY = 'db_ssl';
 function maskSecret(value: string): string {
   if (!value) return '';
   if (value.length <= 8) return '****';
@@ -180,27 +134,6 @@ async function readTurnstileSolverConfig(): Promise<{ enabled: boolean; baseUrl:
   } catch {
     return { enabled: false, baseUrl: '', apiKey: '', timeoutSeconds: 60 };
   }
-}
-
-
-
-async function appendSettingsEvent(input: {
-  type: 'checkin' | 'balance' | 'proxy' | 'status' | 'token';
-  title: string;
-  message: string;
-  level?: 'info' | 'warning' | 'error';
-}) {
-  try {
-    const createdAt = formatUtcSqlDateTime(new Date());
-    await db.insert(schema.events).values({
-      type: input.type,
-      title: input.title,
-      message: input.message,
-      level: input.level || 'info',
-      relatedType: 'settings',
-      createdAt,
-    }).run();
-  } catch { }
 }
 
 function toPositiveNumberOrFallback(value: unknown, fallback: number) {
@@ -738,74 +671,6 @@ async function getRuntimeSettingsResponse(currentAdminIp = '', tunnelClientView 
     payloadRules: config.payloadRules,
     proxyErrorKeywords: config.proxyErrorKeywords,
     proxyEmptyContentFailEnabled: config.proxyEmptyContentFailEnabled,
-  };
-}
-
-function parseJsonValue(raw: unknown): unknown {
-  if (typeof raw !== 'string' || !raw) return undefined;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-}
-
-function maskRuntimeConnection(dialect: MigrationDialect, connectionString: string): string {
-  const normalized = connectionString.trim();
-  if (dialect === 'sqlite' && !normalized) return '(default sqlite path)';
-  return maskConnectionString(normalized);
-}
-
-async function loadSavedRuntimeDatabaseConfig(): Promise<RuntimeDatabaseConfig | null> {
-  const settingsRows = await db.select().from(schema.settings).all();
-  const map = new Map(settingsRows.map((row: any) => [row.key, row.value]));
-  const rawDialect = parseJsonValue(map.get(DB_TYPE_SETTING_KEY));
-  const rawConnection = parseJsonValue(map.get(DB_URL_SETTING_KEY));
-  const rawSsl = parseJsonValue(map.get(DB_SSL_SETTING_KEY));
-  if (typeof rawDialect !== 'string' || typeof rawConnection !== 'string') {
-    return null;
-  }
-
-  try {
-    const normalized = normalizeMigrationInput({
-      dialect: rawDialect,
-      connectionString: rawConnection,
-      ssl: rawSsl,
-    });
-    return {
-      dialect: normalized.dialect,
-      connectionString: normalized.connectionString,
-      ssl: normalized.ssl,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function buildRuntimeDatabaseState(saved: RuntimeDatabaseConfig | null) {
-  const activeDialect = runtimeDbDialect;
-  const activeConnection = (config.dbUrl || '').trim();
-  const activeSsl = config.dbSsl;
-  const restartRequired = !!saved && (
-    saved.dialect !== activeDialect ||
-    saved.connectionString.trim() !== activeConnection ||
-    saved.ssl !== activeSsl
-  );
-
-  return {
-    active: {
-      dialect: activeDialect,
-      connection: maskRuntimeConnection(activeDialect, activeConnection),
-      ssl: activeSsl,
-    },
-    saved: saved
-      ? {
-        dialect: saved.dialect,
-        connection: maskRuntimeConnection(saved.dialect, saved.connectionString),
-        ssl: saved.ssl,
-      }
-      : null,
-    restartRequired,
   };
 }
 
@@ -1864,229 +1729,6 @@ export async function settingsRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get('/api/settings/database/runtime', async () => {
-    const saved = await loadSavedRuntimeDatabaseConfig();
-    return {
-      success: true,
-      ...buildRuntimeDatabaseState(saved),
-    };
-  });
-
-  app.put<{ Body: unknown }>('/api/settings/database/runtime', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '切换运行时数据库')) return reply;
-    try {
-      const parsedBody = parseDatabaseMigrationPayload(request.body);
-      if (!parsedBody.success) {
-        return reply.code(400).send({
-          success: false,
-          message: parsedBody.error,
-        });
-      }
-
-      const normalized = normalizeMigrationInput(parsedBody.data);
-      await upsertSetting(DB_TYPE_SETTING_KEY, normalized.dialect);
-      await upsertSetting(DB_URL_SETTING_KEY, normalized.connectionString);
-      await upsertSetting(DB_SSL_SETTING_KEY, normalized.ssl);
-
-      await appendSettingsEvent({
-        type: 'status',
-        title: '数据库运行配置已更新',
-        message: `已保存运行数据库配置：${normalized.dialect}${normalized.ssl ? ' (SSL)' : ''}（重启后生效）`,
-      });
-
-      const saved: RuntimeDatabaseConfig = {
-        dialect: normalized.dialect,
-        connectionString: normalized.connectionString,
-        ssl: normalized.ssl,
-      };
-
-      return {
-        success: true,
-        message: '数据库运行配置已保存，重启容器后生效',
-        ...buildRuntimeDatabaseState(saved),
-      };
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      return reply.code(400).send({
-        success: false,
-        message: errMessage || '数据库运行配置保存失败',
-      });
-    }
-  });
-
-  app.post<{ Body: unknown }>('/api/settings/database/test-connection', async (request, reply) => {
-    try {
-      const parsedBody = parseDatabaseMigrationPayload(request.body);
-      if (!parsedBody.success) {
-        return reply.code(400).send({
-          success: false,
-          message: parsedBody.error,
-        });
-      }
-
-      const result = await testDatabaseConnection(parsedBody.data);
-      return {
-        success: true,
-        message: '目标数据库连接成功',
-        ...result,
-      };
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      return reply.code(400).send({
-        success: false,
-        message: errMessage || '数据库连接失败',
-      });
-    }
-  });
-
-  app.post<{ Body: unknown }>('/api/settings/database/migrate', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '迁移数据库')) return reply;
-    try {
-      const parsedBody = parseDatabaseMigrationPayload(request.body);
-      if (!parsedBody.success) {
-        return reply.code(400).send({
-          success: false,
-          message: parsedBody.error,
-        });
-      }
-
-      const result = await migrateCurrentDatabase(parsedBody.data);
-      appendSettingsEvent({
-        type: 'status',
-        title: '数据库迁移已完成',
-        message: `目标 ${result.dialect}，已迁移站点 ${result.rows.sites}、账号 ${result.rows.accounts}、令牌 ${result.rows.accountTokens}、路由 ${result.rows.tokenRoutes}、通道 ${result.rows.routeChannels}、设置 ${result.rows.settings}`,
-      });
-      return {
-        success: true,
-        message: '数据库迁移完成',
-        ...result,
-      };
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      return reply.code(400).send({
-        success: false,
-        message: errMessage || '数据库迁移失败',
-      });
-    }
-  });
-
-  await app.get<{ Querystring: { type?: string } }>('/api/settings/backup/export', async (request, reply) => {
-    const rawType = String(request.query.type || 'all').trim().toLowerCase();
-    const type: BackupExportType = rawType === 'accounts' || rawType === 'preferences' ? rawType : 'all';
-    if (rawType && !['all', 'accounts', 'preferences'].includes(rawType)) {
-      return reply.code(400).send({ success: false, message: '导出类型无效，仅支持 all/accounts/preferences' });
-    }
-    return await exportBackup(type);
-  });
-
-  app.post<{ Body: unknown }>('/api/settings/backup/import', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '导入备份数据')) return reply;
-    const parsedBody = parseBackupImportPayload(request.body);
-    if (!parsedBody.success) {
-      return reply.code(400).send({ success: false, message: '导入数据格式错误：需要 JSON 对象' });
-    }
-
-    try {
-      const result = await importBackup(parsedBody.data.data);
-      for (const item of result.appliedSettings) {
-        applyImportedSettingToRuntime(item.key, item.value);
-      }
-      if (result.appliedSettings.some((item) => item.key === 'backup_webdav_config_v1')) {
-        await reloadBackupWebdavScheduler();
-      }
-      return {
-        success: true,
-        message: '导入完成',
-        ...result,
-      };
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      return reply.code(400).send({
-        success: false,
-        message: errMessage || '导入失败',
-      });
-    }
-  });
-
-  app.get('/api/settings/backup/webdav', async () => {
-    return getBackupWebdavConfig();
-  });
-
-  app.put<{ Body: BackupWebdavConfigBody }>('/api/settings/backup/webdav', async (request, reply) => {
-    try {
-      const parsedBody = parseBackupWebdavConfigPayload(request.body);
-      if (!parsedBody.success) {
-        return reply.code(400).send({
-          success: false,
-          message: parsedBody.error,
-        });
-      }
-
-      const body = parsedBody.data;
-      const result = await saveBackupWebdavConfig({
-        enabled: body.enabled === undefined ? undefined : body.enabled === true,
-        fileUrl: body.fileUrl === undefined ? undefined : String(body.fileUrl || ''),
-        username: body.username === undefined ? undefined : String(body.username || ''),
-        password: body.password === undefined ? undefined : String(body.password),
-        clearPassword: body.clearPassword === true,
-        exportType: body.exportType === undefined ? undefined : String(body.exportType || '') as BackupExportType,
-        autoSyncEnabled: body.autoSyncEnabled === undefined ? undefined : body.autoSyncEnabled === true,
-        autoSyncCron: body.autoSyncCron === undefined ? undefined : String(body.autoSyncCron || ''),
-      });
-      return result;
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      return reply.code(400).send({
-        success: false,
-        message: errMessage || 'WebDAV 配置保存失败',
-      });
-    }
-  });
-
-  app.post<{ Body: { type?: string } }>('/api/settings/backup/webdav/export', async (request, reply) => {
-    try {
-      const parsedBody = parseBackupWebdavExportPayload(request.body);
-      if (!parsedBody.success) {
-        return reply.code(400).send({
-          success: false,
-          message: parsedBody.error,
-        });
-      }
-
-      const rawType = typeof parsedBody.data.type === 'string' ? parsedBody.data.type.trim().toLowerCase() : '';
-      const type: BackupExportType | undefined = rawType === 'all' || rawType === 'accounts' || rawType === 'preferences'
-        ? rawType
-        : undefined;
-      return await exportBackupToWebdav(type);
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      return reply.code(400).send({
-        success: false,
-        message: errMessage || 'WebDAV 导出失败',
-      });
-    }
-  });
-
-  app.post('/api/settings/backup/webdav/import', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '从 WebDAV 导入备份')) return reply;
-    try {
-      const result = await importBackupFromWebdav();
-      for (const item of result.appliedSettings) {
-        applyImportedSettingToRuntime(item.key, item.value);
-      }
-      if (result.appliedSettings.some((item) => item.key === 'backup_webdav_config_v1')) {
-        await reloadBackupWebdavScheduler();
-      }
-      return result;
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      return reply.code(400).send({
-        success: false,
-        message: errMessage || 'WebDAV 导入失败',
-      });
-    }
-  });
-
   app.post('/api/settings/notify/test', async (_, reply) => {
     try {
       const result = await sendNotification(
@@ -2112,159 +1754,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/api/settings/maintenance/clear-cache', async (request, reply) => {
-    const body = (request.body || {}) as { confirm?: unknown };
-    if (body.confirm !== true) {
-      return reply.code(400).send({
-        success: false,
-        message: '危险操作需要确认：请携带 confirm:true 后重试',
-      });
-    }
-    const { task, reused } = startBackgroundTask(
-      {
-        type: 'maintenance',
-        title: '清理缓存并重建路由',
-        dedupeKey: 'refresh-models-and-rebuild-routes',
-        notifyOnFailure: true,
-        successMessage: (currentTask) => {
-          const rebuild = (currentTask.result as any)?.rebuild;
-          if (!rebuild) return '缓存清理后重建路由已完成';
-          return `缓存清理后重建完成：新增路由 ${rebuild.createdRoutes}，移除旧路由 ${rebuild.removedRoutes ?? 0}，新增通道 ${rebuild.createdChannels}，移除通道 ${rebuild.removedChannels}`;
-        },
-        failureMessage: (currentTask) => `缓存清理后重建失败：${currentTask.error || 'unknown error'}`,
-      },
-      async () => {
-        // Snapshot BEFORE any deletion so a failed rebuild can restore the
-        // exact previous routing state (routes + group-source links).
-        const tokenRoutesSnapshot = await db.select().from(schema.tokenRoutes).all();
-        const groupSourcesSnapshot = await db.select().from(schema.routeGroupSources).all();
-        const SNAPSHOT_NS = 'clear-cache-rollback';
-        const SNAPSHOT_KEY = 'routes';
-        const nowIso = new Date().toISOString();
-        if (tokenRoutesSnapshot.length > 0 || groupSourcesSnapshot.length > 0) {
-          await writeAdminSnapshot(
-            { namespace: SNAPSHOT_NS, key: SNAPSHOT_KEY },
-            {
-              payload: { tokenRoutes: tokenRoutesSnapshot, groupSources: groupSourcesSnapshot },
-              generatedAt: nowIso,
-              expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-              staleUntil: nowIso,
-            },
-          );
-        }
-
-        try {
-          await db.delete(schema.modelAvailability).run();
-          await db.delete(schema.routeChannels).run();
-          await db.delete(schema.tokenRoutes).run();
-
-          const rebuild = await routeRefreshWorkflow.refreshModelsAndRebuildRoutes();
-          await deleteAdminSnapshot({ namespace: SNAPSHOT_NS, key: SNAPSHOT_KEY });
-          return { rebuild, deletedModelAvailability: true, deletedRouteChannels: true, deletedTokenRoutes: true };
-        } catch (rebuildErr) {
-          // Rollback best-effort: the tables are empty at this point, so a
-          // plain re-insert (with preserved ids) restores the exact state.
-          try {
-            const snapshot = await readAdminSnapshot<{
-              tokenRoutes: typeof tokenRoutesSnapshot;
-              groupSources: typeof groupSourcesSnapshot;
-            }>(
-              { namespace: SNAPSHOT_NS, key: SNAPSHOT_KEY },
-            );
-            if (snapshot) {
-              const { tokenRoutes: savedRoutes, groupSources: savedGroupSources } = snapshot.payload;
-              for (let i = 0; i < savedRoutes.length; i += 200) {
-                await db.insert(schema.tokenRoutes).values(savedRoutes.slice(i, i + 200)).run();
-              }
-              for (let i = 0; i < savedGroupSources.length; i += 200) {
-                await db.insert(schema.routeGroupSources).values(savedGroupSources.slice(i, i + 200)).run();
-              }
-              // Rebuild route channels from the restored routes so the router
-              // has working channels again even if the model refresh failed.
-              try {
-                await routeRefreshWorkflow.rebuildRoutesOnly();
-              } catch { /* best-effort */ }
-            }
-            await deleteAdminSnapshot({ namespace: SNAPSHOT_NS, key: SNAPSHOT_KEY });
-          } catch {
-            /* rollback best-effort */
-          }
-          throw rebuildErr;
-        }
-      },
-    );
-
-    return reply.code(202).send({
-      success: true,
-      queued: true,
-      reused,
-      jobId: task.id,
-      message: '缓存清理与路由重建已排入后台任务',
-    });
-  });
-
-  app.post('/api/settings/maintenance/clear-usage', async (request, reply) => {
-    const body = (request.body || {}) as { confirm?: unknown };
-    if (body.confirm !== true) {
-      return reply.code(400).send({
-        success: false,
-        message: '危险操作需要确认：请携带 confirm:true 后重试',
-      });
-    }
-    const deletedProxyLogs = (await db.delete(schema.proxyLogs).run()).changes;
-
-    await db.update(schema.routeChannels).set({
-      successCount: 0,
-      failCount: 0,
-      totalLatencyMs: 0,
-      totalCost: 0,
-      lastUsedAt: null,
-      lastSelectedAt: null,
-      lastFailAt: null,
-      consecutiveFailCount: 0,
-      cooldownLevel: 0,
-      cooldownUntil: null,
-    }).run();
-
-    await db.update(schema.accounts).set({
-      balanceUsed: 0,
-      updatedAt: new Date().toISOString(),
-    }).run();
-
-    appendSettingsEvent({
-      type: 'status',
-      title: '占用统计与使用日志已清理',
-      message: `已清理使用日志 ${deletedProxyLogs} 条，并重置路由与账号占用统计`,
-      level: 'warning',
-    });
-
-    return {
-      success: true,
-      message: '占用统计已清理',
-      deletedProxyLogs,
-    };
-  });
-
-  app.post('/api/settings/maintenance/factory-reset', async (request, reply) => {
-    if (rejectTunnelAdminAction(request, reply, '恢复出厂设置')) return reply;
-    const body = (request.body || {}) as { confirm?: unknown };
-    if (body.confirm !== true) {
-      return reply.code(400).send({
-        success: false,
-        message: '危险操作需要确认：请携带 confirm:true 后重试',
-      });
-    }
-    try {
-      await performFactoryReset();
-      return {
-        success: true,
-      };
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      return reply.code(500).send({
-        success: false,
-        message: errMessage || '重新初始化系统失败',
-      });
-    }
-  });
+  registerSettingsMaintenanceRoutes(app);
+  registerSettingsDatabaseRoutes(app);
+  registerSettingsBackupRoutes(app, { applyImportedSetting: applyImportedSettingToRuntime });
 }

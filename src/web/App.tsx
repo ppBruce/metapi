@@ -13,17 +13,18 @@ import {
   THEME_MODE_STORAGE_KEY,
   USER_PROFILE_STORAGE_KEY,
 } from './appLocalState.js';
-import { I18nProvider, useI18n } from './i18n.js';
+import { I18nProvider, useI18n, useI18nOptional, tr, translateText, type Language } from './i18n.js';
 import { resolveLoginErrorMessage } from './loginError.js';
 import { SITE_DOCS_URL, SITE_GITHUB_URL } from './docsLink.js';
 import { useAnimatedVisibility } from './components/useAnimatedVisibility.js';
 import { useIsMobile } from './components/useIsMobile.js';
 import { MobileDrawer } from './components/MobileDrawer.js';
 import CenteredModal from './components/CenteredModal.js';
+// Stored default profile name: compared against, never translated.
+const DEFAULT_PROFILE_NAME = '管理员';
 const Dashboard = lazy(() => import('./pages/Dashboard.js'));
 const Sites = lazy(() => import('./pages/Sites.js'));
 const SiteDetail = lazy(() => import('./pages/SiteDetail.js'));
-const OAuthManagement = lazy(() => import('./pages/OAuthManagement.js'));
 const CheckinLog = lazy(() => import('./pages/CheckinLog.js'));
 const TokenRoutes = lazy(() => import('./pages/TokenRoutes.js'));
 const ProxyLogs = lazy(() => import('./pages/ProxyLogs.js'));
@@ -72,21 +73,23 @@ function avatarColorFor(seed: string): string {
   return palette[hashString(seed || 'default') % palette.length];
 }
 
-function avatarInitialFor(name: string): string {
+function avatarInitialFor(name: string, language: Language): string {
   const trimmed = (name || '').trim();
-  if (!trimmed) return '管';
+  if (!trimmed) return translateText('管理员', language).slice(0, 1).toUpperCase();
+  // The stored default profile name is Chinese; show the initial of its translation.
+  if (trimmed === '管理员') return translateText(trimmed, language).slice(0, 1).toUpperCase();
   return Array.from(trimmed)[0].toUpperCase();
 }
 
 function resolveStoredProfile(): UserProfile {
   try {
     const raw = localStorage.getItem(USER_PROFILE_STORAGE_KEY);
-    if (!raw) return { name: '管理员' };
+    if (!raw) return { name: tr('管理员') };
     const parsed = JSON.parse(raw) as Partial<UserProfile> & { avatar?: string };
     const name = typeof parsed?.name === 'string' ? parsed.name.trim() : '';
-    return { name: name || '管理员' };
+    return { name: name || tr('管理员') };
   } catch {
-    return { name: '管理员' };
+    return { name: tr('管理员') };
   }
 }
 
@@ -300,6 +303,7 @@ function UserProfileModal({
   onSave: (nextProfile: UserProfile) => void;
   t: (text: string) => string;
 }) {
+  const language = useI18nOptional()?.language ?? 'zh';
   const [name, setName] = useState(profile.name);
   const [error, setError] = useState('');
 
@@ -358,11 +362,11 @@ function UserProfileModal({
             fontSize: 16,
             fontWeight: 600,
             color: '#fff',
-            background: avatarColorFor(name.trim() || '管理员'),
+            background: avatarColorFor(name.trim() || tr('管理员')),
             border: 'none',
           }}
         >
-          {avatarInitialFor(name)}
+          {avatarInitialFor(name, language)}
         </div>
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('右上角头像实时预览')}</div>
       </div>
@@ -395,7 +399,6 @@ export const sidebarGroups = [
     items: [
       { to: '/', label: '仪表盘', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 12a1 1 0 011-1h4a1 1 0 011 1v7a1 1 0 01-1 1h-4a1 1 0 01-1-1v-7z" /></svg> },
       { to: '/sites', label: '站点管理', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg> },
-      { to: '/oauth', label: 'OAuth 管理', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 01-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 011-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 011.52 0C14.51 3.81 17 5 19 5a1 1 0 011 1z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="m9 12 2 2 4-4" /></svg> },
       { to: '/site-announcements', label: '站点公告', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M7 8h10M7 12h10M7 16h6M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" /></svg> },
       { to: '/downstream-keys', label: '下游密钥', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4" /></svg> },
       { to: '/checkin', label: '签到记录', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg> },
@@ -478,10 +481,11 @@ function AppShell() {
     ? (systemPrefersDark ? 'dark' : 'light')
     : themeMode;
   const rawDisplayName = (userProfile.name || '').trim();
-  const displayName = rawDisplayName ? (rawDisplayName === '管理员' ? t('管理员') : rawDisplayName) : t('管理员');
+  // '管理员' is the stored default name; translate only for display.
+  const displayName = rawDisplayName ? (rawDisplayName === DEFAULT_PROFILE_NAME ? t('管理员') : rawDisplayName) : t('管理员');
   const resolvedThemeLabel = resolvedTheme === 'dark' ? t('深色') : t('浅色');
   const avatarColor = avatarColorFor(userProfile.name);
-  const avatarInitial = avatarInitialFor(userProfile.name);
+  const avatarInitial = avatarInitialFor(userProfile.name, language);
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -574,7 +578,7 @@ function AppShell() {
           .filter((row: any) => (
             (Number(row?.id) || 0) > latestTaskEventIdRef.current
             && row?.relatedType === 'task'
-            && !String(row?.title || '').includes('已开始')
+            && !String(row?.title || '').includes(tr('已开始'))
           ))
           .sort((a: any, b: any) => (a.id || 0) - (b.id || 0))
           .slice(-3);
@@ -696,11 +700,11 @@ function AppShell() {
         <div className="topbar-right">
           <button
             className="topbar-icon-btn"
-            aria-label={language === 'zh' ? 'Switch to English' : '切换到中文'}
+            aria-label={language === 'zh' ? 'Switch to English' : tr('切换到中文')}
             onClick={toggleLanguage}
             style={{ minWidth: 36, fontSize: 12, fontWeight: 700 }}
           >
-            {language === 'zh' ? 'EN' : '中'}
+            {language === 'zh' ? 'EN' : tr('中')}
           </button>
           <button className="topbar-search-trigger" aria-label={t('搜索 (Ctrl+K)')} onClick={() => setShowSearch(true)}>
             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
@@ -900,7 +904,6 @@ function AppShell() {
                 <Route path="/site-announcements" element={<SiteAnnouncements />} />
                 <Route path="/accounts" element={<LegacyConnectionsRedirect />} />
                 <Route path="/tokens" element={<LegacyConnectionsRedirect />} />
-                <Route path="/oauth" element={<OAuthManagement />} />
                 <Route path="/checkin" element={<CheckinLog />} />
                 <Route path="/routes" element={<TokenRoutes />} />
                 <Route path="/logs" element={<ProxyLogs />} />

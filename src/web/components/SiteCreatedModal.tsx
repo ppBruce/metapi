@@ -1,4 +1,5 @@
 import CenteredModal from './CenteredModal.js';
+import { tr } from '../i18n.js';
 
 type NextStepChoice = 'session' | 'apikey' | 'later';
 
@@ -6,7 +7,6 @@ type Props = {
   siteName: string;
   initialSegment?: 'session' | 'apikey';
   sessionLabel?: string;
-  oauthOnly?: boolean;
   onChoice: (choice: NextStepChoice) => void;
   onClose: () => void;
 };
@@ -14,21 +14,18 @@ type Props = {
 export default function SiteCreatedModal({
   siteName,
   initialSegment = 'session',
-  sessionLabel = '添加账号（用户名密码登录）',
-  oauthOnly = false,
+  sessionLabel = tr('添加账号（用户名密码登录）'),
   onChoice,
   onClose,
 }: Props) {
-  const apiKeyFirst = initialSegment === 'apikey' && !oauthOnly;
-  const helperText = oauthOnly
-    ? '该平台使用 OAuth 授权登录，点击下方按钮开始授权流程。'
-    : apiKeyFirst
-      ? '该平台更适合直接通过 Base URL + API Key 接入，后续再补模型初始化。'
-      : '接下来您可以继续补充登录连接或 API Key。';
+  const apiKeyFirst = initialSegment === 'apikey';
+  const helperText = apiKeyFirst
+    ? tr('该平台更适合直接通过 Base URL + API Key 接入，后续再补模型初始化。')
+    : tr('接下来您可以继续补充登录连接或 API Key。');
   const primaryAction = apiKeyFirst
     ? {
       choice: 'apikey' as const,
-      label: '添加 API Key（推荐）',
+      label: tr('添加 API Key（推荐）'),
     }
     : {
       choice: 'session' as const,
@@ -41,32 +38,28 @@ export default function SiteCreatedModal({
     }
     : {
       choice: 'apikey' as const,
-      label: '添加 API Key',
+      label: tr('添加 API Key'),
     };
 
   return (
     <CenteredModal
       open
       onClose={onClose}
-      title="站点创建成功"
+      title={tr('站点创建成功')}
       maxWidth={520}
       closeOnBackdrop
       closeOnEscape
       bodyStyle={{ display: 'flex', flexDirection: 'column', gap: 12 }}
       footer={(
         <>
-          <button onClick={() => onChoice('later')} className="btn btn-ghost">
-            稍后配置
+          <button onClick={() => onChoice('later')} className="btn btn-ghost">{tr('稍后配置')}</button>
+          <button
+            onClick={() => onChoice(secondaryAction.choice)}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+          >
+            {secondaryAction.label}
           </button>
-          {!oauthOnly && (
-            <button
-              onClick={() => onChoice(secondaryAction.choice)}
-              className="btn btn-ghost"
-              style={{ border: '1px solid var(--color-border)' }}
-            >
-              {secondaryAction.label}
-            </button>
-          )}
           <button
             onClick={() => onChoice(primaryAction.choice)}
             className="btn btn-primary"
@@ -77,19 +70,16 @@ export default function SiteCreatedModal({
       )}
     >
       <div className="alert alert-success animate-scale-in" style={{ margin: 0 }}>
-        <div className="alert-title">站点已添加成功</div>
+        <div className="alert-title">{tr('站点已添加成功')}</div>
         <div className="site-created-summary">
-          站点 <strong>"{siteName}"</strong> 已加入列表，您现在可以继续补充连接信息。
-        </div>
+          {tr('站点')} <strong>"{siteName}"</strong> {tr('已加入列表，您现在可以继续补充连接信息。')}</div>
       </div>
 
       <p className="site-created-helper-text">
         {helperText}
       </p>
 
-      <p className="site-created-note">
-        提示：您可以随时在"站点管理"页面补充账号或 API Key。
-      </p>
+      <p className="site-created-note">{tr('提示：您可以随时在"站点管理"页面补充账号或 API Key。')}</p>
     </CenteredModal>
   );
 }

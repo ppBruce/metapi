@@ -169,6 +169,13 @@ const zhToEn: Record<string, string> = {
   '全部群组': 'All Groups',
   '群组路由': 'Group Routes',
   '该群组会将多个来源模型聚合为一个对外模型名；这里调整优先级桶时会直接回写来源通道。若某个来源模型被其他群组复用，保存前会提示影响范围。': 'This group aggregates multiple source models into one public model name. Priority bucket edits here write back to the source channels directly. If a source model is reused by other groups, you will be warned about the impact before saving.',
+  '聚合已有模型': 'Combine existing models',
+  '选现有模型，合成一个对外名': 'Pick existing models, expose one public name',
+  '按规则匹配': 'Match by rule',
+  '精确名 / 通配符 / 正则': 'Exact name / wildcard / regex',
+  '群组类型': 'Group type',
+  '改为编辑': 'Edit it instead',
+  '注意：上游当前也提供这个名字的模型。群组占用该名字后，上游这条模型不会再单独生成路由，只有在下面把它选为来源才走得到。': 'Note: the upstream also serves a model with this name. Once the group owns it, that upstream model no longer gets its own route — it is only reachable if you add it as a source below.',
   '通配符路由按请求实时决策；下方优先级桶在整条路由内全局生效，来源模型只作为通道标签展示。': 'Wildcard routes decide per request. The priority buckets below apply globally across the whole route, while source models are shown only as channel labels.',
   '请求超时（': 'Request timed out (',
   '未知账号': 'Unknown Account',
@@ -270,11 +277,7 @@ for (const [source, target] of Object.entries(zhToEnSupplemental)) {
 const HAS_HAN_RE = /[\u3400-\u9fff]/;
 const HAN_BLOCK_RE = /[\u3400-\u9fff]+/g;
 const LATIN_OR_DIGIT_RE = /[A-Za-z0-9]/;
-const TRANSLATABLE_ATTRS = ['placeholder', 'title', 'aria-label', 'data-tooltip'] as const;
-const SKIP_PARENT_SELECTOR = 'script, style, code, pre, kbd, samp';
 const zhToEnPhrases = Object.entries(zhToEn).sort((a, b) => b[0].length - a[0].length);
-const textNodeOriginalMap = new WeakMap<Text, string>();
-const elementAttrOriginalMap = new WeakMap<Element, Map<string, string>>();
 
 const CJK_PUNCT_TO_ASCII: Record<string, string> = {
   '，': ', ',
@@ -364,139 +367,6 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     runtimeLanguage = language;
     document.documentElement.setAttribute('lang', language === 'zh' ? 'zh-CN' : 'en');
-  }, [language]);
-
-  useEffect(() => {
-    const root = document.body;
-    if (!root) return;
-
-    const shouldTranslateTextNode = (node: Text): boolean => {
-      const parent = node.parentElement;
-      if (!parent) return false;
-      if (parent.closest(SKIP_PARENT_SELECTOR)) return false;
-      if (parent.isContentEditable) return false;
-      const value = node.nodeValue || '';
-      if (!value.trim()) return false;
-      if (!HAS_HAN_RE.test(value) && language !== 'zh') return false;
-      return true;
-    };
-
-    const processTextNode = (node: Text) => {
-      if (!shouldTranslateTextNode(node)) return;
-      const current = node.nodeValue || '';
-      const stored = textNodeOriginalMap.get(node);
-      if (!stored) {
-        textNodeOriginalMap.set(node, current);
-      } else if (shouldReplaceStoredTranslation(current, stored, language)) {
-        textNodeOriginalMap.set(node, current);
-      }
-      const source = textNodeOriginalMap.get(node) || current;
-      const next = translateText(source, language);
-      if (next !== current) {
-        node.nodeValue = next;
-      }
-    };
-
-    const processElementAttrs = (el: Element) => {
-      if (el.matches(SKIP_PARENT_SELECTOR)) return;
-      let attrMap = elementAttrOriginalMap.get(el);
-      if (!attrMap) {
-        attrMap = new Map<string, string>();
-        elementAttrOriginalMap.set(el, attrMap);
-      }
-
-      for (const attr of TRANSLATABLE_ATTRS) {
-        const current = el.getAttribute(attr);
-        if (!current || !current.trim()) continue;
-        const stored = attrMap.get(attr);
-        if (!stored) {
-          attrMap.set(attr, current);
-        } else if (shouldReplaceStoredTranslation(current, stored, language)) {
-          attrMap.set(attr, current);
-        }
-
-        const source = attrMap.get(attr) || current;
-        const next = translateText(source, language);
-        if (next !== current) {
-          el.setAttribute(attr, next);
-        }
-      }
-    };
-
-    const walk = (node: Node) => {
-      if (node.nodeType === Node.TEXT_NODE) {
-        processTextNode(node as Text);
-        return;
-      }
-      if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-      const el = node as Element;
-      processElementAttrs(el);
-      for (const child of Array.from(el.childNodes)) {
-        walk(child);
-      }
-    };
-
-    walk(root);
-    if (language !== 'en') {
-      return;
-    }
-
-    let pendingRecords: MutationRecord[] = [];
-    let flushTimer: ReturnType<typeof setTimeout> | null = null;
-    let disposed = false;
-
-    const flushPendingRecords = () => {
-      flushTimer = null;
-      if (disposed) return;
-      const recordsToProcess = pendingRecords;
-      pendingRecords = [];
-      for (const record of recordsToProcess) {
-        if (record.type === 'characterData') {
-          processTextNode(record.target as Text);
-          continue;
-        }
-
-        if (record.type === 'attributes') {
-          processElementAttrs(record.target as Element);
-          continue;
-        }
-
-        if (record.type === 'childList') {
-          for (const node of Array.from(record.addedNodes)) {
-            walk(node);
-          }
-        }
-      }
-    };
-
-    const scheduleFlush = (records: MutationRecord[]) => {
-      pendingRecords.push(...records);
-      if (flushTimer !== null) return;
-      // Coalesce bursts from React renders and frequently refreshed log pages.
-      // A short timer keeps translation out of the MutationObserver callback and
-      // prevents one recursive walk per DOM mutation.
-      flushTimer = setTimeout(flushPendingRecords, 0);
-    };
-
-    const observer = new MutationObserver((records) => {
-      scheduleFlush(records);
-    });
-
-    observer.observe(root, {
-      subtree: true,
-      childList: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: [...TRANSLATABLE_ATTRS],
-    });
-
-    return () => {
-      disposed = true;
-      if (flushTimer !== null) clearTimeout(flushTimer);
-      pendingRecords = [];
-      observer.disconnect();
-    };
   }, [language]);
 
   const setLanguage = useCallback((next: Language) => {

@@ -21,9 +21,7 @@ import { getCredentialModeFromExtraConfig } from './accountExtraConfig.js';
 import { lookupSiteContextLimitForNames } from './siteContextCapabilityService.js';
 import { filterRecentlyFailedCandidates, formatContextTokens, isChannelRecentlyFailed, isSiteDisabled } from './tokenRouterFailurePolicy.js';
 import { isProbeAttributableCooldown } from './tokenRouterFailureRecording.js';
-import { formatChannelRuntimeLoad, isExplicitTokenChannel, isOauthRouteUnitCandidate, isOauthRouteUnitMemberCoolingDown, resolveChannelRuntimeLoadMultiplier, resolveRouteStrategy, setCandidateDecisionReason } from './tokenRouterCandidateHelpers.js';
-import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
-import { getOauthRouteUnitStrategyLabel } from './oauth/routeUnitService.js';
+import { formatChannelRuntimeLoad, isExplicitTokenChannel, resolveChannelRuntimeLoadMultiplier, resolveRouteStrategy, setCandidateDecisionReason } from './tokenRouterCandidateHelpers.js';
 import { channelSupportsRequestedModel, isRouteDisplayNameMatch, normalizeChannelSourceModel, normalizeModelAlias, normalizeRouteDisplayName, resolveMappedModel, resolveModelResolution } from './tokenRouterModelMatching.js';
 import { ShadowCandidateInput, rankShadowCandidates } from './routeScoringShadow.js';
 import { getPerformanceShadowMetrics } from './performanceShadow.js';
@@ -38,7 +36,7 @@ import type {
   RouteDecisionExplanation,
   WeightedSelectionMode,
   WeightedSelectionResult,
-} from './tokenRouter.js';
+} from './tokenRouterTypes.js';
 
 /** Default downstream policy, shared with the router's public entry points. */
 export const DEFAULT_DOWNSTREAM_POLICY: DownstreamRoutingPolicy = EMPTY_DOWNSTREAM_ROUTING_POLICY;
@@ -221,6 +219,45 @@ export async function explainSelectionFromMatch(
       }
       summary.push(`探测冷却放行：${probeRelaxed.length} 个候选仅有健康探测写入的冷却，已放行给路由选择`);
       available.push(...probeRelaxed);
+    }
+  }
+
+  if (available.length === 0) {
+    // Availability-first: a cooldown is a prediction, not a verdict. When every
+    // other filter has already been relaxed and the only thing left is a
+    // real-failure cooldown, try the channel closest to revival instead of
+    // returning "no channels" without a single upstream attempt.
+    //
+    // This is the single-channel case in particular: cooling the only channel
+    // turns one slow answer into guaranteed downtime for the whole route, and
+    // the client's retry never reaches the upstream at all. With several
+    // channels all cooling, the same reasoning applies — one probe is better
+    // than a guaranteed 503 — but only the soonest-recovering one is released,
+    // so a genuinely dead pool is still probed one channel at a time.
+    const cooldownRelaxed = match.channels.filter((row) => (
+      getCandidateEligibilityReasons(row, {
+        requestedModel,
+        bypassSourceModelCheck,
+        excludeChannelIds,
+        nowIso,
+        downstreamPolicy,
+        requiredContextTokens: options.requiredContextTokens,
+        ignoreProbeCooldown: true,
+        ignoreChannelCooldown: true,
+      }).length === 0
+    ));
+    if (cooldownRelaxed.length > 0) {
+      const soonest = [...cooldownRelaxed].sort((left, right) => (
+        String(left.channel.cooldownUntil ?? '').localeCompare(String(right.channel.cooldownUntil ?? ''))
+      ))[0]!;
+      const candidate = candidateMap.get(soonest.channel.id);
+      if (candidate) {
+        candidate.eligible = true;
+        candidate.reason = '可用（冷却兜底放行 — 没有其他可用通道，宁可尝试一次也不直接失败）';
+        candidate.reasonCodes = ['eligible'];
+      }
+      available.push(soonest);
+      summary.push(`冷却兜底放行：${cooldownRelaxed.length} 个候选仅因冷却被排除，放行最早恢复的 1 个尝试`);
     }
   }
 
@@ -726,7 +763,6 @@ export function buildShadowCandidateInputs(
     const load = proxyChannelCoordinator.getChannelLoadSnapshot({
       channelId: candidate.channel.id,
       accountExtraConfig: candidate.account.extraConfig,
-      accountOauthProvider: candidate.account.oauthProvider,
     });
     const historical = historicalBySite.get(candidate.site.id);
     const downstreamSiteMultiplier = downstreamPolicy.siteWeightMultipliers[candidate.site.id] ?? 1;
@@ -802,85 +838,12 @@ export function buildShadowCandidateInputs(
   });
 }
 
-export function resolveRouteUnitMemberTokenValue(candidate: {
-  account: typeof schema.accounts.$inferSelect;
-}): string | null {
-  const oauthAccessToken = candidate.account.accessToken?.trim();
-  if (oauthAccessToken) return oauthAccessToken;
-  const apiToken = candidate.account.apiToken?.trim();
-  return apiToken || null;
-}
-
-export function buildRouteUnitMemberDispatchCandidate(
-  outerCandidate: RouteChannelCandidate,
-  memberCandidate: RouteChannelCandidate['routeUnitMembers'][number],
-): RouteChannelCandidate {
-  return {
-    ...outerCandidate,
-    account: memberCandidate.account,
-    site: memberCandidate.site,
-    token: null,
-  };
-}
-
-export function getRouteUnitMemberEligibilityReasons(
-  outerCandidate: RouteChannelCandidate,
-  memberCandidate: RouteChannelCandidate['routeUnitMembers'][number],
-  options: CandidateEligibilityOptions,
-): string[] {
-  const reasonParts: string[] = [];
-  const bypassSourceModelCheck = options.bypassSourceModelCheck ?? false;
-  const nowIso = options.nowIso ?? new Date().toISOString();
-
-  if (!bypassSourceModelCheck && !channelSupportsRequestedModel(outerCandidate.channel.sourceModel, options.requestedModel)) {
-    reasonParts.push(`来源模型不匹配=${outerCandidate.channel.sourceModel || ''}`);
-  }
-
-  if (!outerCandidate.channel.enabled) reasonParts.push('通道禁用');
-
-  if (memberCandidate.account.status !== 'active') {
-    reasonParts.push(`账号状态=${memberCandidate.account.status}`);
-  }
-
-  if (isSiteDisabled(memberCandidate.site.status)) {
-    reasonParts.push(`站点状态=${memberCandidate.site.status || 'disabled'}`);
-  }
-
-  const downstreamExclusionReason = resolveDownstreamExclusionReason(
-    buildRouteUnitMemberDispatchCandidate(outerCandidate, memberCandidate),
-    options.downstreamPolicy,
-  );
-  if (downstreamExclusionReason) {
-    reasonParts.push(downstreamExclusionReason);
-  }
-
-  const tokenValue = resolveRouteUnitMemberTokenValue(memberCandidate);
-  if (!tokenValue) reasonParts.push('令牌不可用');
-
-  if (isOauthRouteUnitMemberCoolingDown(memberCandidate.member, nowIso)) {
-    reasonParts.push('冷却中');
-  }
-
-  return reasonParts;
-}
-
-export function getEligibleRouteUnitMembers(
-  candidate: RouteChannelCandidate,
-  options: CandidateEligibilityOptions,
-): RouteChannelCandidate['routeUnitMembers'] {
-  if (!isOauthRouteUnitCandidate(candidate)) return [];
-  return candidate.routeUnitMembers.filter((memberCandidate) => (
-    getRouteUnitMemberEligibilityReasons(candidate, memberCandidate, options).length === 0
-  ));
-}
-
 export function isKeylessApiConnection(candidate: {
   channel: typeof schema.routeChannels.$inferSelect;
   account: typeof schema.accounts.$inferSelect;
   token: typeof schema.accountTokens.$inferSelect | null;
 }): boolean {
   if (candidate.channel.tokenId || candidate.token) return false;
-  if (getOauthInfoFromAccount(candidate.account)) return false;
   let authenticationMode = '';
   try {
     const parsed = JSON.parse(candidate.account.extraConfig || '{}') as Record<string, unknown>;
@@ -907,12 +870,6 @@ export function resolveChannelTokenValue(candidate: {
     if (!isUsableAccountToken(candidate.token)) return null;
     const token = candidate.token.token?.trim();
     return token ? token : null;
-  }
-
-  if (getOauthInfoFromAccount(candidate.account)) {
-    const accessToken = candidate.account.accessToken?.trim();
-    if (accessToken) return accessToken;
-    return null;
   }
 
   const fallback = candidate.account.apiToken?.trim();
@@ -1020,22 +977,6 @@ export function getCandidateEligibilityReasons(
 
   if (!candidate.channel.enabled) addReason('channel_disabled', '通道禁用');
 
-  if (isOauthRouteUnitCandidate(candidate)) {
-    if (excludeChannelIds.includes(candidate.channel.id)) {
-      // Route-unit failover should stay inside the same outer channel and switch members instead of
-      // excluding the entire pool after one member fails.
-    }
-
-    if (getEligibleRouteUnitMembers(candidate, options).length === 0) {
-      addReason(
-        'route_unit_unavailable',
-        `路由池成员不可用（${candidate.routeUnit?.name || getOauthRouteUnitStrategyLabel(candidate.routeUnit?.strategy || 'round_robin')}）`,
-        { routeUnitId: candidate.routeUnit?.id ?? null },
-      );
-    }
-    return reasons;
-  }
-
   if (isExplicitTokenChannel(candidate)) {
     if (candidate.account.status === 'disabled') {
       addReason('account_unavailable', `账号状态=${candidate.account.status}`, { status: candidate.account.status });
@@ -1065,7 +1006,8 @@ export function getCandidateEligibilityReasons(
   }
 
   if (
-    candidate.channel.cooldownUntil
+    !options.ignoreChannelCooldown
+    && candidate.channel.cooldownUntil
     && candidate.channel.cooldownUntil > nowIso
     && !(options.ignoreProbeCooldown && isProbeAttributableCooldown(candidate.channel))
   ) {
@@ -1152,17 +1094,45 @@ export function calculateWeightedSelection(
     proxyChannelCoordinator.getChannelLoadSnapshot({
       channelId: candidate.channel.id,
       accountExtraConfig: candidate.account.extraConfig,
-      accountOauthProvider: candidate.account.oauthProvider,
     })
   ));
 
-  const valueScores = candidates.map((c, i) => {
-    const unitCost = effectiveCosts[i]?.unitCost || 1;
-    const balance = c.account.balance || 0;
-    const totalUsed = (c.channel.successCount ?? 0) + (c.channel.failCount ?? 0);
-    const recentUsage = Math.max(totalUsed, 1);
-    return costWeight * (1 / unitCost) + balanceWeight * balance + usageWeight * (1 / recentUsage);
+  // Normalize each dimension to [0,1] before applying the profile weights. Raw
+  // balance (USD) used to outrank 1/unitCost and 1/usage by orders of magnitude,
+  // so "cost first" still ranked by balance and the preset weights never mattered.
+  // Both money dimensions are log-scaled so a large balance cannot flatten the rest.
+  const knownCosts = effectiveCosts
+    .map((cost) => cost?.unitCost)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0)
+    .sort((left, right) => left - right);
+  const medianCost = knownCosts.length > 0 ? knownCosts[Math.floor(knownCosts.length / 2)]! : 1;
+  const costSignals = candidates.map((_, i) => {
+    const unitCost = effectiveCosts[i]?.unitCost;
+    const value = typeof unitCost === 'number' && Number.isFinite(unitCost) && unitCost > 0
+      ? unitCost
+      : medianCost;
+    return -Math.log(Math.max(value, 1e-9));
   });
+  const balanceSignals = candidates.map((c) => Math.log1p(Math.max(0, c.account.balance || 0)));
+  const usageSignals = candidates.map((c) => -Math.log1p(Math.max(
+    1,
+    (c.channel.successCount ?? 0) + (c.channel.failCount ?? 0),
+  )));
+  const normalizeDimension = (values: number[]): number[] => {
+    const max = Math.max(...values);
+    const min = Math.min(...values);
+    const range = max - min;
+    if (!Number.isFinite(range) || range <= 0) return values.map(() => 0.5);
+    return values.map((value) => (value - min) / range);
+  };
+  const normalizedCost = normalizeDimension(costSignals);
+  const normalizedBalance = normalizeDimension(balanceSignals);
+  const normalizedUsage = normalizeDimension(usageSignals);
+  const valueScores = candidates.map((_, i) => (
+    costWeight * normalizedCost[i]!
+    + balanceWeight * normalizedBalance[i]!
+    + usageWeight * normalizedUsage[i]!
+  ));
 
   const normalizedVS = normalizeValueScores(valueScores);
 

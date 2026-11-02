@@ -8,6 +8,7 @@
 import { DetailDisclosureCard, debugCodeBlockStyle, detailInfoGridStyle, detailInfoItemStyle, detailInfoLabelStyle, detailInfoValueStyle, detailSectionTitleStyle, formSectionStyle } from './proxyLogsUi.js';
 import { parseStoredDebugPreview, stringifyStoredDebugValue } from './proxyLogsHelpers.js';
 import type { ProxyDebugTraceDetail } from '../../api.js';
+import { tr } from '../../i18n.js';
 
 export type ProxyDebugTraceAttempt = ProxyDebugTraceDetail['attempts'][number];
 
@@ -29,7 +30,7 @@ export function renderTraceStatusBadge(trace: ProxyDebugTraceListItemLike) {
         color: failed ? 'var(--color-danger)' : 'var(--color-success)',
       }}
     >
-      {failed ? '失败' : '成功'}
+      {failed ? tr('失败') : tr('成功')}
     </span>
   );
 }
@@ -60,9 +61,7 @@ export function renderStoredDebugDetails(
               event.stopPropagation();
               void onCopy(copyLabel, value);
             }}
-          >
-            复制当前保存内容
-          </button>
+          >{tr('复制当前保存内容')}</button>
         </div>
         {normalized.note ? (
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
@@ -118,7 +117,7 @@ export function ProxyDebugAttemptDetail({ attempt }: { attempt: ProxyDebugTraceA
       <div style={{ padding: 12, display: 'grid', gap: 12 }}>
         <div style={detailInfoGridStyle}>
           <div style={detailInfoItemStyle}>
-            <div style={detailInfoLabelStyle}>目标地址</div>
+            <div style={detailInfoLabelStyle}>{tr('目标地址')}</div>
             <div
               style={{
                 ...detailInfoValueStyle,
@@ -130,27 +129,27 @@ export function ProxyDebugAttemptDetail({ attempt }: { attempt: ProxyDebugTraceA
             </div>
           </div>
           <div style={detailInfoItemStyle}>
-            <div style={detailInfoLabelStyle}>执行器</div>
+            <div style={detailInfoLabelStyle}>{tr('执行器')}</div>
             <div style={detailInfoValueStyle}>
               {attempt.runtimeExecutor || '-'}
             </div>
           </div>
           <div style={detailInfoItemStyle}>
-            <div style={detailInfoLabelStyle}>恢复逻辑</div>
+            <div style={detailInfoLabelStyle}>{tr('恢复逻辑')}</div>
             <div style={detailInfoValueStyle}>
-              {attempt.recoverApplied ? '已应用' : '未应用'}
+              {attempt.recoverApplied ? tr('已应用') : tr('未应用')}
             </div>
           </div>
           <div style={detailInfoItemStyle}>
-            <div style={detailInfoLabelStyle}>降级决策</div>
+            <div style={detailInfoLabelStyle}>{tr('降级决策')}</div>
             <div style={detailInfoValueStyle}>
-              {attempt.downgradeDecision ? '已触发' : '未触发'}
+              {attempt.downgradeDecision ? tr('已触发') : tr('未触发')}
             </div>
           </div>
         </div>
         {attempt.downgradeReason ? (
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-            降级原因：{attempt.downgradeReason}
+            {tr('降级原因：')}{attempt.downgradeReason}
           </div>
         ) : null}
         <pre style={debugCodeBlockStyle}>{serializedAttempt}</pre>
@@ -186,17 +185,13 @@ onCopyStoredDebugValue: (label: string, value: unknown) => void;
 }) {
   if (!selectedDebugTraceId) {
     return (
-      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-        暂无追踪详情。请选择一条最近追踪后再查看。
-      </div>
+      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>{tr('暂无追踪详情。请选择一条最近追踪后再查看。')}</div>
     );
   }
 
   if (detail?.loading) {
     return (
-      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-        加载追踪详情中...
-      </div>
+      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>{tr('加载追踪详情中...')}</div>
     );
   }
 
@@ -210,9 +205,7 @@ onCopyStoredDebugValue: (label: string, value: unknown) => void;
 
   if (!detail?.data) {
     return (
-      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-        暂无追踪详情。
-      </div>
+      <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>{tr('暂无追踪详情。')}</div>
     );
   }
 
@@ -221,10 +214,10 @@ onCopyStoredDebugValue: (label: string, value: unknown) => void;
   return (
     <div style={{ display: 'grid', gap: 12 }}>
       <div style={{ ...formSectionStyle, gap: 10 }}>
-        <div style={detailSectionTitleStyle}>基础信息</div>
+        <div style={detailSectionTitleStyle}>{tr('基础信息')}</div>
         <div style={detailInfoGridStyle}>
           <div style={detailInfoItemStyle}>
-            <div style={detailInfoLabelStyle}>下游路径</div>
+            <div style={detailInfoLabelStyle}>{tr('下游路径')}</div>
             <div style={detailInfoValueStyle}>
               {traceDetail.downstreamPath || '-'}
             </div>
@@ -236,13 +229,13 @@ onCopyStoredDebugValue: (label: string, value: unknown) => void;
             </div>
           </div>
           <div style={detailInfoItemStyle}>
-            <div style={detailInfoLabelStyle}>模型</div>
+            <div style={detailInfoLabelStyle}>{tr('模型')}</div>
             <div style={detailInfoValueStyle}>
               {traceDetail.requestedModel || '-'}
             </div>
           </div>
           <div style={detailInfoItemStyle}>
-            <div style={detailInfoLabelStyle}>最终上游路径</div>
+            <div style={detailInfoLabelStyle}>{tr('最终上游路径')}</div>
             <div style={detailInfoValueStyle}>
               {traceDetail.finalUpstreamPath || '-'}
             </div>
@@ -252,31 +245,31 @@ onCopyStoredDebugValue: (label: string, value: unknown) => void;
 
       <div style={{ display: 'grid', gap: 10 }}>
         {renderStoredDebugDetails(
-          '候选 endpoint',
+          tr('候选 endpoint'),
           traceDetail.endpointCandidatesJson,
           {
-            copyLabel: '候选 endpoint',
+            copyLabel: tr('候选 endpoint'),
           }, onCopyStoredDebugValue,
         )}
         {renderStoredDebugDetails(
-          '原始下游请求头',
+          tr('原始下游请求头'),
           traceDetail.requestHeadersJson,
           {
-            copyLabel: '原始下游请求头',
+            copyLabel: tr('原始下游请求头'),
           }, onCopyStoredDebugValue,
         )}
         {renderStoredDebugDetails(
-          '原始下游请求体',
+          tr('原始下游请求体'),
           traceDetail.requestBodyJson,
           {
-            copyLabel: '原始下游请求体',
+            copyLabel: tr('原始下游请求体'),
           }, onCopyStoredDebugValue,
         )}
         {renderStoredDebugDetails(
-          '最终响应',
+          tr('最终响应'),
           traceDetail.finalResponseBodyJson,
           {
-            copyLabel: '最终响应',
+            copyLabel: tr('最终响应'),
           }, onCopyStoredDebugValue,
         )}
       </div>
@@ -286,9 +279,7 @@ onCopyStoredDebugValue: (label: string, value: unknown) => void;
       >
         <div style={{ padding: 12, display: 'grid', gap: 8 }}>
           {detail.data.attempts.length === 0 ? (
-            <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-              暂无 attempt 记录
-            </div>
+            <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>{tr('暂无 attempt 记录')}</div>
           ) : (
             detail.data.attempts.map((attempt) => (
               <ProxyDebugAttemptDetail key={attempt.id} attempt={attempt} />

@@ -36,10 +36,6 @@ import {
   resolveOpenAiBodyInputFiles,
 } from '../../services/proxyInputFileResolver.js';
 import {
-  buildOauthProviderHeaders,
-} from '../../services/oauth/service.js';
-import { getOauthInfoFromAccount } from '../../services/oauth/oauthAccount.js';
-import {
   collectResponsesFinalPayloadFromSse,
   collectResponsesFinalPayloadFromSseText,
   createSingleChunkStreamReader,
@@ -56,8 +52,8 @@ import { getRuntimeResponseReader, readRuntimeResponseText } from '../executors/
 import { detectDownstreamClientContext } from '../downstreamClientContext.js';
 import {
   getProxyMaxChannelRetries,
-  resolveProxyChannelFirstByteTimeoutMs,
 } from '../../services/proxyChannelRetry.js';
+import { resolveSurfaceFirstByteWindowMs } from '../surfaceFirstByteWindow.js';
 import { shouldAbortSameSiteEndpointFallback, resolveFailoverBackoffMs, sleepMs, canRetryInPlaceForRecoveringFailure, isRecoveringTransientFailure, shouldGraceRetryInPlaceOnce, shouldInPlaceRetryEmptyContentOnce } from '../../services/proxyRetryPolicy.js';
 import { createRequestTraceId } from '../../services/requestTraceId.js';
 import { applyOpenAiServiceTierPolicy } from '../serviceTierPolicy.js';
@@ -67,13 +63,13 @@ import {
   bindSurfaceStickyChannel,
   buildSurfaceChannelBusyMessage,
   buildSurfaceStickySessionKey,
+  clearSurfaceChannelAffinity,
   clearSurfaceStickyChannel,
   createSurfaceFailureToolkit,
   createSurfaceDispatchRequest,
   getSurfaceStickyPreferredChannelId,
   recordSurfaceSuccess,
   selectSurfaceChannelForAttempt,
-  trySurfaceOauthRefreshRecovery,
   wireStreamCancelOnClientDisconnect,
   wireReplyGoneAbortSignal,
 } from './sharedSurface.js';
@@ -308,12 +304,26 @@ export async function handleChatSurfaceRequest(
      * bookkeeping, including retryCount, happens here) and 'terminal' when the
      * failure was final — the error response has already been sent.
      */
+    type AttemptFailureOutcome =
+      | Awaited<ReturnType<typeof failureToolkit.handleDetectedFailure>>
+      | Awaited<ReturnType<typeof failureToolkit.handleUpstreamFailure>>
+      | Awaited<ReturnType<typeof failureToolkit.handleExecutionError>>;
     const continueAttemptOrTerminate = async (args: {
       selected: NonNullable<Awaited<ReturnType<typeof tokenRouter.selectChannel>>>;
-      failureOutcome: Awaited<ReturnType<typeof failureToolkit.handleDetectedFailure>>;
+      failureOutcome: AttemptFailureOutcome;
       status: number;
-      reason: string;
-      finalizeTerminalRetry: () => ReturnType<typeof finalizeRetryAsUpstreamFailure>;
+      reason: string | null;
+      /** Text memoised for the terminal fallback; defaults to `reason`. */
+      retryFailureReason?: string;
+      /**
+       * Which terminal shape the retry memo should use. Upstream failures are
+       * mapped through the site protocol profile; execution failures keep the
+       * raw "network failure" wording.
+       */
+      retryFailureKind?: 'upstream' | 'execution';
+      finalizeTerminalRetry: () =>
+        | ReturnType<typeof finalizeRetryAsUpstreamFailure>
+        | ReturnType<typeof finalizeRetryAsExecutionFailure>;
       upstreamPath: string | null;
     }): Promise<'retried' | 'terminal'> => {
       const inPlaceRecoveringRetry = !canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs })
@@ -353,7 +363,9 @@ export async function handleChatSurfaceRequest(
           return 'retried';
         }
         if (args.failureOutcome.action === 'retry') {
-          lastRetryFailure.current = finalizeRetryAsUpstreamFailure(args.status, args.reason);
+          lastRetryFailure.current = args.retryFailureKind === 'execution'
+            ? finalizeRetryAsExecutionFailure(args.retryFailureReason ?? 'network failure')
+            : finalizeRetryAsUpstreamFailure(args.status, args.retryFailureReason ?? args.reason ?? 'unknown error');
           await appendExcludedSiteChannels(args.failureOutcome.excludeSiteId);
         }
         await sleepMs(resolveFailoverBackoffMs(args.status, args.reason, config.proxyFailoverBackoffMs));
@@ -466,7 +478,6 @@ export async function handleChatSurfaceRequest(
     });
 
     const modelName = selected.actualModel || requestedModel;
-    const oauth = getOauthInfoFromAccount(selected.account);
     const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
     let endpointCandidates = [
       ...await resolveUpstreamEndpointCandidates(
@@ -481,9 +492,6 @@ export async function handleChatSurfaceRequest(
           hasNonImageFileInput,
           conversationFileSummary,
           wantsContinuationAwareResponses,
-        },
-        {
-          oauthProvider: oauth?.provider,
         },
       ),
     ];
@@ -506,17 +514,10 @@ export async function handleChatSurfaceRequest(
         downstreamFormat,
         stickySessionKey,
         stickyPreferredChannelId,
-        oauthProvider: oauth?.provider || null,
         isCodexSite,
         wantsContinuationAwareResponses,
       },
     });
-    const buildProviderHeaders = () => (
-      buildOauthProviderHeaders({
-        account: selected.account,
-        downstreamHeaders: request.headers as Record<string, unknown>,
-      })
-    );
     const executeEndpointResultForSiteApiBaseUrl = async (siteApiBaseUrl: string) => {
       const forceResponsesUpstreamStream = shouldForceResponsesUpstreamStream({
         sitePlatform: selected.site.platform,
@@ -535,7 +536,6 @@ export async function handleChatSurfaceRequest(
                 requestedModel,
                 actualModel: modelName,
                 sitePlatform: selected.site.platform,
-                accountType: oauth?.planType,
               },
               rules: config.openAiServiceTierRules,
             });
@@ -555,8 +555,6 @@ export async function handleChatSurfaceRequest(
           modelName,
           stream: upstreamStream,
           tokenValue: selected.tokenValue,
-          oauthProvider: oauth?.provider,
-          oauthProjectId: oauth?.projectId,
           sitePlatform: selected.site.platform,
           siteUrl: siteApiBaseUrl,
           openaiBody: bodyForEndpoint,
@@ -564,7 +562,6 @@ export async function handleChatSurfaceRequest(
           claudeOriginalBody,
           forceNormalizeClaudeBody: options.forceNormalizeClaudeBody,
           downstreamHeaders: request.headers as Record<string, unknown>,
-          providerHeaders: buildProviderHeaders(),
           codexSessionCacheKey,
         });
         const builtBody = endpointRequest.body as Record<string, unknown>;
@@ -598,27 +595,29 @@ export async function handleChatSurfaceRequest(
         ),
       });
       const tryRecover = async (ctx: Parameters<NonNullable<typeof endpointStrategy.tryRecover>>[0]) => {
-        if ((ctx.response.status === 401 || ctx.response.status === 403) && oauth) {
-          const recovered = await trySurfaceOauthRefreshRecovery({
-            ctx,
-            selected,
-            siteUrl: siteApiBaseUrl,
-            buildRequest: (endpoint) => buildEndpointRequest(endpoint),
-            bodyReadOptions: bodyReadGuards,
-          });
-          if (recovered?.upstream?.ok) {
-            return recovered;
-          }
-        }
         return endpointStrategy.tryRecover(ctx);
       };
       const debugAttemptBase = reserveSurfaceProxyDebugAttemptBase(debugTrace, endpointCandidates.length);
+      // Per-site first-byte window. The estimator reads the survival curve of
+      // raw attempts (successes + censored timeouts) and minimises time per
+      // usable answer, so it tracks peak-hour drift without a multiplier guess
+      // and can never exceed the configured ceiling. Fewer than
+      // FIRST_BYTE_WINDOW_MIN_SAMPLES attempts -> fall back to the EWMA rule.
+      // One decision for every surface: the window belongs to the upstream
+      // (site + model + stream shape), not to the protocol the client spoke.
+      const firstByteTimeoutMs = resolveSurfaceFirstByteWindowMs({
+        routeId: selected.channel.routeId,
+        siteId: selected.site.id,
+        modelName: requestedModel,
+        isStream,
+        retryCount,
+      });
       return executeEndpointFlow({
         siteUrl: siteApiBaseUrl,
         requestOverrideRules: selected.channel.requestOverrideRules ?? null,
         paramOverride: selected.site.paramOverride ?? null,
         disableCrossProtocolFallback: config.disableCrossProtocolFallback,
-        firstByteTimeoutMs: resolveProxyChannelFirstByteTimeoutMs(retryCount),
+        firstByteTimeoutMs,
         bodyReadOptions: bodyReadGuards,
         endpointCandidates,
         buildRequest: (endpoint) => buildEndpointRequest(endpoint),
@@ -742,12 +741,12 @@ export async function handleChatSurfaceRequest(
       selected,
             });
     if (leaseResult.status === 'timeout') {
-      clearSurfaceStickyChannel({
-            stickySessionKey,
-            selected,
-            requestedModel,
-            downstreamApiKeyId,
-          });
+      clearSurfaceChannelAffinity({
+        stickySessionKey,
+        selected,
+        requestedModel,
+        downstreamApiKeyId,
+      });
       const busyMessage = buildSurfaceChannelBusyMessage(leaseResult.waitMs);
       await failureToolkit.log({
         selected,
@@ -860,6 +859,26 @@ export async function handleChatSurfaceRequest(
           });
         };
 
+        // The three stream failure branches below all synthesise the same
+        // 502 verdict from a session error and feed the same attempt context
+        // to the failure toolkit; keep one copy so the args cannot drift.
+        const handleStreamFailure = async (reason: string, latency: number) =>
+          failureToolkit.handleDetectedFailure({
+            selected,
+            requestedModel,
+            modelName,
+            failure: { status: 502, reason },
+            isStream: true,
+            firstByteLatencyMs,
+            latencyMs: latency,
+            retryCount,
+            promptTokens: parsedUsage.promptTokens,
+            completionTokens: parsedUsage.completionTokens,
+            totalTokens: parsedUsage.totalTokens,
+            upstreamPath: successfulUpstreamPath,
+            upstreamHeaders: upstream.headers,
+          });
+
         const writeLines = (lines: string[]) => {
           startSseResponse();
           for (const line of lines) {
@@ -932,27 +951,14 @@ export async function handleChatSurfaceRequest(
             );
             const latency = Date.now() - startTime;
             if (streamResult.status === 'failed') {
-              clearSurfaceStickyChannel({
-            stickySessionKey,
-            selected,
-            requestedModel,
-            downstreamApiKeyId,
-          });
-              const failureReason = streamResult.errorMessage || 'stream processing failed';
-              const failureOutcome = await failureToolkit.handleDetectedFailure({
+              clearSurfaceChannelAffinity({
+                stickySessionKey,
                 selected,
-            requestedModel,
-                modelName,
-                failure: { status: 502, reason: failureReason },
-                isStream: true,
-                firstByteLatencyMs,
-                latencyMs: latency,
-                retryCount,
-                promptTokens: parsedUsage.promptTokens,
-                completionTokens: parsedUsage.completionTokens,
-                totalTokens: parsedUsage.totalTokens,
-                upstreamPath: successfulUpstreamPath,
+                requestedModel,
+                downstreamApiKeyId,
               });
+              const failureReason = streamResult.errorMessage || 'stream processing failed';
+              const failureOutcome = await handleStreamFailure(failureReason, latency);
               if (await continueAttemptOrTerminate({
                 selected,
                 failureOutcome,
@@ -997,21 +1003,11 @@ export async function handleChatSurfaceRequest(
           const latency = Date.now() - startTime;
           const failure = detectProxyFailure({ rawText, usage: parsedUsage, downstreamAborted: isDownstreamReplyGone(reply) });
           if (failure) {
-            clearSurfaceStickyChannel({
-            stickySessionKey,
-            selected,
-            requestedModel,
-            downstreamApiKeyId,
-          });
-            // Failure invalidates last-success affinity for this channel:
-            // a channel that just failed should not keep its "preferred next
-            // hop" status (it may be persistently blocked / dead), so the
-            // next request re-enters the balanced pool instead of retrying
-            // the same failing channel first.
-            proxyChannelCoordinator.clearLastSuccessChannel({
+            clearSurfaceChannelAffinity({
+              stickySessionKey,
+              selected,
               requestedModel,
               downstreamApiKeyId,
-              channelId: selected.channel.id,
             });
             const failureOutcome = await failureToolkit.handleDetectedFailure({
               selected,
@@ -1024,91 +1020,29 @@ export async function handleChatSurfaceRequest(
               completionTokens: parsedUsage.completionTokens,
               totalTokens: parsedUsage.totalTokens,
               upstreamPath: successfulUpstreamPath,
+              upstreamHeaders: upstream.headers,
             });
-            const inPlaceRecoveringRetry = !canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs })
-              && canRetryInPlaceForRecoveringFailure(retryCount, failure.status, failure.reason, config.proxyFailoverBackoffMs);
-            const terminalFailureOutcome = failureOutcome.action === 'retry'
-              ? (
-                canFailoverToNextChannel(reply)
-                && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason))
-                  ? null
-                  : finalizeRetryAsUpstreamFailure(failure.status, failure.reason)
-              )
-              : failureOutcome;
-            if (!terminalFailureOutcome) {
-              if (!isRecoveringTransientFailure(failure.status, failure.reason)) {
-                allFailuresRecovering = false;
-              }
-              // Grace window: transient-recovering failures (WAF/429/5xx) often
-              // clear within seconds. Stay on the same channel for a configurable
-              // grace period before switching, so recovery is observed instead of
-              // burning the failover budget on a cascade. Bounded to ONE in-place
-              // retry: a second same-channel retry rarely helps and delays
-              // genuine multi-channel failover.
-              if (shouldGraceRetryInPlaceOnce(graceRetriedOnce, Date.now() - requestStartedAtMs, config.proxyRecoveringGraceMs, failure.status, failure.reason)) {
-                graceRetriedOnce = true;
-                inPlaceRetryChannel = selected;
-                await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
-                continue;
-              }
-              // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
-              if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason)) {
-                emptyContentRetriedOnce = true;
-                inPlaceRetryChannel = selected;
-                continue;
-              }
-              if (inPlaceRecoveringRetry) {
-                inPlaceRetryChannel = selected;
-                await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
-                retryCount += 1;
-                continue;
-              }
-              if (failureOutcome.action === 'retry') {
-                lastRetryFailure.current = finalizeRetryAsUpstreamFailure(failure.status, failure.reason);
-                await appendExcludedSiteChannels(failureOutcome.excludeSiteId);
-              }
-              await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
-              retryCount += 1;
-              continue;
-            }
-            await finalizeDebugFailure(
-              terminalFailureOutcome.status,
-              terminalFailureOutcome.payload,
-              successfulUpstreamPath,
-            );
-            sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
+            if (await continueAttemptOrTerminate({
+              selected,
+              failureOutcome,
+              status: failure.status,
+              reason: failure.reason,
+              finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(failure.status, failure.reason),
+              upstreamPath: successfulUpstreamPath,
+            }) === 'retried') continue;
             return reply;
           }
 
           const streamResult = streamSession.consumeUpstreamFinalPayload(fallbackData, fallbackText, streamResponse);
           if (streamResult.status === 'failed') {
-            clearSurfaceStickyChannel({
-            stickySessionKey,
-            selected,
-            requestedModel,
-            downstreamApiKeyId,
-          });
-            // Same failure-invalidates-last-success rule as the non-stream path.
-            proxyChannelCoordinator.clearLastSuccessChannel({
+            clearSurfaceChannelAffinity({
+              stickySessionKey,
+              selected,
               requestedModel,
               downstreamApiKeyId,
-              channelId: selected.channel.id,
             });
             const failureReason = streamResult.errorMessage || 'stream processing failed';
-            const failureOutcome = await failureToolkit.handleDetectedFailure({
-              selected,
-            requestedModel,
-              modelName,
-              failure: { status: 502, reason: failureReason },
-              isStream: true,
-              firstByteLatencyMs,
-              latencyMs: latency,
-              retryCount,
-              promptTokens: parsedUsage.promptTokens,
-              completionTokens: parsedUsage.completionTokens,
-              totalTokens: parsedUsage.totalTokens,
-              upstreamPath: successfulUpstreamPath,
-            });
+            const failureOutcome = await handleStreamFailure(failureReason, latency);
             if (await continueAttemptOrTerminate({
               selected,
               failureOutcome,
@@ -1162,35 +1096,22 @@ export async function handleChatSurfaceRequest(
           rawText += decoder.decode();
 
           const latency = Date.now() - startTime;
-          if (streamResult.status === 'failed') {
-            clearSurfaceStickyChannel({
-            stickySessionKey,
-            selected,
-            requestedModel,
-            downstreamApiKeyId,
-          });
-            // Same failure-invalidates-last-success rule as the non-stream path:
-            // a channel whose stream just died must not stay the preferred hop.
-            proxyChannelCoordinator.clearLastSuccessChannel({
+          // A 200 + text/event-stream whose events were all unforwardable
+          // (empty body, keepalive-only) leaves the reply uncommitted — the
+          // lazy SSE start never ran. Treat it as a failed stream: otherwise
+          // the client hangs on an empty 200 while the log claims success.
+          const streamCommitted = isFastifyReplyCommitted(reply);
+          if (streamResult.status === 'failed' || !streamCommitted) {
+            clearSurfaceChannelAffinity({
+              stickySessionKey,
+              selected,
               requestedModel,
               downstreamApiKeyId,
-              channelId: selected.channel.id,
             });
-            const failureReason = streamResult.errorMessage || 'stream processing failed';
-            const failureOutcome = await failureToolkit.handleDetectedFailure({
-              selected,
-            requestedModel,
-              modelName,
-              failure: { status: 502, reason: failureReason },
-              isStream: true,
-              firstByteLatencyMs,
-              latencyMs: latency,
-              retryCount,
-              promptTokens: parsedUsage.promptTokens,
-              completionTokens: parsedUsage.completionTokens,
-              totalTokens: parsedUsage.totalTokens,
-              upstreamPath: successfulUpstreamPath,
-            });
+            const failureReason = streamResult.status === 'failed'
+              ? (streamResult.errorMessage || 'stream processing failed')
+              : 'upstream returned an empty event stream';
+            const failureOutcome = await handleStreamFailure(failureReason, latency);
             if (await continueAttemptOrTerminate({
               selected,
               failureOutcome,
@@ -1259,12 +1180,12 @@ export async function handleChatSurfaceRequest(
       const upstreamUsagePresent = hasProxyUsagePayload(upstreamData);
       const failure = detectProxyFailure({ rawText, usage: parsedUsage, downstreamAborted: isDownstreamReplyGone(reply) });
       if (failure) {
-        clearSurfaceStickyChannel({
-            stickySessionKey,
-            selected,
-            requestedModel,
-            downstreamApiKeyId,
-          });
+        clearSurfaceChannelAffinity({
+          stickySessionKey,
+          selected,
+          requestedModel,
+          downstreamApiKeyId,
+        });
         const failureOutcome = await failureToolkit.handleDetectedFailure({
           selected,
             requestedModel,
@@ -1276,56 +1197,16 @@ export async function handleChatSurfaceRequest(
           completionTokens: parsedUsage.completionTokens,
           totalTokens: parsedUsage.totalTokens,
           upstreamPath: successfulUpstreamPath,
+          upstreamHeaders: upstream.headers,
         });
-        const inPlaceRecoveringRetry = !canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs })
-          && canRetryInPlaceForRecoveringFailure(retryCount, failure.status, failure.reason, config.proxyFailoverBackoffMs);
-        const terminalFailureOutcome = failureOutcome.action === 'retry'
-          ? (
-            canFailoverToNextChannel(reply)
-            && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason))
-              ? null
-              : finalizeRetryAsUpstreamFailure(failure.status, failure.reason)
-          )
-          : failureOutcome;
-        if (!terminalFailureOutcome) {
-          if (!isRecoveringTransientFailure(failure.status, failure.reason)) {
-            allFailuresRecovering = false;
-          }
-          // Grace window: stay on the same channel for a configurable grace period
-          // on transient-recovering failures (WAF/429/5xx) before failing over.
-          // Bounded to ONE in-place retry per request.
-          if (shouldGraceRetryInPlaceOnce(graceRetriedOnce, Date.now() - requestStartedAtMs, config.proxyRecoveringGraceMs, failure.status, failure.reason)) {
-            graceRetriedOnce = true;
-            inPlaceRetryChannel = selected;
-            await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
-            continue;
-          }
-          // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
-          if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, failure.reason)) {
-            emptyContentRetriedOnce = true;
-            inPlaceRetryChannel = selected;
-            continue;
-          }
-          if (inPlaceRecoveringRetry) {
-            inPlaceRetryChannel = selected;
-            await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
-            retryCount += 1;
-            continue;
-          }
-          if (failureOutcome.action === 'retry') {
-            lastRetryFailure.current = finalizeRetryAsUpstreamFailure(failure.status, failure.reason);
-            await appendExcludedSiteChannels(failureOutcome.excludeSiteId);
-          }
-          await sleepMs(resolveFailoverBackoffMs(failure.status, failure.reason, config.proxyFailoverBackoffMs));
-          retryCount += 1;
-          continue;
-        }
-        await finalizeDebugFailure(
-          terminalFailureOutcome.status,
-          terminalFailureOutcome.payload,
-          successfulUpstreamPath,
-        );
-        sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
+        if (await continueAttemptOrTerminate({
+          selected,
+          failureOutcome,
+          status: failure.status,
+          reason: failure.reason,
+          finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(failure.status, failure.reason),
+          upstreamPath: successfulUpstreamPath,
+        }) === 'retried') continue;
         return reply;
       }
       const normalizedFinal = isGeminiNativeRuntimePath(successfulUpstreamPath)
@@ -1428,58 +1309,15 @@ export async function handleChatSurfaceRequest(
           latencyMs: Date.now() - startTime,
           retryCount,
         });
-        const inPlaceRecoveringRetry = !canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs })
-          && canRetryInPlaceForRecoveringFailure(retryCount, endpointFailureStatus || 502, err.message || null, config.proxyFailoverBackoffMs);
-        const terminalFailureOutcome = failureOutcome.action === 'retry'
-          ? (
-            canFailoverToNextChannel(reply)
-            && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err.message || null))
-              ? null
-              : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err.message || 'unknown error')
-          )
-          : failureOutcome;
-        if (!terminalFailureOutcome) {
-          if (!isRecoveringTransientFailure(endpointFailureStatus || 502, err.message || null)) {
-            allFailuresRecovering = false;
-          }
-          if (shouldGraceRetryInPlaceOnce(graceRetriedOnce, Date.now() - requestStartedAtMs, config.proxyRecoveringGraceMs, endpointFailureStatus || 502, err.message || null)) {
-            graceRetriedOnce = true;
-            inPlaceRetryChannel = selected;
-            await sleepMs(resolveFailoverBackoffMs(endpointFailureStatus || 502, err.message || null, config.proxyFailoverBackoffMs));
-            continue;
-          }
-          // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
-          if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err.message || null)) {
-            emptyContentRetriedOnce = true;
-            inPlaceRetryChannel = selected;
-            continue;
-          }
-          if (inPlaceRecoveringRetry) {
-            // Same-channel recovery: reuse the selected channel for one more
-            // attempt after the backoff, without re-selection (the channel is
-            // in excludeChannelIds + tokenRouter cooldown by now).
-            inPlaceRetryChannel = selected;
-            await sleepMs(resolveFailoverBackoffMs(endpointFailureStatus || 502, err.message || null, config.proxyFailoverBackoffMs));
-            retryCount += 1;
-            continue;
-          }
-          if (failureOutcome.action === 'retry') {
-            lastRetryFailure.current = finalizeRetryAsUpstreamFailure(
-              endpointFailureStatus || 502,
-              err.message || 'unknown error',
-            );
-            await appendExcludedSiteChannels(failureOutcome.excludeSiteId);
-          }
-          await sleepMs(resolveFailoverBackoffMs(endpointFailureStatus || 502, err.message || null, config.proxyFailoverBackoffMs));
-          retryCount += 1;
-          continue;
-        }
-        await finalizeDebugFailure(
-          terminalFailureOutcome.status,
-          terminalFailureOutcome.payload,
-          null,
-        );
-        sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
+        if (await continueAttemptOrTerminate({
+          selected,
+          failureOutcome,
+          status: endpointFailureStatus || 502,
+          reason: err.message || null,
+          retryFailureReason: err.message || 'unknown error',
+          finalizeTerminalRetry: () => finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err.message || 'unknown error'),
+          upstreamPath: null,
+        }) === 'retried') continue;
         return reply;
       }
       const failureOutcome = await failureToolkit.handleExecutionError({
@@ -1491,52 +1329,16 @@ export async function handleChatSurfaceRequest(
         latencyMs: Date.now() - startTime,
         retryCount,
       });
-      const inPlaceRecoveringRetry = !canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs })
-        && canRetryInPlaceForRecoveringFailure(retryCount, 502, err?.message || null, config.proxyFailoverBackoffMs);
-      const terminalFailureOutcome = failureOutcome.action === 'retry'
-        ? (
-          canFailoverToNextChannel(reply)
-          && (canRetryChannelSelection(retryCount, forcedChannelId, Date.now() - requestStartedAtMs, { maxRetries, budgetMs: failoverBudgetMs }) || inPlaceRecoveringRetry || shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null))
-            ? null
-            : finalizeRetryAsExecutionFailure(err?.message || 'network failure')
-        )
-        : failureOutcome;
-      if (!terminalFailureOutcome) {
-        if (!isRecoveringTransientFailure(502, err?.message || null)) {
-          allFailuresRecovering = false;
-        }
-        if (shouldGraceRetryInPlaceOnce(graceRetriedOnce, Date.now() - requestStartedAtMs, config.proxyRecoveringGraceMs, 502, err?.message || null)) {
-          graceRetriedOnce = true;
-          inPlaceRetryChannel = selected;
-          await sleepMs(resolveFailoverBackoffMs(502, err?.message || null, config.proxyFailoverBackoffMs));
-          continue;
-        }
-        // 空内容（含 pure-thinking 截断）失败：同站同账号原地重试一次，失败才切站。
-        if (shouldInPlaceRetryEmptyContentOnce(emptyContentRetriedOnce, err?.message || null)) {
-          emptyContentRetriedOnce = true;
-          inPlaceRetryChannel = selected;
-          continue;
-        }
-        if (inPlaceRecoveringRetry) {
-          inPlaceRetryChannel = selected;
-          await sleepMs(resolveFailoverBackoffMs(502, err?.message || null, config.proxyFailoverBackoffMs));
-          retryCount += 1;
-          continue;
-        }
-        if (failureOutcome.action === 'retry') {
-          lastRetryFailure.current = finalizeRetryAsExecutionFailure(err?.message || 'network failure');
-          await appendExcludedSiteChannels(failureOutcome.excludeSiteId);
-        }
-        await sleepMs(resolveFailoverBackoffMs(502, err?.message || null, config.proxyFailoverBackoffMs));
-        retryCount += 1;
-        continue;
-      }
-      await finalizeDebugFailure(
-        terminalFailureOutcome.status,
-        terminalFailureOutcome.payload,
-        null,
-      );
-      sendReplyIfWritable(reply, terminalFailureOutcome.status, terminalFailureOutcome.payload);
+      if (await continueAttemptOrTerminate({
+        selected,
+        failureOutcome,
+        status: 502,
+        reason: err?.message || null,
+        retryFailureReason: err?.message || 'network failure',
+        retryFailureKind: 'execution',
+        finalizeTerminalRetry: () => finalizeRetryAsExecutionFailure(err?.message || 'network failure'),
+        upstreamPath: null,
+      }) === 'retried') continue;
       return reply;
       } finally {
         channelLease.release();

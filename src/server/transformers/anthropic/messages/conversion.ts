@@ -1,4 +1,5 @@
 import { normalizeInputFileBlock, toAnthropicDocumentBlock } from '../../shared/inputFile.js';
+import { parseToolUseInput } from './toolUseInput.js';
 import {
   decodeAnthropicReasoningSignature,
 } from '../../shared/reasoningTransport.js';
@@ -42,13 +43,9 @@ function cloneJsonValue<T>(value: T): T | undefined {
 }
 
 function parseJsonString(raw: string): unknown {
-  const trimmed = raw.trim();
-  if (!trimmed) return {};
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return { value: raw };
-  }
+  // Truncated arguments must not become { value: "<broken json>" }: the client then runs
+  // the tool with one fake parameter and no real ones, which looks like a successful call.
+  return parseToolUseInput(raw);
 }
 
 function toPositiveInteger(value: unknown): number | null {
@@ -178,6 +175,12 @@ function sanitizeAnthropicThinkingConfig(
 
 function isAnthropicWebSearchTool(value: Record<string, unknown>): boolean {
   const type = asTrimmedString(value.type).toLowerCase();
+  // A client-defined function may legitimately be named "web_search" (Hermes and
+  // other agents ship one). Only provider-executed server tools are web search
+  // tools: rewriting a `type: "function"` entry into {"type":"web_search_20250305"}
+  // makes downstream chat-completions upstreams reject the request with
+  // "Invalid value for 'type': Input should be 'function'".
+  if (type === 'function' || type === 'custom') return false;
   const name = asTrimmedString(value.name).toLowerCase();
   return ANTHROPIC_WEB_SEARCH_TOOL_TYPES.has(type) || name === 'web_search' || name === 'google_search';
 }
@@ -839,8 +842,11 @@ export function convertOpenAiToolsToAnthropic(rawTools: unknown): unknown {
         };
       }
 
-      if (type === 'function' && isRecord(item.function)) {
-        const fn = item.function;
+      if (type === 'function') {
+        // Accept both the OpenAI nested shape ({"type":"function","function":{...}})
+        // and the flat shape some agents emit on the wire
+        // ({"type":"function","name":...,"parameters":...}).
+        const fn = isRecord(item.function) ? item.function : item;
         const name = asTrimmedString(fn.name);
         if (!name) return null;
 
@@ -848,6 +854,7 @@ export function convertOpenAiToolsToAnthropic(rawTools: unknown): unknown {
         const description = asTrimmedString(fn.description);
         if (description) mapped.description = description;
         if (fn.parameters !== undefined) mapped.input_schema = fn.parameters;
+        else if (fn.input_schema !== undefined) mapped.input_schema = fn.input_schema;
         if (item.cache_control !== undefined) mapped.cache_control = item.cache_control;
         return mapped;
       }
@@ -959,7 +966,9 @@ export function convertOpenAiBodyToAnthropicMessagesBody(
       const toolCall = rawToolCalls[index];
       if (!isRecord(toolCall)) continue;
       const functionPart = isRecord(toolCall.function) ? toolCall.function : {};
-      const id = asTrimmedString(toolCall.id) || `toolu_${Date.now()}_${index}`;
+      // Deterministic so a tool_result coming back on the next turn matches the id we emitted;
+      // a Date.now() id changed on every replay.
+      const id = asTrimmedString(toolCall.id) || `toolu_${index}`;
       const name = getShortToolName((
         asTrimmedString(functionPart.name)
         || asTrimmedString(toolCall.name)

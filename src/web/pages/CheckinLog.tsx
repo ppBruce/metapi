@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { api } from '../api.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
 import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
+import ListPage from '../components/ListPage.js';
 import { useToast } from '../components/Toast.js';
 import { PillTabBg } from '../components/PillTabBg.js';
 import { useIsMobile } from '../components/useIsMobile.js';
@@ -11,6 +13,8 @@ import {
 } from './helpers/checkinLogTime.js';
 import { tr } from '../i18n.js';
 import { StatusPill, StatusText } from '../components/StatusText.js';
+
+const EMPTY_LOGS: any[] = [];
 
 type LogFilter = 'all' | 'success' | 'failed' | 'skipped';
 
@@ -67,8 +71,6 @@ function parseLocalDateTimeInput(value: string): Date | null {
 }
 
 export default function CheckinLog() {
-  const [logs, setLogs] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(false);
   const [filter, setFilter] = useState<LogFilter>('all');
   const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
@@ -76,6 +78,22 @@ export default function CheckinLog() {
   const [showFilters, setShowFilters] = useState(false);
   const isMobile = useIsMobile();
   const toast = useToast();
+
+  const logsQuery = useQuery({
+    queryKey: ['checkin-logs'],
+    queryFn: () => api.getCheckinLogs('limit=100'),
+    retry: false,
+  });
+
+  const logs = Array.isArray(logsQuery.data) ? logsQuery.data : EMPTY_LOGS;
+  const loading = logsQuery.isFetching;
+
+  useEffect(() => {
+    if (!logsQuery.isError) return;
+    const eMessage = logsQuery.error instanceof Error ? logsQuery.error.message : String(logsQuery.error);
+    toast.error(eMessage || tr('加载签到记录失败'));
+  }, [logsQuery.isError, logsQuery.errorUpdatedAt]);
+
 
   function getStatus(log: any): 'success' | 'failed' | 'skipped' {
     const raw = (log.checkin_logs?.status || log.status || 'failed') as string;
@@ -147,45 +165,28 @@ export default function CheckinLog() {
     setToInput('');
   };
 
-  const load = async () => {
-    setLoading(true);
-    try {
-      const data = await api.getCheckinLogs('limit=100');
-      setLogs(Array.isArray(data) ? data : []);
-    } catch (e) {
-      const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '加载签到记录失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load();
-  }, []);
-
   const handleTriggerAll = async () => {
     setTriggering(true);
     try {
       const res = await api.triggerCheckinAll();
       if (res?.queued) {
-        toast.info(res.message || '已开始签到，请稍后查看签到记录');
+        toast.info(res.message || tr('已开始签到，请稍后查看签到记录'));
       } else {
-        toast.success(res?.message || '签到已执行');
+        toast.success(res?.message || tr('签到已执行'));
       }
-      await load();
+      await logsQuery.refetch();
     } catch (e) {
       const eMessage = e instanceof Error ? e.message : String(e);
-      toast.error(eMessage || '触发签到失败');
+      toast.error(eMessage || tr('触发签到失败'));
     } finally {
       setTriggering(false);
     }
   };
 
   const statusLabel = (status: 'success' | 'failed' | 'skipped') => {
-    if (status === 'success') return '成功';
-    if (status === 'skipped') return '跳过';
-    return '失败';
+    if (status === 'success') return tr('成功');
+    if (status === 'skipped') return tr('跳过');
+    return tr('失败');
   };
 
   const statusClass = (status: 'success' | 'failed' | 'skipped') => {
@@ -210,7 +211,7 @@ export default function CheckinLog() {
       }}
     >
       <label className="proxy-logs-time-field">
-        <span>开始</span>
+        <span>{tr('开始')}</span>
         <input
           type="datetime-local"
           value={fromInput}
@@ -219,7 +220,7 @@ export default function CheckinLog() {
         />
       </label>
       <label className="proxy-logs-time-field">
-        <span>结束</span>
+        <span>{tr('结束')}</span>
         <input
           type="datetime-local"
           value={toInput}
@@ -232,9 +233,9 @@ export default function CheckinLog() {
         className="btn btn-ghost proxy-logs-filter-reset"
         onClick={clearTimeRange}
         disabled={!hasActiveTimeRange}
-        title={hasActiveTimeRange ? '清空时间筛选' : '当前没有筛选条件'}
+        title={hasActiveTimeRange ? tr('清空时间筛选') : tr('当前没有筛选条件')}
       >
-        清空筛选
+        {tr('清空筛选')}
       </button>
     </div>
   );
@@ -242,10 +243,10 @@ export default function CheckinLog() {
   const filterTabs = (
     <div className="pill-tabs">
       {[
-        { key: 'all' as const, label: '全部', count: timeFilteredLogs.length },
-        { key: 'success' as const, label: '成功', count: statusCounts.success },
-        { key: 'failed' as const, label: '失败', count: statusCounts.failed },
-        { key: 'skipped' as const, label: '跳过', count: statusCounts.skipped },
+        { key: 'all' as const, label: tr('全部'), count: timeFilteredLogs.length },
+        { key: 'success' as const, label: tr('成功'), count: statusCounts.success },
+        { key: 'failed' as const, label: tr('失败'), count: statusCounts.failed },
+        { key: 'skipped' as const, label: tr('跳过'), count: statusCounts.skipped },
       ].map((tab) => (
         <button
           key={tab.key}
@@ -263,9 +264,9 @@ export default function CheckinLog() {
   );
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header">
-        <h2 className="page-title">{tr('签到记录')}</h2>
+    <ListPage
+      title={tr('签到记录')}
+      actions={
         <button
           onClick={handleTriggerAll}
           disabled={triggering}
@@ -273,28 +274,25 @@ export default function CheckinLog() {
         >
           {triggering ? (
             <>
-              <span className="spinner spinner-sm" />
-              触发中...
-            </>
+              <span className="spinner spinner-sm" />{tr('触发中...')}</>
           ) : (
-            '运行所有签到'
+            tr('运行所有签到')
           )}
         </button>
-      </div>
+      }
+      beforeList={
 
       <ResponsiveFilterPanel
         isMobile={isMobile}
         mobileOpen={showFilters}
         onMobileOpen={() => setShowFilters(true)}
         onMobileClose={() => setShowFilters(false)}
-        mobileTitle="筛选签到记录"
+        mobileTitle={tr('筛选签到记录')}
         mobileContent={(
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {timeRangeControls}
             {hasInvalidTimeRange && (
-              <div className="alert alert-error">
-                结束时间必须晚于开始时间
-              </div>
+              <div className="alert alert-error">{tr('结束时间必须晚于开始时间')}</div>
             )}
             {filterTabs}
           </div>
@@ -313,43 +311,34 @@ export default function CheckinLog() {
               {timeRangeControls}
             </div>
             {hasInvalidTimeRange && (
-              <div className="alert alert-error" style={{ width: '100%' }}>
-                结束时间必须晚于开始时间
-              </div>
+              <div className="alert alert-error" style={{ width: '100%' }}>{tr('结束时间必须晚于开始时间')}</div>
             )}
           </div>
         )}
       />
-
-      <div
-        className="card"
-        style={{
-          overflowX: 'auto',
-          borderTopLeftRadius: 0,
-          borderTopRightRadius: 0,
-        }}
-      >
-        {loading ? (
-          <div
-            style={{
-              padding: 24,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 10,
-            }}
-          >
-            {[...Array(5)].map((_, i) => (
-              <div key={i} style={{ display: 'flex', gap: 16 }}>
-                <div className="skeleton" style={{ width: 120, height: 16 }} />
-                <div className="skeleton" style={{ width: 80, height: 16 }} />
-                <div className="skeleton" style={{ width: 120, height: 16 }} />
-                <div className="skeleton" style={{ width: 70, height: 16 }} />
-                <div className="skeleton" style={{ flex: 1, height: 16 }} />
-                <div className="skeleton" style={{ width: 60, height: 16 }} />
-              </div>
-            ))}
-          </div>
-        ) : isMobile ? (
+      }
+      loading={loading}
+      isEmpty={filtered.length === 0}
+      emptyTitle={tr('暂无签到记录')}
+      emptyDesc={tr('点击“运行所有签到”开始执行')}
+      iconPath="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+      cardStyle={{ borderTopLeftRadius: 0, borderTopRightRadius: 0 }}
+      loadingFallback={
+        <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {[...Array(5)].map((_, i) => (
+            <div key={i} style={{ display: 'flex', gap: 16 }}>
+              <div className="skeleton" style={{ width: 120, height: 16 }} />
+              <div className="skeleton" style={{ width: 80, height: 16 }} />
+              <div className="skeleton" style={{ width: 120, height: 16 }} />
+              <div className="skeleton" style={{ width: 70, height: 16 }} />
+              <div className="skeleton" style={{ flex: 1, height: 16 }} />
+              <div className="skeleton" style={{ width: 60, height: 16 }} />
+            </div>
+          ))}
+        </div>
+      }
+    >
+        {isMobile ? (
           <div className="mobile-card-list">
             {filtered.map((log: any) => {
               const status = getStatus(log);
@@ -360,7 +349,7 @@ export default function CheckinLog() {
               return (
                 <MobileCard
                   key={logId}
-                  title={log.accounts?.username || '未知'}
+                  title={log.accounts?.username || tr('未知')}
                   headerActions={
                     <StatusText
                       badgeClass={statusClass(status)}
@@ -377,18 +366,18 @@ export default function CheckinLog() {
                         setExpandedLogId(isExpanded ? null : logId)
                       }
                     >
-                      {isExpanded ? '收起' : '详情'}
+                      {isExpanded ? tr('收起') : tr('详情')}
                     </button>
                   }
                 >
                   <MobileField
-                    label="时间"
+                    label={tr('时间')}
                     value={formatCheckinLogTime(
                       log.checkin_logs?.createdAt || log.createdAt,
                     )}
                   />
                   <MobileField
-                    label="站点"
+                    label={tr('站点')}
                     value={
                       log.sites?.url ? (
                         <a
@@ -415,7 +404,7 @@ export default function CheckinLog() {
                     }
                   />
                   <MobileField
-                    label="分类"
+                    label={tr('分类')}
                     value={
                       reason ? (
                         <StatusPill tone="muted" data-tooltip={reason.detailHint}>
@@ -427,18 +416,18 @@ export default function CheckinLog() {
                     }
                   />
                   <MobileField
-                    label="奖励"
+                    label={tr('奖励')}
                     value={log.checkin_logs?.reward || '-'}
                   />
                   {isExpanded ? (
                     <div className="mobile-card-extra">
                       <MobileField
-                        label="信息"
+                        label={tr('信息')}
                         stacked
                         value={log.checkin_logs?.message || log.message}
                       />
                       <MobileField
-                        label="建议"
+                        label={tr('建议')}
                         stacked
                         value={reason?.actionHint || '-'}
                       />
@@ -452,14 +441,14 @@ export default function CheckinLog() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>时间</th>
-                <th>账号</th>
-                <th>站点</th>
-                <th>状态</th>
-                <th>分类</th>
-                <th>信息</th>
-                <th>建议</th>
-                <th>奖励</th>
+                <th>{tr('时间')}</th>
+                <th>{tr('账号')}</th>
+                <th>{tr('站点')}</th>
+                <th>{tr('状态')}</th>
+                <th>{tr('分类')}</th>
+                <th>{tr('信息')}</th>
+                <th>{tr('建议')}</th>
+                <th>{tr('奖励')}</th>
               </tr>
             </thead>
             <tbody>
@@ -479,7 +468,7 @@ export default function CheckinLog() {
                         color: 'var(--color-text-primary)',
                       }}
                     >
-                      {log.accounts?.username || '未知'}
+                      {log.accounts?.username || tr('未知')}
                     </td>
                     <td>
                       {log.sites?.url ? (
@@ -568,26 +557,6 @@ export default function CheckinLog() {
           </table>
         )}
 
-        {!loading && filtered.length === 0 && (
-          <div className="empty-state">
-            <svg
-              className="empty-state-icon"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1}
-                d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
-            <div className="empty-state-title">暂无签到记录</div>
-            <div className="empty-state-desc">点击“运行所有签到”开始执行</div>
-          </div>
-        )}
-      </div>
-    </div>
+    </ListPage>
   );
 }

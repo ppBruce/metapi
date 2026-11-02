@@ -4,7 +4,6 @@ import { db, schema } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
-import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { PLATFORM_ALIASES, detectPlatformByUrlHint } from '../../shared/platformIdentity.js';
 import { fanoutSiteWideDisabledModels } from './siteDisabledModels.js';
 import {
@@ -103,12 +102,25 @@ type BackupDownstreamApiKeyRow = Pick<DownstreamApiKeyRow,
   | 'expiresAt'
   | 'maxCost'
   | 'maxRequests'
+  | 'maxRpm'
+  | 'maxInflight'
+  | 'maxDailyRequests'
+  | 'maxDailyCost'
+  | 'sensitiveWordDetection'
   | 'supportedModels'
+  | 'modelMappings'
   | 'allowedRouteIds'
   | 'siteWeightMultipliers'
   | 'allowedSiteIds'
   | 'allowedCredentialRefs'
-> & Partial<Pick<DownstreamApiKeyRow, 'usedCost' | 'usedRequests' | 'lastUsedAt'>>;
+> & Partial<Pick<DownstreamApiKeyRow,
+  'usedCost'
+  | 'usedRequests'
+  | 'lastUsedAt'
+  | 'dailyUsedRequests'
+  | 'dailyUsedCost'
+  | 'dailyWindowDate'
+>>;
 
 interface AccountsBackupSection {
   sites: SiteRow[];
@@ -194,7 +206,14 @@ type TokenModelAvailabilitySnapshot = TokenModelAvailabilityRow & {
   tokenKey: string | null;
 };
 
-type DownstreamApiKeyRuntimeSnapshot = Pick<DownstreamApiKeyRow, 'usedCost' | 'usedRequests' | 'lastUsedAt'>;
+type DownstreamApiKeyRuntimeSnapshot = Pick<DownstreamApiKeyRow,
+  'usedCost'
+  | 'usedRequests'
+  | 'lastUsedAt'
+  | 'dailyUsedRequests'
+  | 'dailyUsedCost'
+  | 'dailyWindowDate'
+>;
 
 interface RuntimeIdentityIndexes {
   siteKeyById: Map<number, string>;
@@ -304,18 +323,6 @@ function normalizeLegacyQuota(raw: unknown): number {
   return value;
 }
 
-function resolveImportedOauthColumns(row: Pick<AccountRow, 'oauthProvider' | 'oauthAccountKey' | 'oauthProjectId' | 'extraConfig'>) {
-  const oauth = getOauthInfoFromAccount(row);
-  const oauthProvider = row.oauthProvider || oauth?.provider || null;
-  const oauthAccountKey = row.oauthAccountKey || oauth?.accountKey || oauth?.accountId || null;
-  const oauthProjectId = row.oauthProjectId || oauth?.projectId || null;
-  return {
-    oauthProvider,
-    oauthAccountKey,
-    oauthProjectId,
-  };
-}
-
 function buildSiteIdentityKey(row: Pick<SiteRow, 'platform' | 'url'>): string {
   return `${asString(row.platform).toLowerCase()}::${normalizeOriginUrl(asString(row.url))}`;
 }
@@ -325,17 +332,7 @@ function buildAccountIdentityKey(input: {
   username?: string | null;
   accessToken?: string | null;
   apiToken?: string | null;
-  oauthProvider?: string | null;
-  oauthAccountKey?: string | null;
-  oauthProjectId?: string | null;
 }): string {
-  const oauthProvider = asString(input.oauthProvider).toLowerCase();
-  const oauthAccountKey = asString(input.oauthAccountKey);
-  const oauthProjectId = asString(input.oauthProjectId);
-  if (oauthProvider || oauthAccountKey || oauthProjectId) {
-    return `oauth::${input.siteKey}::${oauthProvider}::${oauthAccountKey}::${oauthProjectId}`;
-  }
-
   const apiToken = asString(input.apiToken);
   if (apiToken) {
     return `api::${input.siteKey}::${apiToken}`;
@@ -409,15 +406,11 @@ function buildRuntimeIdentityIndexesFromSection(section: AccountsBackupSection):
   for (const row of section.accounts) {
     const siteKey = siteKeyById.get(row.siteId);
     if (!siteKey) continue;
-    const oauthColumns = resolveImportedOauthColumns(row);
     const accountKey = buildAccountIdentityKey({
       siteKey,
       username: row.username,
       accessToken: row.accessToken,
       apiToken: row.apiToken,
-      oauthProvider: oauthColumns.oauthProvider,
-      oauthAccountKey: oauthColumns.oauthAccountKey,
-      oauthProjectId: oauthColumns.oauthProjectId,
     });
     accountKeyById.set(row.id, accountKey);
     accountIdByKey.set(accountKey, row.id);
@@ -499,15 +492,11 @@ async function collectCurrentRuntimeStateSnapshot(): Promise<RuntimeStateSnapsho
   for (const row of accounts) {
     const siteKey = siteKeyById.get(row.siteId);
     if (!siteKey) continue;
-    const oauthColumns = resolveImportedOauthColumns(row);
     const accountKey = buildAccountIdentityKey({
       siteKey,
       username: row.username,
       accessToken: row.accessToken,
       apiToken: row.apiToken,
-      oauthProvider: oauthColumns.oauthProvider,
-      oauthAccountKey: oauthColumns.oauthAccountKey,
-      oauthProjectId: oauthColumns.oauthProjectId,
     });
     accountKeyById.set(row.id, accountKey);
     accountRuntimeByKey.set(accountKey, {
@@ -565,6 +554,9 @@ async function collectCurrentRuntimeStateSnapshot(): Promise<RuntimeStateSnapsho
       usedCost: row.usedCost ?? 0,
       usedRequests: row.usedRequests ?? 0,
       lastUsedAt: row.lastUsedAt ?? null,
+      dailyUsedRequests: row.dailyUsedRequests ?? 0,
+      dailyUsedCost: row.dailyUsedCost ?? 0,
+      dailyWindowDate: row.dailyWindowDate ?? null,
     });
   }
 
@@ -872,9 +864,6 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       username,
       accessToken,
       apiToken,
-      oauthProvider: null,
-      oauthAccountKey: null,
-      oauthProjectId: null,
       balance: importedBalance,
       balanceUsed: importedUsed,
       quota: importedQuota > 0 ? importedQuota : importedBalance,
@@ -926,9 +915,6 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       username: asString(profile.name) || asString(profile.id) || baseUrl,
       accessToken: '',
       apiToken: apiKey,
-      oauthProvider: null,
-      oauthAccountKey: null,
-      oauthProjectId: null,
       balance: 0,
       balanceUsed: 0,
       quota: 0,
@@ -1062,9 +1048,6 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
       username,
       accessToken: accountAccessToken,
       apiToken,
-      oauthProvider: null,
-      oauthAccountKey: null,
-      oauthProjectId: null,
       balance: importedBalance,
       balanceUsed: importedUsed,
       quota: importedQuota > 0 ? importedQuota : importedBalance,
@@ -1173,9 +1156,9 @@ function normalizeBackupWebdavConfig(raw: unknown): BackupWebdavConfig {
   };
 }
 
-/** The stored password is an AES-GCM envelope (`v1:iv:tag:data`) written by encryptAccountPassword. */
+/** The stored password is an AES-GCM envelope (`vN:iv:tag:data`) written by encryptAccountPassword. */
 function isWebdavPasswordCipher(value: string): boolean {
-  return /^v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/.test(value);
+  return /^v\d+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/.test(value);
 }
 
 /** In-memory marker for a cipher-shaped password that failed to decrypt (e.g. key changed). */
@@ -1434,6 +1417,11 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
       usedCost: _usedCost,
       usedRequests: _usedRequests,
       lastUsedAt: _lastUsedAt,
+      // Daily usage is runtime state, like usedCost: never restore it from a
+      // backup, or importing another instance's backup rewrites local history.
+      dailyUsedRequests: _dailyUsedRequests,
+      dailyUsedCost: _dailyUsedCost,
+      dailyWindowDate: _dailyWindowDate,
       createdAt: _createdAt,
       updatedAt: _updatedAt,
       ...row
@@ -1622,7 +1610,9 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         platform: row.platform,
         proxyUrl: row.proxyUrl ?? null,
         customHeaders: row.customHeaders ?? null,
+        paramOverride: row.paramOverride ?? null,
         customHeadersOverrideRequestHeaders: row.customHeadersOverrideRequestHeaders ?? false,
+        protocolProfile: row.protocolProfile ?? null,
         status: row.status || 'active',
         isPinned: row.isPinned ?? false,
         sortOrder: row.sortOrder ?? 0,
@@ -1654,7 +1644,6 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     }
 
     for (const row of section.accounts) {
-      const oauthColumns = resolveImportedOauthColumns(row);
       const accountKey = importedIndexes.accountKeyById.get(row.id);
       const runtimeAccount = accountKey ? runtimeState.accountRuntimeByKey.get(accountKey) : undefined;
       await tx.insert(schema.accounts).values({
@@ -1663,9 +1652,6 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         username: row.username,
         accessToken: row.accessToken,
         apiToken: row.apiToken,
-        oauthProvider: oauthColumns.oauthProvider,
-        oauthAccountKey: oauthColumns.oauthAccountKey,
-        oauthProjectId: oauthColumns.oauthProjectId,
         balance: row.balance,
         balanceUsed: runtimeAccount?.balanceUsed ?? row.balanceUsed,
         quota: row.quota,
@@ -1736,6 +1722,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         weight: row.weight,
         enabled: row.enabled,
         manualOverride: row.manualOverride,
+        requestOverrideRules: row.requestOverrideRules ?? null,
         successCount: runtimeChannel?.successCount ?? row.successCount,
         failCount: runtimeChannel?.failCount ?? row.failCount,
         totalLatencyMs: runtimeChannel?.totalLatencyMs ?? row.totalLatencyMs,
@@ -1789,9 +1776,14 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         accountId,
         modelName: row.modelName,
         available: row.available,
+        connectivity: row.connectivity ?? null,
         isManual: false,
         latencyMs: row.latencyMs ?? null,
         checkedAt: row.checkedAt,
+        consecutiveHardFailures: row.consecutiveHardFailures ?? 0,
+        consecutiveSuccesses: row.consecutiveSuccesses ?? 0,
+        hardFailureBits: row.hardFailureBits ?? 0,
+        hardFailureSamples: row.hardFailureSamples ?? 0,
       }).run();
     }
 
@@ -1804,6 +1796,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         tokenId,
         modelName: row.modelName,
         available: row.available,
+        connectivity: row.connectivity ?? null,
         latencyMs: row.latencyMs ?? null,
         checkedAt: row.checkedAt,
       }).run();
@@ -1854,7 +1847,16 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
           usedCost: runtimeDownstream?.usedCost ?? row.usedCost ?? 0,
           maxRequests: row.maxRequests ?? null,
           usedRequests: runtimeDownstream?.usedRequests ?? row.usedRequests ?? 0,
+          maxRpm: row.maxRpm ?? null,
+          maxInflight: row.maxInflight ?? null,
+          maxDailyRequests: row.maxDailyRequests ?? null,
+          maxDailyCost: row.maxDailyCost ?? null,
+          dailyUsedRequests: runtimeDownstream?.dailyUsedRequests ?? row.dailyUsedRequests ?? 0,
+          dailyUsedCost: runtimeDownstream?.dailyUsedCost ?? row.dailyUsedCost ?? 0,
+          dailyWindowDate: runtimeDownstream?.dailyWindowDate ?? row.dailyWindowDate ?? null,
+          sensitiveWordDetection: row.sensitiveWordDetection ?? null,
           supportedModels: row.supportedModels ?? null,
+          modelMappings: row.modelMappings ?? null,
           allowedRouteIds: row.allowedRouteIds ?? null,
           siteWeightMultipliers: row.siteWeightMultipliers ?? null,
           allowedSiteIds: row.allowedSiteIds ?? null,
@@ -1883,14 +1885,20 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         channelId,
         accountId,
         downstreamApiKeyId,
+        tokenId: row.tokenId ?? null,
         modelRequested: row.modelRequested ?? null,
         modelActual: row.modelActual ?? null,
         status: row.status ?? null,
         httpStatus: row.httpStatus ?? null,
+        isStream: row.isStream ?? null,
+        firstByteLatencyMs: row.firstByteLatencyMs ?? null,
         latencyMs: row.latencyMs ?? null,
         promptTokens: row.promptTokens ?? null,
         completionTokens: row.completionTokens ?? null,
         totalTokens: row.totalTokens ?? null,
+        cacheReadTokens: row.cacheReadTokens ?? null,
+        cacheCreationTokens: row.cacheCreationTokens ?? null,
+        reasoningEffort: row.reasoningEffort ?? null,
         estimatedCost: row.estimatedCost ?? null,
         billingDetails: row.billingDetails ?? null,
         clientFamily: row.clientFamily ?? null,
@@ -1898,6 +1906,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         clientAppName: row.clientAppName ?? null,
         clientConfidence: row.clientConfidence ?? null,
         errorMessage: row.errorMessage ?? null,
+        requestTraceId: row.requestTraceId ?? null,
         retryCount: row.retryCount ?? 0,
         createdAt: row.createdAt,
       }).run();

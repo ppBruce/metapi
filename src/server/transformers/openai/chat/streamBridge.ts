@@ -9,6 +9,7 @@ import {
   type StreamTransformContext,
 } from '../../shared/normalized.js';
 import { extractChatChoiceEvents, extractChatResponseExtras } from './helpers.js';
+import { toOpenAiFinishReason } from '../../shared/finishReason.js';
 import type { OpenAiChatNormalizedStreamEvent } from './model.js';
 
 const multiChoiceToolCallState = new WeakMap<
@@ -61,9 +62,16 @@ export const openAiChatStream = {
           role: normalized.role !== undefined ? normalized.role : choiceEvent.role,
           contentDelta: normalized.contentDelta,
           reasoningDelta: normalized.reasoningDelta,
-          toolCallDeltas: normalized.toolCallDeltas !== undefined
-            ? normalized.toolCallDeltas
-            : choiceEvent.toolCallDeltas,
+          toolCallDeltas: choiceEvent.toolCallDeltas !== undefined
+            // The chat-native reader owns chat payloads: it sees every choice (the
+            // cross-protocol normalizer only reads choices[0]) and carries the per-choice
+            // annotations/citations the serializer needs. The normalizer used to override
+            // it here, which meant two index state machines ran over one payload and only
+            // the second one's output survived — the structural cause of the fragmented
+            // tool-call family. It now only fills in for payloads the chat reader ignores
+            // (responses / gemini / anthropic shapes).
+            ? choiceEvent.toolCallDeltas
+            : normalized.toolCallDeltas,
           finishReason: normalized.finishReason !== undefined
             ? normalized.finishReason
             : choiceEvent.finishReason,
@@ -146,7 +154,11 @@ export const openAiChatStream = {
             return {
               index: choiceEvent.index,
               delta,
-              finish_reason: choiceEvent.finishReason ?? null,
+              // Mid-stream chunks must keep finish_reason null; only a terminal value is
+              // projected into the OpenAI enum (which has no "error" member).
+              finish_reason: choiceEvent.finishReason == null
+                ? null
+                : toOpenAiFinishReason(choiceEvent.finishReason),
             };
           })
           .sort((left, right) => left.index - right.index),

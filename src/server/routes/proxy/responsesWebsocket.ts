@@ -14,14 +14,13 @@ import {
 } from '../../services/downstreamApiKeyService.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
-import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
-import { getOauthInfoFromAccount } from '../../services/oauth/oauthAccount.js';
 import { openAiResponsesTransformer } from '../../transformers/openai/responses/index.js';
 import { buildUpstreamEndpointRequest } from './upstreamEndpoint.js';
 import { config } from '../../config.js';
 import { applyOpenAiServiceTierPolicy } from '../../proxy-core/serviceTierPolicy.js';
 import { asTrimmedString } from '../../shared/trimString.js';
 import { resolveWebsocketReasoningEffort, setCurrentReasoningEffort } from '../../services/reasoningEffort.js';
+import { INTERNAL_TRANSPORT_NONCE, INTERNAL_TRANSPORT_NONCE_HEADER } from '../../proxy-core/internalTransportMarker.js';
 
 
 const installedApps = new WeakSet<FastifyInstance>();
@@ -113,15 +112,10 @@ function selectedChannelSupportsCodexWebsocketTransport(
   if (!config.codexUpstreamWebsocketEnabled) return false;
 
   const extraConfig = parseExtraConfigRecord(selectedChannel.account.extraConfig);
-  const oauth = readNestedRecord(extraConfig, 'oauth');
-  const providerData = readNestedRecord(oauth, 'providerData');
   const candidateFlags = [
     extraConfig?.websockets,
     readNestedRecord(extraConfig, 'attributes')?.websockets,
     readNestedRecord(extraConfig, 'metadata')?.websockets,
-    providerData?.websockets,
-    readNestedRecord(providerData, 'attributes')?.websockets,
-    readNestedRecord(providerData, 'metadata')?.websockets,
   ];
   for (const candidate of candidateFlags) {
     const parsed = toBooleanLike(candidate);
@@ -417,6 +411,7 @@ async function forwardResponsesRequestViaHttp(input: {
   const injectHeaders: Record<string, string | string[]> = {
     ...buildInjectHeaders(input.request),
     [RESPONSES_WEBSOCKET_TRANSPORT_HEADER]: '1',
+    [INTERNAL_TRANSPORT_NONCE_HEADER]: INTERNAL_TRANSPORT_NONCE,
     ...(input.preserveIncrementalMode ? { [RESPONSES_WEBSOCKET_MODE_HEADER]: 'incremental' } : {}),
   };
   if (
@@ -670,7 +665,6 @@ async function handleResponsesWebsocketConnection(
               requestedModel: requestModel,
               actualModel: asTrimmedString(selectedChannel?.actualModel),
               sitePlatform: asTrimmedString(selectedChannel?.site?.platform),
-              accountType: getOauthInfoFromAccount(selectedChannel?.account)?.planType,
             },
             rules: getServiceTierPolicyRules(),
           });
@@ -703,11 +697,6 @@ async function handleResponsesWebsocketConnection(
               [RESPONSES_WEBSOCKET_TRANSPORT_HEADER]: '1',
               ...(supportsIncrementalInput ? { [RESPONSES_WEBSOCKET_MODE_HEADER]: 'incremental' } : {}),
             };
-            const providerHeaders = buildOauthProviderHeaders({
-              account: codexWebsocketChannel.account,
-              downstreamHeaders,
-            });
-
             const websocketRuntimeSessionKey = buildCodexSessionResponseStoreKey({
               sessionId: websocketSessionId,
               siteId: codexWebsocketChannel.site.id,
@@ -731,7 +720,6 @@ async function handleResponsesWebsocketConnection(
                     downstreamFormat: 'responses',
                     responsesOriginalBody: normalized.request,
                     downstreamHeaders,
-                    providerHeaders,
                     codexExplicitSessionId: deriveCodexExplicitSessionId(normalized.request, websocketSessionId),
                   });
                   const requestUrl = `${target.baseUrl.replace(/\/+$/, '')}${prepared.path}`;
@@ -827,7 +815,14 @@ export function ensureResponsesWebsocketTransport(app: FastifyInstance) {
   app.server.on('upgrade', (request, socket, head) => {
     void (async () => {
       const url = new URL(request.url || '/', 'http://localhost');
-      if (url.pathname !== '/v1/responses') return;
+      if (url.pathname !== '/v1/responses') {
+        // Nothing else installs an 'upgrade' listener, so Node will not destroy
+        // the socket for us: an unauthenticated client could pin sockets forever
+        // by upgrading any other path.
+        writeUpgradeHttpError(socket, 404, 'not found');
+        socket.destroy();
+        return;
+      }
       const token = extractWebsocketAuthToken(request, url);
       if (!token) {
         writeUpgradeHttpError(socket, 401, 'Missing Authorization, x-api-key, x-goog-api-key, or key query parameter');

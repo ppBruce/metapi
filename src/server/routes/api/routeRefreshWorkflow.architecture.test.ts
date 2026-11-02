@@ -28,15 +28,26 @@ describe('route refresh workflow architecture boundaries', () => {
   it('keeps api controllers on the shared route refresh workflow instead of modelService', () => {
     const tokensSource = readSource('./tokens.ts');
     const settingsSource = readSource('./settings.ts');
+    // settingsRoutes is split: the maintenance module owns the rebuild call,
+    // so the workflow import lives there while settings.ts must still never
+    // reach modelService directly.
+    const settingsMaintenanceSource = readSource('./settingsMaintenance.ts');
     const statsSource = readSource('./stats.ts');
+    // Same story for statsRoutes: the marketplace / model-check endpoints (and
+    // their rebuild calls) moved into modelsRoutes.ts.
+    const modelsRoutesSource = readSource('./modelsRoutes.ts');
 
-    for (const source of [tokensSource, settingsSource, statsSource]) {
+    for (const source of [tokensSource, settingsMaintenanceSource, modelsRoutesSource]) {
       expectImportsRouteRefreshWorkflow(source);
+    }
+
+    for (const source of [tokensSource, settingsSource, settingsMaintenanceSource, statsSource, modelsRoutesSource]) {
       expectNoDirectModelServiceRouteRefresh(source);
     }
 
     expectCallsRebuildRoutesOnly(tokensSource);
-    expectCallsRebuildRoutesOnly(statsSource);
+    expectCallsRebuildRoutesOnly(settingsMaintenanceSource);
+    expectCallsRebuildRoutesOnly(modelsRoutesSource);
   });
 
   it('keeps exact-route pattern sync detection behind the pattern sync service', () => {
@@ -57,12 +68,11 @@ describe('route refresh workflow architecture boundaries', () => {
     const searchSource = readSource('../proxy/search.ts');
     const videosSource = readSource('../proxy/videos.ts');
     const schedulerSource = readSource('../../services/checkinScheduler.ts');
-    const oauthServiceSource = readSource('../../services/oauth/service.ts');
     const sharedSurfaceSource = readSource('../../proxy-core/surfaces/sharedSurface.ts');
     const geminiSurfaceSource = readSource('../../proxy-core/surfaces/geminiSurface.ts');
     const channelSelectionSource = readSource('../../proxy-core/channelSelection.ts');
 
-    for (const source of [schedulerSource, oauthServiceSource, channelSelectionSource]) {
+    for (const source of [schedulerSource, channelSelectionSource]) {
       expectImportsRouteRefreshWorkflow(source);
       expectNoDirectModelServiceRouteRefresh(source);
     }

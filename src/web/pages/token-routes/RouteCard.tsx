@@ -25,7 +25,6 @@ import { formatDateTimeMinuteLocal } from '../helpers/checkinLogTime.js';
 import type {
   RouteSummaryRow,
   RouteChannel,
-  RouteChannelRouteUnit,
   RouteDecision,
   RouteDecisionCandidate,
   MissingTokenRouteSiteActionItem,
@@ -92,24 +91,6 @@ type RouteCardProps = {
   expandedSourceGroupMap: Record<string, boolean>;
   onToggleSourceGroup: (groupKey: string) => void;
 };
-
-function getRouteUnitStrategyLabel(strategy: string | null | undefined): string {
-  return strategy === 'stick_until_unavailable' ? '单个用到不可用再切' : '轮询';
-}
-
-function collectRouteUnits(channels: RouteChannel[] | undefined): RouteChannelRouteUnit[] {
-  if (!Array.isArray(channels) || channels.length === 0) return [];
-  const unitsById = new Map<string, RouteChannelRouteUnit>();
-  for (const channel of channels) {
-    const routeUnit = channel.routeUnit;
-    if (!routeUnit) continue;
-    const key = String(routeUnit.id);
-    if (!unitsById.has(key)) {
-      unitsById.set(key, routeUnit);
-    }
-  }
-  return Array.from(unitsById.values());
-}
 
 function PriorityRailNewLayerRow({
   id,
@@ -310,7 +291,7 @@ function PriorityDragPreview({
             whiteSpace: 'nowrap',
           }}
         >
-          当前生效：{effectiveTokenName}
+          {tr('当前生效：')}{effectiveTokenName}
         </span>
         {channel.sourceModel ? (
           <span className="badge badge-muted" style={{ fontSize: 10 }}>
@@ -318,13 +299,11 @@ function PriorityDragPreview({
           </span>
         ) : null}
         {channel.manualOverride ? (
-          <StatusPill tone="warning" style={{ fontSize: 10 }}>
-      手动配置
-     </StatusPill>
+          <StatusPill tone="warning" style={{ fontSize: 10 }}>{tr('手动配置')}</StatusPill>
         ) : null}
       </div>
       <div style={{ fontSize: 11, color: 'var(--color-text-secondary)', whiteSpace: 'nowrap' }}>
-        成功/失败 <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>{channel.successCount || 0}</span>
+        {tr('成功/失败')} <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>{channel.successCount || 0}</span>
         <span style={{ color: 'var(--color-text-muted)', margin: '0 2px' }}>/</span>
         <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>{channel.failCount || 0}</span>
       </div>
@@ -570,7 +549,6 @@ function RouteCardInner({
     : undefined;
   const showAddChannelButton = !readOnlyRoute && !channelManagementDisabled;
   const showMissingTokenHints = !channelManagementDisabled && (missingTokenSiteItems.length > 0 || missingTokenGroupItems.length > 0);
-  const routeUnits = collectRouteUnits(channels);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -735,8 +713,8 @@ function RouteCardInner({
               onLabel={tr('启用')}
               offLabel={tr('禁用')}
               onClick={(e) => { e.stopPropagation(); onToggleEnabled(route); }}
-              tooltipOn="点击禁用此路由"
-              tooltipOff="点击启用此路由"
+              tooltipOn={tr('点击禁用此路由')}
+              tooltipOff={tr('点击启用此路由')}
               style={{ flexShrink: 0, fontSize: 11 }}
             />
           )}
@@ -760,7 +738,7 @@ function RouteCardInner({
                     }}
                     data-tooltip={`${route.cooldownChannelCount} 个通道冷却中`}
                   >
-                    冷却 {route.cooldownChannelCount}
+                    {tr('冷却')} {route.cooldownChannelCount}
                   </span>
                 ) : null}
               </span>
@@ -778,10 +756,8 @@ function RouteCardInner({
                     color: 'var(--color-text-primary)',
                     fontWeight: 600,
                   }}
-                  data-tooltip="单通道路由：无冗余，该通道冷却即整路由不可用"
-                >
-                  单通道
-                </span>
+                  data-tooltip={tr('单通道路由：无冗余，该通道冷却即整路由不可用')}
+                >{tr('单通道')}</span>
               ) : null}
               {(route.cooldownChannelCount || 0) > 0 ? (
                 <span
@@ -869,8 +845,8 @@ function RouteCardInner({
                 onLabel={tr('启用')}
                 offLabel={tr('禁用')}
                 onClick={(e) => { e.stopPropagation(); onToggleEnabled(route); }}
-                tooltipOn="点击禁用此路由"
-                tooltipOff="点击启用此路由"
+                tooltipOn={tr('点击禁用此路由')}
+                tooltipOff={tr('点击启用此路由')}
                 style={{ fontSize: 11 }}
               />
             )}
@@ -893,7 +869,7 @@ function RouteCardInner({
                     }}
                     data-tooltip={`${route.cooldownChannelCount} 个通道冷却中`}
                   >
-                    冷却 {route.cooldownChannelCount}
+                    {tr('冷却')} {route.cooldownChannelCount}
                   </span>
                 ) : null}
                 </span>
@@ -913,7 +889,7 @@ function RouteCardInner({
                     }}
                     data-tooltip={`${route.cooldownChannelCount} 个通道冷却中`}
                   >
-                    冷却 {route.cooldownChannelCount}
+                    {tr('冷却')} {route.cooldownChannelCount}
                   </span>
                 ) : null}
               </span>
@@ -1022,7 +998,7 @@ function RouteCardInner({
                     }}
                     data-tooltip={`${route.cooldownChannelCount} 个通道冷却中`}
                   >
-                    冷却 {route.cooldownChannelCount}
+                    {tr('冷却')} {route.cooldownChannelCount}
                   </span>
                 ) : null}
               </span>
@@ -1075,32 +1051,6 @@ function RouteCardInner({
         </div>
       ) : null}
 
-      {routeUnits.length > 0 ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
-          <div style={{ fontSize: 11.5, color: 'var(--color-text-secondary)' }}>
-            OAuth 路由池
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            {routeUnits.map((routeUnit) => (
-              <span
-                key={`route-unit-${String(routeUnit.id)}`}
-                className="badge badge-muted"
-                style={{
-                  fontSize: 10.5,
-                  maxWidth: '100%',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-                title={`${routeUnit.name?.trim() || 'OAuth 路由池'} · ${routeUnit.memberCount} 个成员 · ${getRouteUnitStrategyLabel(routeUnit.strategy)}`}
-              >
-                {(routeUnit.name?.trim() || 'OAuth 路由池')} · {routeUnit.memberCount} 个成员 · {getRouteUnitStrategyLabel(routeUnit.strategy)}
-              </span>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
       {/* Missing token hints */}
       <div style={{ display: 'flex', alignItems: compact ? 'stretch' : 'flex-start', flexDirection: compact ? 'column' : 'row', justifyContent: 'space-between', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
         {showMissingTokenHints ? (
@@ -1131,7 +1081,7 @@ function RouteCardInner({
                     type="button"
                     onClick={() => onCreateTokenForMissing(item.accountId, route.modelPattern)}
                     className="badge badge-warning missing-token-group-tag"
-                    data-tooltip={`缺少分组：${item.missingGroups.join('、') || '未知'}${item.availableGroups.length > 0 ? `；已覆盖：${item.availableGroups.join('、')}` : ''}${item.groupCoverageUncertain ? '；当前分组覆盖存在不确定性' : ''}`}
+                    data-tooltip={`${tr('缺少分组')}：${item.missingGroups.join('、') || tr('未知')}${item.availableGroups.length > 0 ? `${tr('；已覆盖：')}${item.availableGroups.join('、')}` : ''}${item.groupCoverageUncertain ? tr('；当前分组覆盖存在不确定性') : ''}`}
                     style={{ fontSize: 10.5, cursor: 'pointer' }}
                   >
                     {item.siteName}

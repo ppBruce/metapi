@@ -1,5 +1,33 @@
-import { sqliteTable, text, integer, real, uniqueIndex, index, check } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, uniqueIndex, index, check, customType } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
+import { encryptCredential, readCredential } from '../shared/credentialCrypto.js';
+
+/**
+ * Transparent at-rest encryption for credential columns. Legacy plaintext
+ * values pass through on read (forward compatibility) and are re-encrypted by
+ * the boot migration; every new write is sealed.
+ */
+function encryptedText(purpose: import('../shared/credentialCrypto.js').CredentialPurpose, deterministic = false) {
+  return customType<{ data: string; driverData: string }>({
+    dataType() {
+      return 'text';
+    },
+    toDriver(value: string): string {
+      return value.trim() === '' ? value : encryptCredential(value, purpose, { deterministic });
+    },
+    fromDriver(value: string): string {
+      return value.trim() === '' ? value : readCredential(value, purpose);
+    },
+  });
+}
+
+const siteApiKeyText = encryptedText('site.api_key');
+const accountAccessTokenText = encryptedText('account.access_token');
+const accountApiTokenText = encryptedText('account.api_token');
+const accountTokenText = encryptedText('account_token.token');
+// Downstream keys are looked up by equality on every request; deterministic
+// ciphertext keeps that query indexable without a separate hash column.
+const downstreamKeyText = encryptedText('downstream.key', true);
 
 export const sites = sqliteTable('sites', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -16,7 +44,7 @@ export const sites = sqliteTable('sites', {
   isPinned: integer('is_pinned', { mode: 'boolean' }).default(false),
   sortOrder: integer('sort_order').default(0),
   globalWeight: real('global_weight').default(1),
-  apiKey: text('api_key'),
+  apiKey: siteApiKeyText('api_key'),
   postRefreshProbeEnabled: integer('post_refresh_probe_enabled', { mode: 'boolean' }).default(false),
   postRefreshProbeModel: text('post_refresh_probe_model').default(''),
   postRefreshProbeScope: text('post_refresh_probe_scope').default('single'),
@@ -84,8 +112,8 @@ export const accounts = sqliteTable('accounts', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
   username: text('username'),
-  accessToken: text('access_token').notNull(),
-  apiToken: text('api_token'),
+  accessToken: accountAccessTokenText('access_token').notNull(),
+  apiToken: accountApiTokenText('api_token'),
   balance: real('balance').default(0),
   balanceUsed: real('balance_used').default(0),
   quota: real('quota').default(0),
@@ -97,9 +125,6 @@ export const accounts = sqliteTable('accounts', {
   checkinEnabled: integer('checkin_enabled', { mode: 'boolean' }).default(true),
   lastCheckinAt: text('last_checkin_at'),
   lastBalanceRefresh: text('last_balance_refresh'),
-  oauthProvider: text('oauth_provider'),
-  oauthAccountKey: text('oauth_account_key'),
-  oauthProjectId: text('oauth_project_id'),
   extraConfig: text('extra_config'), // JSON string
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),
@@ -107,15 +132,13 @@ export const accounts = sqliteTable('accounts', {
   siteIdIdx: index('accounts_site_id_idx').on(table.siteId),
   statusIdx: index('accounts_status_idx').on(table.status),
   siteStatusIdx: index('accounts_site_status_idx').on(table.siteId, table.status),
-  oauthProviderIdx: index('accounts_oauth_provider_idx').on(table.oauthProvider),
-  oauthIdentityIdx: index('accounts_oauth_identity_idx').on(table.oauthProvider, table.oauthAccountKey, table.oauthProjectId),
 }));
 
 export const accountTokens = sqliteTable('account_tokens', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
-  token: text('token').notNull(),
+  token: accountTokenText('token').notNull(),
   tokenGroup: text('token_group'),
   valueStatus: text('value_status').notNull().default('ready'),
   source: text('source').default('manual'), // 'manual' | 'sync' | 'legacy'
@@ -152,6 +175,12 @@ export const modelAvailability = sqliteTable('model_availability', {
   isManual: integer('is_manual', { mode: 'boolean' }).default(false),
   latencyMs: integer('latency_ms'),
   checkedAt: text('checked_at').default(sql`(datetime('now'))`),
+  // Connectivity health window: a single failed request is no longer enough to
+  // soft-avoid a channel (see routeConnectivityPolicy).
+  consecutiveHardFailures: integer('consecutive_hard_failures').notNull().default(0),
+  consecutiveSuccesses: integer('consecutive_successes').notNull().default(0),
+  hardFailureBits: integer('hard_failure_bits').notNull().default(0),
+  hardFailureSamples: integer('hard_failure_samples').notNull().default(0),
 }, (table) => ({
   accountModelUnique: uniqueIndex('model_availability_account_model_unique').on(table.accountId, table.modelName),
   accountAvailableIdx: index('model_availability_account_available_idx').on(table.accountId, table.available),
@@ -199,50 +228,11 @@ export const routeGroupSources = sqliteTable('route_group_sources', {
   sourceRouteIdx: index('route_group_sources_source_route_id_idx').on(table.sourceRouteId),
 }));
 
-export const oauthRouteUnits = sqliteTable('oauth_route_units', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
-  provider: text('provider').notNull(),
-  name: text('name').notNull(),
-  strategy: text('strategy').notNull().default('round_robin'),
-  enabled: integer('enabled', { mode: 'boolean' }).default(true),
-  createdAt: text('created_at').default(sql`(datetime('now'))`),
-  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
-}, (table) => ({
-  siteProviderIdx: index('oauth_route_units_site_provider_idx').on(table.siteId, table.provider),
-  enabledIdx: index('oauth_route_units_enabled_idx').on(table.enabled),
-}));
-
-export const oauthRouteUnitMembers = sqliteTable('oauth_route_unit_members', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  unitId: integer('unit_id').notNull().references(() => oauthRouteUnits.id, { onDelete: 'cascade' }),
-  accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
-  sortOrder: integer('sort_order').default(0),
-  successCount: integer('success_count').default(0),
-  failCount: integer('fail_count').default(0),
-  totalLatencyMs: integer('total_latency_ms').default(0),
-  totalCost: real('total_cost').default(0),
-  lastUsedAt: text('last_used_at'),
-  lastSelectedAt: text('last_selected_at'),
-  lastFailAt: text('last_fail_at'),
-  consecutiveFailCount: integer('consecutive_fail_count').notNull().default(0),
-  cooldownLevel: integer('cooldown_level').notNull().default(0),
-  cooldownUntil: text('cooldown_until'),
-  createdAt: text('created_at').default(sql`(datetime('now'))`),
-  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
-}, (table) => ({
-  unitAccountUnique: uniqueIndex('oauth_route_unit_members_unit_account_unique').on(table.unitId, table.accountId),
-  accountUnique: uniqueIndex('oauth_route_unit_members_account_unique').on(table.accountId),
-  unitSortIdx: index('oauth_route_unit_members_unit_sort_idx').on(table.unitId, table.sortOrder),
-  unitCooldownIdx: index('oauth_route_unit_members_unit_cooldown_idx').on(table.unitId, table.cooldownUntil),
-}));
-
 export const routeChannels = sqliteTable('route_channels', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   routeId: integer('route_id').notNull().references(() => tokenRoutes.id, { onDelete: 'cascade' }),
   accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
   tokenId: integer('token_id').references(() => accountTokens.id, { onDelete: 'set null' }),
-  oauthRouteUnitId: integer('oauth_route_unit_id'),
   sourceModel: text('source_model'),
   priority: integer('priority').default(0),
   weight: integer('weight').default(10),
@@ -263,7 +253,6 @@ export const routeChannels = sqliteTable('route_channels', {
   routeIdIdx: index('route_channels_route_id_idx').on(table.routeId),
   accountIdIdx: index('route_channels_account_id_idx').on(table.accountId),
   tokenIdIdx: index('route_channels_token_id_idx').on(table.tokenId),
-  oauthRouteUnitIdx: index('route_channels_oauth_route_unit_id_idx').on(table.oauthRouteUnitId),
   routeEnabledIdx: index('route_channels_route_enabled_idx').on(table.routeId, table.enabled),
   routeTokenIdx: index('route_channels_route_token_idx').on(table.routeId, table.tokenId),
 }));
@@ -563,7 +552,7 @@ export const modelDayUsage = sqliteTable('model_day_usage', {
 export const downstreamApiKeys = sqliteTable('downstream_api_keys', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: text('name').notNull(),
-  key: text('key').notNull(),
+  key: downstreamKeyText('key').notNull(),
   description: text('description'),
   groupName: text('group_name'),
   tags: text('tags'), // JSON array<string>

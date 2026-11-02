@@ -1,4 +1,5 @@
 import { createProxyStreamLifecycle } from '../../shared/protocolLifecycle.js';
+import { resolveProxyStreamIdleTimeoutMs } from '../../../config.js';
 import { type ParsedSseEvent } from '../../shared/normalized.js';
 import { completeResponsesStream, createOpenAiResponsesAggregateState, failResponsesStream, serializeConvertedResponsesEvents } from './aggregator.js';
 import {
@@ -293,6 +294,13 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
         pullEvents: (buffer) => openAiResponsesStream.pullSseEvents(buffer),
         handleEvent: handleEventBlock,
         onEof: closeOut,
+        idleTimeoutMs: resolveProxyStreamIdleTimeoutMs(),
+        onFirstByteTimeout: (elapsedMs) => {
+          // Nothing in the per-site first-byte estimator reaches this read loop, so the
+          // configured ceiling is the only bound: surface it when it fires, otherwise an
+          // upstream that opens a stream and goes quiet looks like a clean early EOF.
+          console.warn(`[proxy-stream/responses] no first byte within ${elapsedMs}ms for model ${input.modelName ?? 'unknown'}`);
+        },
       });
       await lifecycle.run();
       return terminalResult;

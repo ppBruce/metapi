@@ -8,6 +8,7 @@ import {
   matchesTokenRouteModelPattern,
   parseTokenRouteRegexPattern,
 } from '../../../shared/tokenRoutePatterns.js';
+import { tr } from '../../i18n.js';
 
 export function isRegexModelPattern(modelPattern: string): boolean {
   return isTokenRouteRegexPattern(modelPattern);
@@ -39,6 +40,18 @@ export function isRouteGroup(route: Pick<RouteRow | RouteSummaryRow, 'modelPatte
     // their public group title. A titled route is presented as a group in the
     // management UI, so keep it in the group section regardless of its pattern.
     || !!displayName;
+}
+
+/**
+ * Route-list sort buckets: 0 = wildcard/regex patterns, 1 = explicit group
+ * aggregation, 2 = single exact model. Groups are structural containers, so a
+ * group with few channels must not sink below hundreds of single-model rows
+ * just because the secondary sort key is channel count.
+ */
+export function routeKindRank(route: Pick<RouteRow | RouteSummaryRow, 'modelPattern' | 'routeMode' | 'sourceRouteIds' | 'displayName'>): number {
+  if (isExplicitGroupRoute(route)) return 1;
+  if ((route.displayName || '').trim() || (Array.isArray(route.sourceRouteIds) && route.sourceRouteIds.length > 0)) return 1;
+  return isExactModelPattern(route.modelPattern) ? 2 : 0;
 }
 
 export function parseRegexModelPattern(modelPattern: string): { regex: { test(value: string): boolean } | null; error: string | null } {
@@ -193,7 +206,7 @@ export function getChannelDecisionState(
     return {
       probability: 0,
       showBar: true,
-      reasonText: loadingDecision ? '计算中...' : '实时决策',
+      reasonText: loadingDecision ? tr('计算中...') : tr('实时决策'),
       reasonColor: 'var(--color-text-muted)',
     };
   }
@@ -202,7 +215,7 @@ export function getChannelDecisionState(
     return {
       probability: 0,
       showBar: true,
-      reasonText: loadingDecision ? '计算中...' : '无可用通道',
+      reasonText: loadingDecision ? tr('计算中...') : tr('无可用通道'),
       reasonColor: 'var(--color-text-muted)',
     };
   }
@@ -211,7 +224,7 @@ export function getChannelDecisionState(
     return {
       probability: 0,
       showBar: true,
-      reasonText: '失败避让',
+      reasonText: tr('失败避让'),
       reasonColor: 'var(--color-warning)',
     };
   }
@@ -223,7 +236,7 @@ export function getChannelDecisionState(
       return {
         probability: 0,
         showBar: true,
-        reasonText: '冷却中',
+        reasonText: tr('冷却中'),
         reasonColor: 'var(--color-danger)',
       };
     }
@@ -231,7 +244,7 @@ export function getChannelDecisionState(
     return {
       probability: 0,
       showBar: true,
-      reasonText: candidate.reason || '不可用',
+      reasonText: candidate.reason || tr('不可用'),
       reasonColor: 'var(--color-text-muted)',
     };
   }
@@ -242,7 +255,7 @@ export function getChannelDecisionState(
       return {
         probability: 0,
         showBar: false,
-        reasonText: '近期失败',
+        reasonText: tr('近期失败'),
         reasonColor: 'var(--color-warning)',
       };
     }
@@ -250,7 +263,7 @@ export function getChannelDecisionState(
     return {
       probability: 0,
       showBar: false,
-      reasonText: candidate.reason || '概率为 0%',
+      reasonText: candidate.reason || tr('概率为 0%'),
       reasonColor: 'var(--color-text-muted)',
     };
   }
